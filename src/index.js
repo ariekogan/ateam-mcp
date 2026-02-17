@@ -3,27 +3,28 @@
 /**
  * ADAS MCP Server
  * Build, validate, and deploy multi-agent solutions from any AI environment.
+ *
+ * Transports:
+ *   --http [port]   Start Streamable HTTP server (default port 3100)
+ *   (default)       Start stdio transport for Claude Code, Cursor, etc.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
-import { tools, handleToolCall } from "./tools.js";
+import { createServer } from "./server.js";
 
-const server = new Server(
-  { name: "ateam-mcp", version: "0.1.0" },
-  { capabilities: { tools: {} } }
-);
+const httpFlag = process.argv.includes("--http");
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  return handleToolCall(name, args);
-});
-
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (httpFlag) {
+  // ─── HTTP transport (for ChatGPT, remote clients) ─────────────
+  const { startHttpServer } = await import("./http.js");
+  const portArg = process.argv[process.argv.indexOf("--http") + 1];
+  const port = portArg && !portArg.startsWith("-") ? parseInt(portArg, 10) : 3100;
+  startHttpServer(port);
+} else {
+  // ─── Stdio transport (for Claude Code, Cursor, Windsurf, VS Code) ──
+  const { StdioServerTransport } = await import(
+    "@modelcontextprotocol/sdk/server/stdio.js"
+  );
+  const server = createServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
