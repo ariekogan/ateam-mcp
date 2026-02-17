@@ -22,10 +22,11 @@ Ship a working MCP server that lets any AI assistant (ChatGPT, Claude, Cursor, W
 - Published: `@ateam-ai/mcp@0.1.2`
 - Install: `npx -y @ateam-ai/mcp`
 
-### Phase 5 — Marketplaces (partial) ✅
+### Phase 5 — Marketplaces ✅
 - **Official MCP Registry**: Published (`io.github.ariekogan/ateam-mcp`)
 - **awesome-mcp-servers**: PR open — https://github.com/punkpeye/awesome-mcp-servers/pull/2097
-- **Smithery CLI**: Authenticated, namespace needs web creation
+- **Smithery**: Published & public — https://smithery.ai/servers/ateam-ai/ateam (12 tools, score 43/100)
+- **MCP Registry config**: Added to repo (`registry.yaml`), bumped to v0.1.2
 
 ### Phase 7 — Infrastructure ✅
 - All three services run as macOS launchd agents (auto-start on boot, auto-restart on crash)
@@ -109,6 +110,7 @@ curl https://api.ateam-ai.com/health
 | npm user | `ariekogan` |
 | MCP Registry name | `io.github.ariekogan/ateam-mcp` |
 | GitHub repo | `ariekogan/ateam-mcp` |
+| Smithery | `ateam-ai/ateam` — https://smithery.ai/servers/ateam-ai/ateam |
 
 ---
 
@@ -117,7 +119,7 @@ curl https://api.ateam-ai.com/health
 These require browser/web form submissions and can't be automated from CLI:
 
 ### Marketplace Submissions
-- [ ] **Smithery** — Go to https://smithery.ai/new → enter `https://mcp.ateam-ai.com/mcp` → Smithery auto-scans tools and lists the server
+- [x] **Smithery** — Published & public at https://smithery.ai/servers/ateam-ai/ateam
 - [ ] **PulseMCP** — Go to https://www.pulsemcp.com/use-cases/submit → fill form (name: ateam-mcp, URL: https://github.com/ariekogan/ateam-mcp, npm: @ateam-ai/mcp)
 - [ ] **mcp.so** — Go to https://mcp.so → click "Submit" in nav → fill form
 - [ ] **mcpservers.org** — Go to https://mcpservers.org/submit → fill form
@@ -170,5 +172,5 @@ These require browser/web form submissions and can't be automated from CLI:
 | **M1: Works locally** — Claude Code calls adas_deploy_solution → solution runs | ✅ Done |
 | **M2: Works for ChatGPT** — ChatGPT user pastes URL → deploys through chat | ✅ Done |
 | **M3: Published on npm** — `npx @ateam-ai/mcp` works anywhere | ✅ Done |
-| **M4: Discoverable** — Listed on MCP Registry + community directories | ✅ Registry + PR open |
+| **M4: Discoverable** — Listed on MCP Registry + community directories | ✅ Registry + Smithery + PR open |
 | **M5: Self-service** — New dev installs, gets key, deploys first solution < 10 min | ⬜ Pending |

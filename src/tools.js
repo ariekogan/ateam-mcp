@@ -1,6 +1,6 @@
 /**
  * ADAS MCP tool definitions and handlers.
- * 12 tools covering the full ADAS External Agent API.
+ * 13 tools covering the full ADAS External Agent API.
  */
 
 import { get, post, patch, del } from "./api.js";
@@ -23,6 +23,15 @@ export const tools = [
         },
       },
       required: ["topic"],
+    },
+  },
+  {
+    name: "adas_get_workflows",
+    description:
+      "Get the builder workflows — step-by-step state machines for building skills and solutions. Use this to guide users through the entire build process conversationally. Returns phases, what to ask, what to build, exit criteria, and tips for each stage.",
+    inputSchema: {
+      type: "object",
+      properties: {},
     },
   },
   {
@@ -260,6 +269,8 @@ const EXAMPLE_PATHS = {
 
 const handlers = {
   adas_get_spec: async ({ topic }) => get(SPEC_PATHS[topic]),
+
+  adas_get_workflows: async () => get("/spec/workflows"),
 
   adas_get_examples: async ({ type }) => get(EXAMPLE_PATHS[type]),
 

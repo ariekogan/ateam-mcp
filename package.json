@@ -1,6 +1,6 @@
 {
   "name": "@ateam-ai/mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "mcpName": "io.github.ariekogan/ateam-mcp",
   "description": "ADAS MCP Server — build, validate, and deploy multi-agent solutions from any AI environment",
   "type": "module",
