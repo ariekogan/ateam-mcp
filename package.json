@@ -1,10 +1,11 @@
 {
   "name": "@ateam-ai/mcp",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "mcpName": "io.github.ariekogan/ateam-mcp",
   "description": "ADAS MCP Server — build, validate, and deploy multi-agent solutions from any AI environment",
   "type": "module",
   "bin": {
-    "ateam-mcp": "./src/index.js"
+    "ateam-mcp": "src/index.js"
   },
   "main": "./src/index.js",
   "scripts": {
@@ -23,9 +24,14 @@
   ],
   "author": "A-Team AI",
   "license": "MIT",
+  "files": [
+    "src/",
+    "README.md",
+    ".env.example"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/ariekogan/ateam-mcp.git"
+    "url": "git+https://github.com/ariekogan/ateam-mcp.git"
   },
   "engines": {
     "node": ">=18.0.0"
