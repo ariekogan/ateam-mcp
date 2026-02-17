@@ -27,6 +27,89 @@ Ship a working MCP server that lets any AI assistant (ChatGPT, Claude, Cursor, W
 - **awesome-mcp-servers**: PR open — https://github.com/punkpeye/awesome-mcp-servers/pull/2097
 - **Smithery CLI**: Authenticated, namespace needs web creation
 
+### Phase 7 — Infrastructure ✅
+- All three services run as macOS launchd agents (auto-start on boot, auto-restart on crash)
+- Logs written to `~/Library/Logs/`
+- See "Infrastructure" section below for full details
+
+---
+
+## Infrastructure — What's Running on mac1
+
+### Services (launchd)
+
+All services are macOS Launch Agents in `~/Library/LaunchAgents/`. They start on boot and auto-restart if they crash.
+
+| Service | Plist file | What it does | Port |
+|---|---|---|---|
+| **Cloudflare Tunnel** | `com.ateam-ai.cloudflared.plist` | Routes `api.ateam-ai.com` → :3200 and `mcp.ateam-ai.com` → :3101 | — |
+| **MCP HTTP Server** | `com.ateam-ai.mcp-http.plist` | Streamable HTTP MCP endpoint for ChatGPT/web clients | 3101 |
+| **ADAS API Server** | `com.ateam-ai.adas-api.plist` | ADAS Skill Validator API (backend) | 3200 |
+
+### Commands to manage services
+
+```bash
+# Check status of all ateam services
+launchctl list | grep ateam
+
+# Stop a service
+launchctl unload ~/Library/LaunchAgents/com.ateam-ai.cloudflared.plist
+
+# Start a service
+launchctl load ~/Library/LaunchAgents/com.ateam-ai.cloudflared.plist
+
+# Restart a service (unload + load)
+launchctl unload ~/Library/LaunchAgents/com.ateam-ai.mcp-http.plist && launchctl load ~/Library/LaunchAgents/com.ateam-ai.mcp-http.plist
+
+# View logs
+tail -f ~/Library/Logs/cloudflared.log
+tail -f ~/Library/Logs/ateam-mcp-http.log
+tail -f ~/Library/Logs/adas-api.log
+
+# View error logs
+tail -f ~/Library/Logs/cloudflared.err.log
+tail -f ~/Library/Logs/ateam-mcp-http.err.log
+tail -f ~/Library/Logs/adas-api.err.log
+```
+
+### Health checks
+
+```bash
+# MCP HTTP server
+curl https://mcp.ateam-ai.com/health
+
+# ADAS API server
+curl https://api.ateam-ai.com/health
+```
+
+### File locations
+
+| What | Path |
+|---|---|
+| MCP server code | `/Users/arie/Projects/ateam-mcp/` |
+| ADAS API code | `/Users/arie/Projects/adas_mcp_toolbox_builder/packages/skill-validator/` |
+| Cloudflare tunnel config | `~/.cloudflared/config.yml` |
+| Cloudflare tunnel credentials | `~/.cloudflared/f5642a85-*.json` |
+| LaunchAgent plists | `~/Library/LaunchAgents/com.ateam-ai.*.plist` |
+| Service logs | `~/Library/Logs/cloudflared.log`, `ateam-mcp-http.log`, `adas-api.log` |
+
+### DNS / Domains
+
+| Domain | Routes to | Via |
+|---|---|---|
+| `api.ateam-ai.com` | localhost:3200 | Cloudflare Tunnel `adas-api` |
+| `mcp.ateam-ai.com` | localhost:3101 | Cloudflare Tunnel `adas-api` |
+
+### npm / Registry
+
+| What | Value |
+|---|---|
+| npm package | `@ateam-ai/mcp` |
+| npm org | `@ateam-ai` |
+| npm user | `ariekogan` |
+| MCP Registry name | `io.github.ariekogan/ateam-mcp` |
+| GitHub repo | `ariekogan/ateam-mcp` |
+
 ---
 
 ## Manual Action Items (Arie)
@@ -70,11 +153,11 @@ These require browser/web form submissions and can't be automated from CLI:
 - [ ] **6.2** API key provisioning (self-service signup?)
 - [ ] **6.3** Example prompts library (customer support, document processing, etc.)
 
-### Phase 7 — Infrastructure
-*Goal: api.ateam-ai.com stays up reliably*
+### Phase 7 — Infrastructure (remaining)
+*Goal: production reliability*
 
-- [ ] **7.1** Run cloudflared as system service (auto-start on boot)
-- [ ] **7.2** Uptime monitoring (health checks, alerts)
+- [x] **7.1** Run all services as launchd agents (auto-start, auto-restart)
+- [ ] **7.2** Uptime monitoring (health checks, alerts — UptimeRobot or similar)
 - [ ] **7.3** Plan migration to cloud deployment for production reliability
 - [ ] **7.4** OAuth / multi-tenant support (when user demand requires per-user isolation)
 
