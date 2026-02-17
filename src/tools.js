@@ -70,6 +70,7 @@ export const tools = [
         },
         skills: {
           type: "array",
+          items: { type: "object" },
           description: "Array of skill definitions included in the solution",
         },
       },
@@ -89,10 +90,12 @@ export const tools = [
         },
         skills: {
           type: "array",
+          items: { type: "object" },
           description: "Array of full skill definitions",
         },
         connectors: {
           type: "array",
+          items: { type: "object" },
           description: "Array of connector metadata (id, name, transport, command, args)",
         },
         mcp_store: {
