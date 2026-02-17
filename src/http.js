@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import { createServer } from "./server.js";
+import { clearSession } from "./api.js";
 
 // Active sessions
 const transports = {};
@@ -32,9 +33,11 @@ export function startHttpServer(port = 3100) {
         // Reuse existing session
         transport = transports[sessionId];
       } else if (!sessionId && isInitializeRequest(req.body)) {
-        // New session
+        // New session — generate ID upfront so we can bind it to the server
+        const newSessionId = randomUUID();
+
         transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
+          sessionIdGenerator: () => newSessionId,
           onsessioninitialized: (sid) => {
             transports[sid] = transport;
           },
@@ -42,12 +45,13 @@ export function startHttpServer(port = 3100) {
 
         transport.onclose = () => {
           const sid = transport.sessionId;
-          if (sid && transports[sid]) {
+          if (sid) {
             delete transports[sid];
+            clearSession(sid); // drop per-session credentials
           }
         };
 
-        const server = createServer();
+        const server = createServer(newSessionId);
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
         return;
@@ -107,6 +111,7 @@ export function startHttpServer(port = 3100) {
         await transports[sid].close();
       } catch {}
       delete transports[sid];
+      clearSession(sid);
     }
     process.exit(0);
   });

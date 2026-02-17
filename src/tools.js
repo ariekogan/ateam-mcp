@@ -1,13 +1,35 @@
 /**
  * ADAS MCP tool definitions and handlers.
- * 13 tools covering the full ADAS External Agent API.
+ * 14 tools covering the full ADAS External Agent API + auth.
  */
 
-import { get, post, patch, del } from "./api.js";
+import {
+  get, post, patch, del,
+  setSessionCredentials, isAuthenticated, getCredentials,
+} from "./api.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
+  {
+    name: "adas_auth",
+    description:
+      "Authenticate with ADAS. Required before deploying or modifying solutions. Provide your API key and tenant name. Read-only operations (spec, examples, validate) work without auth.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        api_key: {
+          type: "string",
+          description: "Your ADAS API key (e.g., adas_xxxxx)",
+        },
+        tenant: {
+          type: "string",
+          description: "Tenant name (e.g., dev, main)",
+        },
+      },
+      required: ["api_key", "tenant"],
+    },
+  },
   {
     name: "adas_get_spec",
     description:
@@ -89,7 +111,7 @@ export const tools = [
   {
     name: "adas_deploy_solution",
     description:
-      "Deploy a complete solution to ADAS Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. This is the main deployment action.",
+      "Deploy a complete solution to ADAS Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. This is the main deployment action. Requires authentication (call adas_auth first if not using env vars).",
     inputSchema: {
       type: "object",
       properties: {
@@ -118,7 +140,7 @@ export const tools = [
   },
   {
     name: "adas_deploy_skill",
-    description: "Deploy a single skill into an existing solution.",
+    description: "Deploy a single skill into an existing solution. Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -136,7 +158,7 @@ export const tools = [
   },
   {
     name: "adas_deploy_connector",
-    description: "Deploy a connector — registers in the Skill Builder catalog and connects in ADAS Core.",
+    description: "Deploy a connector — registers in the Skill Builder catalog and connects in ADAS Core. Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -184,7 +206,7 @@ export const tools = [
   {
     name: "adas_update",
     description:
-      "Update a deployed solution or skill incrementally using PATCH. Supports dot notation for scalar fields and _push/_delete/_update for arrays.",
+      "Update a deployed solution or skill incrementally using PATCH. Supports dot notation for scalar fields and _push/_delete/_update for arrays. Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -213,7 +235,7 @@ export const tools = [
   {
     name: "adas_redeploy",
     description:
-      "Re-deploy after making updates. Regenerates MCP servers and pushes to ADAS Core.",
+      "Re-deploy after making updates. Regenerates MCP servers and pushes to ADAS Core. Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -267,32 +289,61 @@ const EXAMPLE_PATHS = {
   solution: "/spec/examples/solution",
 };
 
+// Tools that require authentication (write operations)
+const WRITE_TOOLS = new Set([
+  "adas_deploy_solution",
+  "adas_deploy_skill",
+  "adas_deploy_connector",
+  "adas_update",
+  "adas_redeploy",
+  "adas_solution_chat",
+]);
+
 const handlers = {
-  adas_get_spec: async ({ topic }) => get(SPEC_PATHS[topic]),
+  adas_auth: async ({ api_key, tenant }, sessionId) => {
+    setSessionCredentials(sessionId, { tenant, apiKey: api_key });
+    // Verify the key works by listing solutions
+    try {
+      const result = await get("/deploy/solutions", sessionId);
+      return {
+        ok: true,
+        tenant,
+        message: `Authenticated to tenant "${tenant}". ${result.solutions?.length || 0} solution(s) found.`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        tenant,
+        message: `Authentication failed: ${err.message}`,
+      };
+    }
+  },
 
-  adas_get_workflows: async () => get("/spec/workflows"),
+  adas_get_spec: async ({ topic }, sid) => get(SPEC_PATHS[topic], sid),
 
-  adas_get_examples: async ({ type }) => get(EXAMPLE_PATHS[type]),
+  adas_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
 
-  adas_validate_skill: async ({ skill }) => post("/validate/skill", { skill }),
+  adas_get_examples: async ({ type }, sid) => get(EXAMPLE_PATHS[type], sid),
 
-  adas_validate_solution: async ({ solution, skills }) =>
-    post("/validate/solution", { solution, skills }),
+  adas_validate_skill: async ({ skill }, sid) => post("/validate/skill", { skill }, sid),
 
-  adas_deploy_solution: async ({ solution, skills, connectors, mcp_store }) =>
-    post("/deploy/solution", { solution, skills, connectors, mcp_store }),
+  adas_validate_solution: async ({ solution, skills }, sid) =>
+    post("/validate/solution", { solution, skills }, sid),
 
-  adas_deploy_skill: async ({ solution_id, skill }) =>
-    post(`/deploy/solutions/${solution_id}/skills`, { skill }),
+  adas_deploy_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
+    post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid),
 
-  adas_deploy_connector: async ({ connector }) =>
-    post("/deploy/connector", { connector }),
+  adas_deploy_skill: async ({ solution_id, skill }, sid) =>
+    post(`/deploy/solutions/${solution_id}/skills`, { skill }, sid),
 
-  adas_list_solutions: async () => get("/deploy/solutions"),
+  adas_deploy_connector: async ({ connector }, sid) =>
+    post("/deploy/connector", { connector }, sid),
 
-  adas_get_solution: async ({ solution_id, view, skill_id }) => {
+  adas_list_solutions: async (_args, sid) => get("/deploy/solutions", sid),
+
+  adas_get_solution: async ({ solution_id, view, skill_id }, sid) => {
     const base = `/deploy/solutions/${solution_id}`;
-    if (skill_id) return get(`${base}/skills/${skill_id}`);
+    if (skill_id) return get(`${base}/skills/${skill_id}`, sid);
     const paths = {
       definition: `${base}/definition`,
       skills: `${base}/skills`,
@@ -302,30 +353,30 @@ const handlers = {
       validate: `${base}/validate`,
       connectors_health: `${base}/connectors/health`,
     };
-    return get(paths[view]);
+    return get(paths[view], sid);
   },
 
-  adas_update: async ({ solution_id, target, skill_id, updates }) => {
+  adas_update: async ({ solution_id, target, skill_id, updates }, sid) => {
     if (target === "skill") {
-      return patch(`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates });
+      return patch(`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates }, sid);
     }
-    return patch(`/deploy/solutions/${solution_id}`, { state_update: updates });
+    return patch(`/deploy/solutions/${solution_id}`, { state_update: updates }, sid);
   },
 
-  adas_redeploy: async ({ solution_id, skill_id }) => {
+  adas_redeploy: async ({ solution_id, skill_id }, sid) => {
     if (skill_id) {
-      return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {});
+      return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {}, sid);
     }
-    return post(`/deploy/solutions/${solution_id}/redeploy`, {});
+    return post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid);
   },
 
-  adas_solution_chat: async ({ solution_id, message }) =>
-    post(`/deploy/solutions/${solution_id}/chat`, { message }),
+  adas_solution_chat: async ({ solution_id, message }, sid) =>
+    post(`/deploy/solutions/${solution_id}/chat`, { message }, sid),
 };
 
 // ─── Dispatcher ─────────────────────────────────────────────────────
 
-export async function handleToolCall(name, args) {
+export async function handleToolCall(name, args, sessionId) {
   const handler = handlers[name];
   if (!handler) {
     return {
@@ -333,8 +384,24 @@ export async function handleToolCall(name, args) {
       isError: true,
     };
   }
+
+  // Check auth for write operations
+  if (WRITE_TOOLS.has(name) && !isAuthenticated(sessionId)) {
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          error: "Authentication required",
+          message: "This operation requires authentication. Call adas_auth with your API key and tenant first.",
+          hint: "Use adas_auth(api_key, tenant) to authenticate. For stdio transport (Claude Code, Cursor), you can also set ADAS_API_KEY and ADAS_TENANT environment variables.",
+        }, null, 2),
+      }],
+      isError: true,
+    };
+  }
+
   try {
-    const result = await handler(args);
+    const result = await handler(args, sessionId);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
