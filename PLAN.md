@@ -8,8 +8,12 @@ Ship a working MCP server that lets any AI assistant (ChatGPT, Claude, Cursor, W
 - [x] 12 MCP tools defined (spec, examples, validate, deploy, manage)
 - [x] API client (api.js) with GET/POST/PATCH/DELETE
 - [x] MCP stdio server (index.js) using @modelcontextprotocol/sdk
+- [x] HTTP transport (http.js) using StreamableHTTPServerTransport
 - [x] ADAS public API live at api.ateam-ai.com (via Cloudflare Tunnel)
+- [x] MCP HTTP endpoint live at mcp.ateam-ai.com (via Cloudflare Tunnel)
 - [x] README with purpose + distribution guide
+- [x] **ChatGPT integration working** — "Ateam" app created, tools callable from ChatGPT 5.2
+- [x] Claude Code integration working — `claude mcp add ateam` connected + verified
 
 ---
 
