@@ -9,7 +9,7 @@ Ship a working MCP server that lets any AI assistant (ChatGPT, Claude, Cursor, W
 
 ### Phase 1 — Stdio transport ✅
 - Claude Code integration working
-- All 17 tools connected and responding
+- All 14 tools connected and responding
 - Full workflow tested: spec → validate → deploy → manage
 
 ### Phase 2 — HTTP transport (ChatGPT) ✅
@@ -19,123 +19,133 @@ Ship a working MCP server that lets any AI assistant (ChatGPT, Claude, Cursor, W
 
 ### Phase 4 — npm publish ✅
 - @ateam-ai org created on npmjs.com
-- Published: `@ateam-ai/mcp@0.1.2`
+- Published: `@ateam-ai/mcp@0.1.3`
 - Install: `npx -y @ateam-ai/mcp`
 
 ### Phase 5 — Marketplaces ✅
 - **Official MCP Registry**: Published (`io.github.ariekogan/ateam-mcp`)
-- **awesome-mcp-servers**: PR open — https://github.com/punkpeye/awesome-mcp-servers/pull/2097
-- **Smithery**: Published & public — https://smithery.ai/servers/ateam-ai/ateam (12 tools, score 43/100)
-- **MCP Registry config**: Added to repo (`registry.yaml`), bumped to v0.1.2
+- **awesome-mcp-servers**: ✅ Merged — https://github.com/punkpeye/awesome-mcp-servers/pull/2097
+- **Smithery**: Published & public — https://smithery.ai/servers/ateam-ai/ateam
+- **MCP Registry config**: Added to repo (`registry.yaml`), v0.1.3
 
 ### Phase 7 — Infrastructure ✅
-- All three services run as macOS launchd agents (auto-start on boot, auto-restart on crash)
-- Logs written to `~/Library/Logs/`
+- All services run on **mac1** (Docker + launchd agents)
+- Cloudflare tunnel runs on mac1 directly
+- MCP HTTP server runs on mac1 as launchd agent
 - See "Infrastructure" section below for full details
 
 ---
 
 ## Infrastructure — What's Running on mac1
 
-### Services (launchd)
+### Architecture
 
-All services are macOS Launch Agents in `~/Library/LaunchAgents/`. They start on boot and auto-restart if they crash.
+mac1 is the **solution host**. All backend services run there in Docker containers. The Cloudflare tunnel and MCP HTTP server run as native launchd agents on mac1.
 
-| Service | Plist file | What it does | Port |
+```
+Internet → Cloudflare → mac1 tunnel → localhost services
+                                        ├── :3201 Skill Validator (Docker)
+                                        ├── :4311 Skill Builder (Docker)
+                                        ├── :4100 ADAS Core (Docker)
+                                        └── :3101 MCP HTTP Server (native)
+```
+
+### Services
+
+| Service | How it runs | What it does | Port |
 |---|---|---|---|
-| **Cloudflare Tunnel** | `com.ateam-ai.cloudflared.plist` | Routes `api.ateam-ai.com` → :3200 and `mcp.ateam-ai.com` → :3101 | — |
-| **MCP HTTP Server** | `com.ateam-ai.mcp-http.plist` | Streamable HTTP MCP endpoint for ChatGPT/web clients | 3101 |
-| **ADAS API Server** | `com.ateam-ai.adas-api.plist` | ADAS Skill Validator API (backend) | 3200 |
+| **Cloudflare Tunnel** | launchd `com.cloudflare.cloudflared` | Routes api/mcp.ateam-ai.com → localhost | — |
+| **MCP HTTP Server** | launchd `com.ateam-ai.mcp-http` | Streamable HTTP MCP endpoint for ChatGPT | 3101 |
+| **Skill Validator** | Docker `adas_mcp_toolbox_builder-backend-1` | ADAS API (validates + stores skills) | 3201 |
+| **Skill Builder** | Docker (same container) | Generates MCP servers from skill defs | 4311 |
+| **ADAS Core** | Docker `ai-dev-assistant-backend-1` | Runs agent solutions | 4100 |
 
-### Commands to manage services
+### Commands (run via `ssh mac1`)
 
 ```bash
-# Check status of all ateam services
-launchctl list | grep ateam
+# Check launchd services
+launchctl list | grep -E 'cloudflare|ateam'
 
-# Stop a service
-launchctl unload ~/Library/LaunchAgents/com.ateam-ai.cloudflared.plist
+# Check Docker containers
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 
-# Start a service
-launchctl load ~/Library/LaunchAgents/com.ateam-ai.cloudflared.plist
+# Restart cloudflared
+launchctl unload ~/Library/LaunchAgents/com.cloudflare.cloudflared.plist
+launchctl load ~/Library/LaunchAgents/com.cloudflare.cloudflared.plist
 
-# Restart a service (unload + load)
-launchctl unload ~/Library/LaunchAgents/com.ateam-ai.mcp-http.plist && launchctl load ~/Library/LaunchAgents/com.ateam-ai.mcp-http.plist
+# Restart MCP HTTP
+launchctl unload ~/Library/LaunchAgents/com.ateam-ai.mcp-http.plist
+launchctl load ~/Library/LaunchAgents/com.ateam-ai.mcp-http.plist
 
 # View logs
-tail -f ~/Library/Logs/cloudflared.log
-tail -f ~/Library/Logs/ateam-mcp-http.log
-tail -f ~/Library/Logs/adas-api.log
-
-# View error logs
-tail -f ~/Library/Logs/cloudflared.err.log
-tail -f ~/Library/Logs/ateam-mcp-http.err.log
-tail -f ~/Library/Logs/adas-api.err.log
+tail -f /tmp/cloudflared.log
+tail -f /tmp/ateam-mcp-http.log
 ```
 
 ### Health checks
 
 ```bash
+# ADAS API (Skill Validator)
+curl https://api.ateam-ai.com/health
+
 # MCP HTTP server
 curl https://mcp.ateam-ai.com/health
-
-# ADAS API server
-curl https://api.ateam-ai.com/health
 ```
 
-### File locations
+### File locations (on mac1)
 
 | What | Path |
 |---|---|
-| MCP server code | `/Users/arie/Projects/ateam-mcp/` |
-| ADAS API code | `/Users/arie/Projects/adas_mcp_toolbox_builder/packages/skill-validator/` |
+| MCP server code | `~/Projects/ateam-mcp/` |
 | Cloudflare tunnel config | `~/.cloudflared/config.yml` |
 | Cloudflare tunnel credentials | `~/.cloudflared/f5642a85-*.json` |
-| LaunchAgent plists | `~/Library/LaunchAgents/com.ateam-ai.*.plist` |
-| Service logs | `~/Library/Logs/cloudflared.log`, `ateam-mcp-http.log`, `adas-api.log` |
+| cloudflared binary | `~/bin/cloudflared` |
+| LaunchAgent plists | `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist`, `com.ateam-ai.mcp-http.plist` |
 
 ### DNS / Domains
 
 | Domain | Routes to | Via |
 |---|---|---|
-| `api.ateam-ai.com` | localhost:3200 | Cloudflare Tunnel `adas-api` |
-| `mcp.ateam-ai.com` | localhost:3101 | Cloudflare Tunnel `adas-api` |
+| `ateam-ai.com` | Lovable hosting | DNS A record (185.158.133.1) |
+| `www.ateam-ai.com` | Lovable hosting | DNS A record |
+| `api.ateam-ai.com` | mac1 localhost:3201 | Cloudflare Tunnel |
+| `mcp.ateam-ai.com` | mac1 localhost:3101 | Cloudflare Tunnel |
 
 ### npm / Registry
 
 | What | Value |
 |---|---|
-| npm package | `@ateam-ai/mcp` |
+| npm package | `@ateam-ai/mcp` v0.1.3 |
 | npm org | `@ateam-ai` |
 | npm user | `ariekogan` |
 | MCP Registry name | `io.github.ariekogan/ateam-mcp` |
-| GitHub repo | `ariekogan/ateam-mcp` |
+| GitHub repo | `ariekogan/ateam-mcp` (public) |
 | Smithery | `ateam-ai/ateam` — https://smithery.ai/servers/ateam-ai/ateam |
 
 ---
 
 ## Manual Action Items (Arie)
 
-These require browser/web form submissions and can't be automated from CLI:
-
 ### Marketplace Submissions
-- [x] **Smithery** — Published & public at https://smithery.ai/servers/ateam-ai/ateam
-- [ ] **PulseMCP** — Go to https://www.pulsemcp.com/use-cases/submit → fill form (name: ateam-mcp, URL: https://github.com/ariekogan/ateam-mcp, npm: @ateam-ai/mcp)
+- [x] **Smithery** — Published & public
+- [x] **awesome-mcp-servers** — PR merged
+- [ ] **PulseMCP** — Go to https://www.pulsemcp.com/use-cases/submit → fill form
 - [ ] **mcp.so** — Go to https://mcp.so → click "Submit" in nav → fill form
 - [ ] **mcpservers.org** — Go to https://mcpservers.org/submit → fill form
-- [ ] **MCP Market** — Go to https://mcpmarket.com/submit → submit GitHub repo URL + 400x400 PNG logo
-- [ ] **Cline Marketplace** — Create issue at https://github.com/cline/mcp-marketplace/issues/new → provide repo URL + 400x400 PNG logo
+- [ ] **MCP Market** — Go to https://mcpmarket.com/submit → needs 400x400 PNG logo
+- [ ] **Cline Marketplace** — Create issue at https://github.com/cline/mcp-marketplace/issues/new → needs 400x400 PNG logo
 
 ### GitHub Repo
-- [ ] **Make repo public** — Currently private. Go to Settings → Danger Zone → Change visibility → Public
-- [ ] **Add topics** — Add: `mcp`, `model-context-protocol`, `ai-agents`, `multi-agent`, `adas`, `mcp-server`
-- [ ] **Add Glama config** — After awesome-mcp-servers PR merges, add `glama.json` to repo root for claiming ownership
+- [x] **Make repo public** — Done
+- [x] **Add topics** — Done (mcp, model-context-protocol, ai-agents, multi-agent, adas, mcp-server)
+- [x] **Add Glama config** — `glama.json` added to repo root
+- [x] **Add Dockerfile** — Dockerfile added for Docker-based usage
 
 ### npm Token
-- [ ] **Renew npm token before Feb 24, 2026** — Current granular token expires in 7 days. Go to https://www.npmjs.com/settings/ariekogan/tokens to create a new one with 90-day expiry
+- [ ] ⚠️ **Renew npm token before Feb 24, 2026** — Expires in ~6 days! Go to https://www.npmjs.com/settings/ariekogan/tokens
 
 ### ChatGPT App
-- [ ] **Publish ChatGPT app** — Currently in Drafts. When ready for public, go to ChatGPT Settings → Developer → Apps → Ateam → publish from draft to live
+- [ ] **Publish ChatGPT app** — Currently in Drafts. Go to ChatGPT Settings → Developer → Apps → Ateam → publish
 
 ---
 
@@ -172,5 +182,5 @@ These require browser/web form submissions and can't be automated from CLI:
 | **M1: Works locally** — Claude Code calls adas_deploy_solution → solution runs | ✅ Done |
 | **M2: Works for ChatGPT** — ChatGPT user pastes URL → deploys through chat | ✅ Done |
 | **M3: Published on npm** — `npx @ateam-ai/mcp` works anywhere | ✅ Done |
-| **M4: Discoverable** — Listed on MCP Registry + community directories | ✅ Registry + Smithery + PR open |
+| **M4: Discoverable** — Listed on MCP Registry + community directories | ✅ Registry + Smithery + awesome-mcp-servers |
 | **M5: Self-service** — New dev installs, gets key, deploys first solution < 10 min | ⬜ Pending |
