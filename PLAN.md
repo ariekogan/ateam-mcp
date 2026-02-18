@@ -124,7 +124,19 @@ curl https://mcp.ateam-ai.com/health
 
 ---
 
-## Manual Action Items (Arie)
+## 🔴 URGENT — Do This Week
+
+- [ ] ⚠️ **Renew npm token** — Expires **Feb 24, 2026**! Go to https://www.npmjs.com/settings/ariekogan/tokens → create new token → update in `~/.claude.json` and mac1 env
+  - 👤 Arie (requires browser login)
+
+---
+
+## 🟡 Action Items — Arie (manual, needs browser)
+
+### Community / Outreach
+- [ ] **Reply to punkpeye on PR #2097** — He asked: (1) your MCP Discord username for server author flair, (2) claim server on Glama, (3) Dockerfile (done). Go to https://github.com/punkpeye/awesome-mcp-servers/pull/2097
+- [ ] **Join MCP Discord** — Search "MCP Discord" or "Model Context Protocol Discord", join, then share your username with punkpeye
+- [ ] **Claim server on Glama.ai** — Go to https://glama.ai/mcp/servers → find ateam-mcp → click "Claim ownership" (glama.json is already in the repo)
 
 ### Marketplace Submissions
 - [x] **Smithery** — Published & public
@@ -135,28 +147,25 @@ curl https://mcp.ateam-ai.com/health
 - [ ] **MCP Market** — Go to https://mcpmarket.com/submit → needs 400x400 PNG logo
 - [ ] **Cline Marketplace** — Create issue at https://github.com/cline/mcp-marketplace/issues/new → needs 400x400 PNG logo
 
-### GitHub Repo
+### ChatGPT
+- [ ] **Publish ChatGPT app** — Currently in Drafts. Go to ChatGPT Settings → Developer → Apps → Ateam → publish
+
+### GitHub Repo (done)
 - [x] **Make repo public** — Done
 - [x] **Add topics** — Done (mcp, model-context-protocol, ai-agents, multi-agent, adas, mcp-server)
 - [x] **Add Glama config** — `glama.json` added to repo root
 - [x] **Add Dockerfile** — Dockerfile added for Docker-based usage
 
-### npm Token
-- [ ] ⚠️ **Renew npm token before Feb 24, 2026** — Expires in ~6 days! Go to https://www.npmjs.com/settings/ariekogan/tokens
-
-### ChatGPT App
-- [ ] **Publish ChatGPT app** — Currently in Drafts. Go to ChatGPT Settings → Developer → Apps → Ateam → publish
-
 ---
 
-## Remaining Phases
+## 🟢 Action Items — Claude (can do in next session)
 
 ### Phase 3 — Polish & Harden
 *Goal: production-ready quality*
 
-- [ ] **3.1** Error handling & user-friendly messages
+- [x] **3.1** Error handling & user-friendly messages — timeouts, connection errors, HTTP status hints
 - [ ] **3.2** Tool descriptions tuning (test with multiple LLMs)
-- [ ] **3.3** Response formatting (summarize large payloads, structured errors)
+- [x] **3.3** Response formatting — large payload summarization (50k char cap), structured error messages
 
 ### Phase 6 — Onboarding & Developer Experience
 *Goal: new developer goes from zero to deployed solution in under 10 minutes*
@@ -172,6 +181,9 @@ curl https://mcp.ateam-ai.com/health
 - [ ] **7.2** Uptime monitoring (health checks, alerts — UptimeRobot or similar)
 - [ ] **7.3** Plan migration to cloud deployment for production reliability
 - [ ] **7.4** OAuth / multi-tenant support (when user demand requires per-user isolation)
+
+### Fleet — Local File Sync
+- [x] **Sync `skill-vehicle-tracker.yaml`** — Updated `on_max_iterations` from `finalize` to `escalate` in both YAML and JS files
 
 ---
 

@@ -374,6 +374,64 @@ const handlers = {
     post(`/deploy/solutions/${solution_id}/chat`, { message }, sid),
 };
 
+// ─── Response formatting ────────────────────────────────────────────
+
+// Max characters to send back in a single tool response.
+// Larger payloads get summarized to avoid overwhelming LLM context.
+const MAX_RESPONSE_CHARS = 50_000;
+
+/**
+ * Format tool results — summarize oversized payloads.
+ */
+function formatResult(result, toolName) {
+  const json = JSON.stringify(result, null, 2);
+
+  if (json.length <= MAX_RESPONSE_CHARS) {
+    return json;
+  }
+
+  // For large responses, provide a summary + truncated data
+  const summary = summarizeLargeResult(result, toolName);
+  return summary + `\n\n(Response truncated from ${json.length.toLocaleString()} chars. Use more specific queries to get smaller results.)`;
+}
+
+/**
+ * Create a useful summary for large results.
+ */
+function summarizeLargeResult(result, toolName) {
+  // Spec responses — keep content but cap size
+  if (toolName === "adas_get_spec" && result && typeof result === "object") {
+    const keys = Object.keys(result);
+    return JSON.stringify({
+      _note: `ADAS spec with ${keys.length} sections. Content truncated — ask about specific sections for detail.`,
+      sections: keys,
+      ...result,
+    }, null, 2).slice(0, MAX_RESPONSE_CHARS);
+  }
+
+  // Validation results — keep errors/warnings, trim echoed input
+  if ((toolName === "adas_validate_skill" || toolName === "adas_validate_solution") && result) {
+    const slim = { ...result };
+    if (slim.skill) delete slim.skill;
+    if (slim.solution) delete slim.solution;
+    const slimJson = JSON.stringify(slim, null, 2);
+    if (slimJson.length <= MAX_RESPONSE_CHARS) return slimJson;
+  }
+
+  // Export results — summarize structure
+  if (toolName === "adas_get_solution" && result?.skills) {
+    return JSON.stringify({
+      _note: `Solution with ${result.skills.length} skill(s). Use adas_get_solution with skill_id to inspect individual skills.`,
+      solution_id: result.solution?.id || result.id,
+      skill_ids: result.skills.map(s => s.id || s.name),
+      ...result,
+    }, null, 2).slice(0, MAX_RESPONSE_CHARS);
+  }
+
+  // Generic fallback — truncate
+  return JSON.stringify(result, null, 2).slice(0, MAX_RESPONSE_CHARS);
+}
+
 // ─── Dispatcher ─────────────────────────────────────────────────────
 
 export async function handleToolCall(name, args, sessionId) {
@@ -403,11 +461,11 @@ export async function handleToolCall(name, args, sessionId) {
   try {
     const result = await handler(args, sessionId);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: formatResult(result, name) }],
     };
   } catch (err) {
     return {
-      content: [{ type: "text", text: `Error: ${err.message}` }],
+      content: [{ type: "text", text: err.message }],
       isError: true,
     };
   }
