@@ -1,6 +1,6 @@
 /**
  * ADAS MCP tool definitions and handlers.
- * 14 tools covering the full ADAS External Agent API + auth.
+ * 15 tools covering the full ADAS External Agent API + auth + bootstrap.
  */
 
 import {
@@ -11,6 +11,15 @@ import {
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
+  {
+    name: "adas_bootstrap",
+    description:
+      "Call this FIRST after installing A-Team MCP. Returns a structured overview of what A-Team is, what the user can build, and the recommended step-by-step flow. Includes the first questions to ask the user and suggested next tool calls.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
   {
     name: "adas_auth",
     description:
@@ -33,7 +42,7 @@ export const tools = [
   {
     name: "adas_get_spec",
     description:
-      "Get the ADAS specification — schemas, validation rules, system tools, agent guides, and templates. Use this to understand how to build skills and solutions.",
+      "Get the ADAS specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions.",
     inputSchema: {
       type: "object",
       properties: {
@@ -76,7 +85,7 @@ export const tools = [
   {
     name: "adas_validate_skill",
     description:
-      "Validate a skill definition through the 5-stage ADAS validation pipeline. Returns errors and suggestions to fix.",
+      "Validate a skill definition through the 5-stage ADAS validation pipeline. Returns errors and suggestions to fix. Always validate before deploying.",
     inputSchema: {
       type: "object",
       properties: {
@@ -91,7 +100,7 @@ export const tools = [
   {
     name: "adas_validate_solution",
     description:
-      "Validate a solution definition — cross-skill contracts, grant economy, handoffs, and LLM quality scoring.",
+      "Validate a solution definition — cross-skill contracts, grant economy, handoffs, and LLM quality scoring. Always validate before deploying.",
     inputSchema: {
       type: "object",
       properties: {
@@ -111,7 +120,7 @@ export const tools = [
   {
     name: "adas_deploy_solution",
     description:
-      "Deploy a complete solution to ADAS Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. This is the main deployment action. Requires authentication (call adas_auth first if not using env vars).",
+      "Deploy a complete solution to ADAS Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. This is the main deployment action. Always validate first using adas_validate_solution. Requires authentication (call adas_auth first if not using env vars).",
     inputSchema: {
       type: "object",
       properties: {
@@ -300,6 +309,42 @@ const WRITE_TOOLS = new Set([
 ]);
 
 const handlers = {
+  adas_bootstrap: async () => ({
+    product_name: "A-Team (ADAS)",
+    what_this_mcp_is:
+      "A-Team MCP is a collection of tools that lets an AI assistant generate, validate, deploy, and iterate multi-agent Teams on the A-Team/ADAS platform.",
+    core_concepts: [
+      { term: "Skill", meaning: "One agent: role, intents, tools, policies, workflows" },
+      { term: "Solution", meaning: "A Team: multiple skills + routing + grants + handoffs" },
+      { term: "Connector", meaning: "External system integration via MCP tools" },
+      { term: "Deploy", meaning: "Make the Team runnable on ADAS Core" },
+    ],
+    recommended_flow: [
+      { step: 1, title: "Clarify the goal", description: "Understand what the user wants their Team to do", suggested_tools: [] },
+      { step: 2, title: "Generate Team map", description: "Design skills, solution architecture, and connectors", suggested_tools: ["adas_get_spec", "adas_get_examples", "adas_get_workflows"] },
+      { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["adas_validate_skill", "adas_validate_solution"] },
+      { step: 4, title: "Deploy", description: "Push the Team to ADAS Core", suggested_tools: ["adas_auth", "adas_deploy_solution"] },
+      { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["adas_get_solution", "adas_update", "adas_redeploy", "adas_solution_chat"] },
+    ],
+    first_questions: [
+      { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
+      { id: "domain", question: "Which domain fits best?", type: "enum", options: ["ecommerce", "logistics", "enterprise_ops", "other"] },
+      { id: "systems", question: "Which systems should the Team connect to?", type: "multi_select", options: ["slack", "email", "zendesk", "shopify", "jira", "postgres", "custom_api", "none"] },
+      { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
+    ],
+    assistant_instructions: {
+      always: [
+        "Explain Skill vs Solution vs Connector before deploying anything",
+        "Validate before deploy",
+        "Ask discovery questions if goal unclear",
+      ],
+      never: [
+        "Deploy before validation",
+        "Dump raw spec unless requested",
+      ],
+    },
+  }),
+
   adas_auth: async ({ api_key, tenant }, sessionId) => {
     // Auto-extract tenant from key if not provided
     let resolvedTenant = tenant;
