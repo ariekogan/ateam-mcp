@@ -14,7 +14,7 @@ export const tools = [
   {
     name: "adas_auth",
     description:
-      "Authenticate with ADAS. Required before deploying or modifying solutions. Provide your API key and tenant name. Read-only operations (spec, examples, validate) work without auth.",
+      "Authenticate with ADAS. Required before deploying or modifying solutions. The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Read-only operations (spec, examples, validate) work without auth.",
     inputSchema: {
       type: "object",
       properties: {
@@ -320,7 +320,7 @@ const handlers = {
       return {
         ok: false,
         tenant: resolvedTenant,
-        message: `Authentication failed: ${err.message}`,
+        message: `Authentication failed: ${err.message}. The user can get a valid API key at https://mcp.ateam-ai.com/get-api-key`,
       };
     }
   },
@@ -454,11 +454,17 @@ export async function handleToolCall(name, args, sessionId) {
     return {
       content: [{
         type: "text",
-        text: JSON.stringify({
-          error: "Authentication required",
-          message: "This operation requires authentication. Call adas_auth with your API key and tenant first.",
-          hint: "Use adas_auth(api_key, tenant) to authenticate. For stdio transport (Claude Code, Cursor), you can also set ADAS_API_KEY and ADAS_TENANT environment variables.",
-        }, null, 2),
+        text: [
+          "🔐 Authentication required.",
+          "",
+          "This tool needs an API key. Please ask the user to:",
+          "",
+          "1. Get their API key at: https://mcp.ateam-ai.com/get-api-key",
+          "2. Then call: adas_auth(api_key: \"<their key>\")",
+          "",
+          "The key looks like: adas_<tenant>_<32hex>",
+          "The tenant is auto-extracted — no separate tenant parameter needed.",
+        ].join("\n"),
       }],
       isError: true,
     };
