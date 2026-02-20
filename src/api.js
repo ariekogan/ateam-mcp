@@ -18,21 +18,49 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const sessions = new Map();
 
 /**
+ * Parse a tenant-embedded API key.
+ * Format: adas_<tenant>_<32hex>
+ * Legacy: adas_<32hex> (no tenant embedded)
+ * @returns {{ tenant: string|null, isValid: boolean }}
+ */
+export function parseApiKey(key) {
+  if (!key || typeof key !== 'string') return { tenant: null, isValid: false };
+  const match = key.match(/^adas_([a-z0-9][a-z0-9-]{0,28}[a-z0-9])_([0-9a-f]{32})$/);
+  if (match) return { tenant: match[1], isValid: true };
+  const legacy = key.match(/^adas_([0-9a-f]{32})$/);
+  if (legacy) return { tenant: null, isValid: true };
+  return { tenant: null, isValid: false };
+}
+
+/**
  * Set credentials for a session (called by adas_auth tool).
+ * If tenant is not provided, it's auto-extracted from the key.
  */
 export function setSessionCredentials(sessionId, { tenant, apiKey }) {
-  sessions.set(sessionId, { tenant, apiKey });
+  let resolvedTenant = tenant;
+  if (!resolvedTenant && apiKey) {
+    const parsed = parseApiKey(apiKey);
+    if (parsed.tenant) resolvedTenant = parsed.tenant;
+  }
+  sessions.set(sessionId, { tenant: resolvedTenant || "main", apiKey });
 }
 
 /**
  * Get credentials for a session, falling back to env vars.
+ * If using env var key with embedded tenant and no explicit ADAS_TENANT, auto-extract.
  */
 export function getCredentials(sessionId) {
   const session = sessionId ? sessions.get(sessionId) : null;
-  return {
-    tenant: session?.tenant || ENV_TENANT || "main",
-    apiKey: session?.apiKey || ENV_API_KEY || "",
-  };
+  if (session) {
+    return { tenant: session.tenant, apiKey: session.apiKey };
+  }
+  const apiKey = ENV_API_KEY || "";
+  let tenant = ENV_TENANT;
+  if (!tenant && apiKey) {
+    const parsed = parseApiKey(apiKey);
+    if (parsed.tenant) tenant = parsed.tenant;
+  }
+  return { tenant: tenant || "main", apiKey };
 }
 
 /**

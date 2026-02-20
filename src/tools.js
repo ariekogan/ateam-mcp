@@ -5,7 +5,7 @@
 
 import {
   get, post, patch, del,
-  setSessionCredentials, isAuthenticated, getCredentials,
+  setSessionCredentials, isAuthenticated, getCredentials, parseApiKey,
 } from "./api.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
@@ -24,10 +24,10 @@ export const tools = [
         },
         tenant: {
           type: "string",
-          description: "Tenant name (e.g., dev, main)",
+          description: "Tenant name (e.g., dev, main). Optional if your key has the format adas_<tenant>_<hex> — the tenant is auto-extracted.",
         },
       },
-      required: ["api_key", "tenant"],
+      required: ["api_key"],
     },
   },
   {
@@ -301,19 +301,25 @@ const WRITE_TOOLS = new Set([
 
 const handlers = {
   adas_auth: async ({ api_key, tenant }, sessionId) => {
-    setSessionCredentials(sessionId, { tenant, apiKey: api_key });
+    // Auto-extract tenant from key if not provided
+    let resolvedTenant = tenant;
+    if (!resolvedTenant) {
+      const parsed = parseApiKey(api_key);
+      resolvedTenant = parsed.tenant || "main";
+    }
+    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key });
     // Verify the key works by listing solutions
     try {
       const result = await get("/deploy/solutions", sessionId);
       return {
         ok: true,
-        tenant,
-        message: `Authenticated to tenant "${tenant}". ${result.solutions?.length || 0} solution(s) found.`,
+        tenant: resolvedTenant,
+        message: `Authenticated to tenant "${resolvedTenant}". ${result.solutions?.length || 0} solution(s) found.`,
       };
     } catch (err) {
       return {
         ok: false,
-        tenant,
+        tenant: resolvedTenant,
         message: `Authentication failed: ${err.message}`,
       };
     }
