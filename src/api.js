@@ -91,8 +91,8 @@ function headers(sessionId) {
  */
 function formatError(method, path, status, body) {
   const hints = {
-    401: "Your API key may be invalid or expired. Try calling adas_auth again with a valid key.",
-    403: "You don't have permission for this operation. Check your tenant and API key.",
+    401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call adas_auth(api_key: \"your_key\").",
+    403: "You don't have permission for this operation. Check your tenant and API key. Get a key at https://mcp.ateam-ai.com/get-api-key",
     404: "Resource not found. Check the solution_id or skill_id you're using. Use adas_list_solutions to see available solutions.",
     409: "Conflict — the resource may already exist or is in a conflicting state.",
     422: "Validation failed. Check the request payload against the spec (use adas_get_spec).",
