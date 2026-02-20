@@ -1,5 +1,5 @@
 /**
- * ADAS API client — thin HTTP wrapper for the External Agent API.
+ * A-Team API client — thin HTTP wrapper for the External Agent API.
  *
  * Credentials resolve in this order:
  *   1. Per-session override (set via adas_auth tool — used by HTTP transport)
@@ -97,15 +97,15 @@ function formatError(method, path, status, body) {
     409: "Conflict — the resource may already exist or is in a conflicting state.",
     422: "Validation failed. Check the request payload against the spec (use adas_get_spec).",
     429: "Rate limited. Wait a moment and try again.",
-    500: "ADAS server error. The platform may be temporarily unavailable. Try again in a minute.",
-    502: "ADAS API is unreachable. The service may be restarting. Try again in a minute.",
-    503: "ADAS API is temporarily unavailable. Try again in a minute.",
+    500: "A-Team server error. The platform may be temporarily unavailable. Try again in a minute.",
+    502: "A-Team API is unreachable. The service may be restarting. Try again in a minute.",
+    503: "A-Team API is temporarily unavailable. Try again in a minute.",
   };
 
   const hint = hints[status] || "";
   const detail = typeof body === "string" && body.length > 0 && body.length < 500 ? body : "";
 
-  let msg = `ADAS API error: ${method} ${path} returned ${status}`;
+  let msg = `A-Team API error: ${method} ${path} returned ${status}`;
   if (detail) msg += ` — ${detail}`;
   if (hint) msg += `\nHint: ${hint}`;
 
@@ -140,19 +140,19 @@ async function request(method, path, body, sessionId) {
   } catch (err) {
     if (err.name === "AbortError") {
       throw new Error(
-        `ADAS API timeout: ${method} ${path} did not respond within ${REQUEST_TIMEOUT_MS / 1000}s.\n` +
-        `Hint: The ADAS API at ${BASE_URL} may be down. Check https://api.ateam-ai.com/health`
+        `A-Team API timeout: ${method} ${path} did not respond within ${REQUEST_TIMEOUT_MS / 1000}s.\n` +
+        `Hint: The A-Team API at ${BASE_URL} may be down. Check https://api.ateam-ai.com/health`
       );
     }
     if (err.cause?.code === "ECONNREFUSED") {
       throw new Error(
-        `Cannot connect to ADAS API at ${BASE_URL}.\n` +
+        `Cannot connect to A-Team API at ${BASE_URL}.\n` +
         `Hint: The service may be down. Check https://api.ateam-ai.com/health`
       );
     }
     if (err.cause?.code === "ENOTFOUND") {
       throw new Error(
-        `Cannot resolve ADAS API host: ${BASE_URL}.\n` +
+        `Cannot resolve A-Team API host: ${BASE_URL}.\n` +
         `Hint: Check your internet connection and ADAS_API_URL setting.`
       );
     }

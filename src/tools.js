@@ -1,6 +1,6 @@
 /**
- * ADAS MCP tool definitions and handlers.
- * 15 tools covering the full ADAS External Agent API + auth + bootstrap.
+ * A-Team MCP tool definitions and handlers.
+ * 15 tools covering the full A-Team External Agent API + auth + bootstrap.
  */
 
 import {
@@ -23,13 +23,13 @@ export const tools = [
   {
     name: "adas_auth",
     description:
-      "Authenticate with ADAS. Required before deploying or modifying solutions. The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Read-only operations (spec, examples, validate) work without auth.",
+      "Authenticate with A-Team. Required before deploying or modifying solutions. The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Read-only operations (spec, examples, validate) work without auth.",
     inputSchema: {
       type: "object",
       properties: {
         api_key: {
           type: "string",
-          description: "Your ADAS API key (e.g., adas_xxxxx)",
+          description: "Your A-Team API key (e.g., adas_xxxxx)",
         },
         tenant: {
           type: "string",
@@ -42,7 +42,7 @@ export const tools = [
   {
     name: "adas_get_spec",
     description:
-      "Get the ADAS specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions.",
+      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions.",
     inputSchema: {
       type: "object",
       properties: {
@@ -85,7 +85,7 @@ export const tools = [
   {
     name: "adas_validate_skill",
     description:
-      "Validate a skill definition through the 5-stage ADAS validation pipeline. Part of building a governed AI Team solution. Returns errors and suggestions to fix. Always validate before deploying.",
+      "Validate a skill definition through the 5-stage A-Team validation pipeline. Part of building a governed AI Team solution. Returns errors and suggestions to fix. Always validate before deploying.",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,7 +120,7 @@ export const tools = [
   {
     name: "adas_deploy_solution",
     description:
-      "Deploy a governed AI Team solution to ADAS Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. Used after defining system architecture. Always validate first using adas_validate_solution. Requires authentication (call adas_auth first if not using env vars).",
+      "Deploy a governed AI Team solution to A-Team Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. Used after defining system architecture. Always validate first using adas_validate_solution. Requires authentication (call adas_auth first if not using env vars).",
     inputSchema: {
       type: "object",
       properties: {
@@ -167,7 +167,7 @@ export const tools = [
   },
   {
     name: "adas_deploy_connector",
-    description: "Deploy a connector — registers in the Skill Builder catalog and connects in ADAS Core. Requires authentication.",
+    description: "Deploy a connector — registers in the Skill Builder catalog and connects in A-Team Core. Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -244,7 +244,7 @@ export const tools = [
   {
     name: "adas_redeploy",
     description:
-      "Re-deploy after making updates. Regenerates MCP servers and pushes to ADAS Core. Requires authentication.",
+      "Re-deploy after making updates. Regenerates MCP servers and pushes to A-Team Core. Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -322,7 +322,7 @@ const handlers = {
         solution: "Complete AI Team system — multiple skills + routing + grants + handoffs",
         connector: "External system integration via MCP tools",
         governance: "Permissions, grants, handoffs, auditability",
-        deploy: "Activation into controlled runtime on ADAS Core",
+        deploy: "Activation into controlled runtime on A-Team Core",
       },
     },
     example_solutions: [
@@ -334,7 +334,7 @@ const handlers = {
       { step: 1, title: "Clarify the goal", description: "Understand what the user wants their Team to do", suggested_tools: [] },
       { step: 2, title: "Generate Team map", description: "Design skills, solution architecture, and connectors", suggested_tools: ["adas_get_spec", "adas_get_examples", "adas_get_workflows"] },
       { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["adas_validate_skill", "adas_validate_solution"] },
-      { step: 4, title: "Deploy", description: "Push the Team to ADAS Core", suggested_tools: ["adas_auth", "adas_deploy_solution"] },
+      { step: 4, title: "Deploy", description: "Push the Team to A-Team Core", suggested_tools: ["adas_auth", "adas_deploy_solution"] },
       { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["adas_get_solution", "adas_update", "adas_redeploy", "adas_solution_chat"] },
     ],
     first_questions: [
@@ -480,7 +480,7 @@ function summarizeLargeResult(result, toolName) {
   if (toolName === "adas_get_spec" && result && typeof result === "object") {
     const keys = Object.keys(result);
     return JSON.stringify({
-      _note: `ADAS spec with ${keys.length} sections. Content truncated — ask about specific sections for detail.`,
+      _note: `A-Team spec with ${keys.length} sections. Content truncated — ask about specific sections for detail.`,
       sections: keys,
       ...result,
     }, null, 2).slice(0, MAX_RESPONSE_CHARS);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * ADAS MCP Server
+ * A-Team MCP Server
  * Build, validate, and deploy multi-agent solutions from any AI environment.
  *
  * Transports:
