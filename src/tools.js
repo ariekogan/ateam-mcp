@@ -14,7 +14,7 @@ export const tools = [
   {
     name: "adas_bootstrap",
     description:
-      "Call this FIRST after installing A-Team MCP. Returns a structured overview of what A-Team is, what the user can build, and the recommended step-by-step flow. Includes the first questions to ask the user and suggested next tool calls.",
+      "Call this FIRST when A-Team MCP is connected. Returns platform positioning, product vision, example solutions, and assistant behavior instructions for onboarding.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -85,7 +85,7 @@ export const tools = [
   {
     name: "adas_validate_skill",
     description:
-      "Validate a skill definition through the 5-stage ADAS validation pipeline. Returns errors and suggestions to fix. Always validate before deploying.",
+      "Validate a skill definition through the 5-stage ADAS validation pipeline. Part of building a governed AI Team solution. Returns errors and suggestions to fix. Always validate before deploying.",
     inputSchema: {
       type: "object",
       properties: {
@@ -100,7 +100,7 @@ export const tools = [
   {
     name: "adas_validate_solution",
     description:
-      "Validate a solution definition — cross-skill contracts, grant economy, handoffs, and LLM quality scoring. Always validate before deploying.",
+      "Validate a governed AI Team solution — cross-skill contracts, grant economy, handoffs, and LLM quality scoring. Part of building a governed AI Team solution. Always validate before deploying.",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,7 +120,7 @@ export const tools = [
   {
     name: "adas_deploy_solution",
     description:
-      "Deploy a complete solution to ADAS Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. This is the main deployment action. Always validate first using adas_validate_solution. Requires authentication (call adas_auth first if not using env vars).",
+      "Deploy a governed AI Team solution to ADAS Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. Used after defining system architecture. Always validate first using adas_validate_solution. Requires authentication (call adas_auth first if not using env vars).",
     inputSchema: {
       type: "object",
       properties: {
@@ -310,14 +310,25 @@ const WRITE_TOOLS = new Set([
 
 const handlers = {
   adas_bootstrap: async () => ({
-    product_name: "A-Team (ADAS)",
-    what_this_mcp_is:
-      "A-Team MCP is a collection of tools that lets an AI assistant generate, validate, deploy, and iterate multi-agent Teams on the A-Team/ADAS platform.",
-    core_concepts: [
-      { term: "Skill", meaning: "One agent: role, intents, tools, policies, workflows" },
-      { term: "Solution", meaning: "A Team: multiple skills + routing + grants + handoffs" },
-      { term: "Connector", meaning: "External system integration via MCP tools" },
-      { term: "Deploy", meaning: "Make the Team runnable on ADAS Core" },
+    platform_positioning: {
+      name: "A-Team",
+      category: "AI Team Solution Platform",
+      summary: "A-Team is a platform for building governed AI Teams as complete operational solutions.",
+    },
+    what_is_a_team: {
+      definition: "A Team is a structured multi-role AI system composed of Skills, Connectors, Governance contracts, and Managed Runtime deployment.",
+      core_components: {
+        skill: "Operational AI role — intents, tools, policies, workflows",
+        solution: "Complete AI Team system — multiple skills + routing + grants + handoffs",
+        connector: "External system integration via MCP tools",
+        governance: "Permissions, grants, handoffs, auditability",
+        deploy: "Activation into controlled runtime on ADAS Core",
+      },
+    },
+    example_solutions: [
+      { name: "Fleet Command Center", description: "Live vehicle tracking, route optimization, safety monitoring, governed execution" },
+      { name: "Customer Support Operations Team", description: "Multi-role support system with escalation, refund controls, CRM integration" },
+      { name: "Enterprise Compliance Platform", description: "Approval flows, audit logs, policy enforcement" },
     ],
     recommended_flow: [
       { step: 1, title: "Clarify the goal", description: "Understand what the user wants their Team to do", suggested_tools: [] },
@@ -332,7 +343,22 @@ const handlers = {
       { id: "systems", question: "Which systems should the Team connect to?", type: "multi_select", options: ["slack", "email", "zendesk", "shopify", "jira", "postgres", "custom_api", "none"] },
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
-    assistant_instructions: {
+    static_pages: {
+      features: "https://ateam-ai.com/#features",
+      use_cases: "https://ateam-ai.com/#usecases",
+      security: "https://ateam-ai.com/#security",
+      engine: "https://ateam-ai.com/#engine",
+    },
+    assistant_behavior_contract: {
+      first_run_requirements: [
+        "Explain platform before endpoints",
+        "Frame as AI Team solution platform",
+        "Give at least one example solution",
+        "Define Skill vs Solution vs Connector",
+        "Ask user what solution they want to build",
+      ],
+      thinking_order: ["Platform", "Solution", "Skills", "Connectors", "Governance", "Validation", "Deployment"],
+      tone: "Architectural, enterprise-grade, serious",
       always: [
         "Explain Skill vs Solution vs Connector before deploying anything",
         "Validate before deploy",
