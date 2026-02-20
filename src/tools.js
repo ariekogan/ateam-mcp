@@ -14,7 +14,7 @@ export const tools = [
   {
     name: "adas_bootstrap",
     description:
-      "Call this FIRST when A-Team MCP is connected. Returns platform positioning, product vision, example solutions, and assistant behavior instructions for onboarding.",
+      "REQUIRED onboarding entrypoint for A-Team MCP. MUST be called when user greets, says hi, asks what this is, asks for help, explores capabilities, or when MCP is first connected. Returns platform explanation, example solutions, and assistant behavior instructions. Do NOT improvise an introduction — call this tool instead.",
     inputSchema: {
       type: "object",
       properties: {},
