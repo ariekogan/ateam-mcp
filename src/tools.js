@@ -12,7 +12,7 @@ import {
 
 export const tools = [
   {
-    name: "adas_bootstrap",
+    name: "ateam_bootstrap",
     description:
       "REQUIRED onboarding entrypoint for A-Team MCP. MUST be called when user greets, says hi, asks what this is, asks for help, explores capabilities, or when MCP is first connected. Returns platform explanation, example solutions, and assistant behavior instructions. Do NOT improvise an introduction — call this tool instead.",
     inputSchema: {
@@ -21,7 +21,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_auth",
+    name: "ateam_auth",
     description:
       "Authenticate with A-Team. Required before deploying or modifying solutions. The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Read-only operations (spec, examples, validate) work without auth.",
     inputSchema: {
@@ -40,7 +40,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_get_spec",
+    name: "ateam_get_spec",
     description:
       "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions.",
     inputSchema: {
@@ -57,7 +57,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_get_workflows",
+    name: "ateam_get_workflows",
     description:
       "Get the builder workflows — step-by-step state machines for building skills and solutions. Use this to guide users through the entire build process conversationally. Returns phases, what to ask, what to build, exit criteria, and tips for each stage.",
     inputSchema: {
@@ -66,7 +66,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_get_examples",
+    name: "ateam_get_examples",
     description:
       "Get complete working examples that pass validation. Study these before building your own.",
     inputSchema: {
@@ -83,7 +83,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_validate_skill",
+    name: "ateam_validate_skill",
     description:
       "Validate a skill definition through the 5-stage A-Team validation pipeline. Part of building a governed AI Team solution. Returns errors and suggestions to fix. Always validate before deploying.",
     inputSchema: {
@@ -98,7 +98,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_validate_solution",
+    name: "ateam_validate_solution",
     description:
       "Validate a governed AI Team solution — cross-skill contracts, grant economy, handoffs, and LLM quality scoring. Part of building a governed AI Team solution. Always validate before deploying.",
     inputSchema: {
@@ -118,9 +118,9 @@ export const tools = [
     },
   },
   {
-    name: "adas_deploy_solution",
+    name: "ateam_deploy_solution",
     description:
-      "Deploy a governed AI Team solution to A-Team Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. Used after defining system architecture. Always validate first using adas_validate_solution. Requires authentication (call adas_auth first if not using env vars).",
+      "Deploy a governed AI Team solution to A-Team Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. Used after defining system architecture. Always validate first using ateam_validate_solution. Requires authentication (call ateam_auth first if not using env vars).",
     inputSchema: {
       type: "object",
       properties: {
@@ -148,7 +148,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_deploy_skill",
+    name: "ateam_deploy_skill",
     description: "Deploy a single skill into an existing solution. Requires authentication.",
     inputSchema: {
       type: "object",
@@ -166,7 +166,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_deploy_connector",
+    name: "ateam_deploy_connector",
     description: "Deploy a connector — registers in the Skill Builder catalog and connects in A-Team Core. Requires authentication.",
     inputSchema: {
       type: "object",
@@ -180,7 +180,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_list_solutions",
+    name: "ateam_list_solutions",
     description: "List all solutions deployed in the Skill Builder.",
     inputSchema: {
       type: "object",
@@ -188,7 +188,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_get_solution",
+    name: "ateam_get_solution",
     description:
       "Read solution state — definition, skills, health, status, or export. Use this to inspect deployed solutions.",
     inputSchema: {
@@ -213,7 +213,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_update",
+    name: "ateam_update",
     description:
       "Update a deployed solution or skill incrementally using PATCH. Supports dot notation for scalar fields and _push/_delete/_update for arrays. Requires authentication.",
     inputSchema: {
@@ -242,7 +242,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_redeploy",
+    name: "ateam_redeploy",
     description:
       "Re-deploy after making updates. Regenerates MCP servers and pushes to A-Team Core. Requires authentication.",
     inputSchema: {
@@ -261,7 +261,7 @@ export const tools = [
     },
   },
   {
-    name: "adas_solution_chat",
+    name: "ateam_solution_chat",
     description:
       "Send a message to the Solution Bot — an AI assistant that understands your deployed solution and can help with modifications.",
     inputSchema: {
@@ -300,16 +300,16 @@ const EXAMPLE_PATHS = {
 
 // Tools that require authentication (write operations)
 const WRITE_TOOLS = new Set([
-  "adas_deploy_solution",
-  "adas_deploy_skill",
-  "adas_deploy_connector",
-  "adas_update",
-  "adas_redeploy",
-  "adas_solution_chat",
+  "ateam_deploy_solution",
+  "ateam_deploy_skill",
+  "ateam_deploy_connector",
+  "ateam_update",
+  "ateam_redeploy",
+  "ateam_solution_chat",
 ]);
 
 const handlers = {
-  adas_bootstrap: async () => ({
+  ateam_bootstrap: async () => ({
     platform_positioning: {
       name: "A-Team",
       category: "AI Team Solution Platform",
@@ -332,10 +332,10 @@ const handlers = {
     ],
     recommended_flow: [
       { step: 1, title: "Clarify the goal", description: "Understand what the user wants their Team to do", suggested_tools: [] },
-      { step: 2, title: "Generate Team map", description: "Design skills, solution architecture, and connectors", suggested_tools: ["adas_get_spec", "adas_get_examples", "adas_get_workflows"] },
-      { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["adas_validate_skill", "adas_validate_solution"] },
-      { step: 4, title: "Deploy", description: "Push the Team to A-Team Core", suggested_tools: ["adas_auth", "adas_deploy_solution"] },
-      { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["adas_get_solution", "adas_update", "adas_redeploy", "adas_solution_chat"] },
+      { step: 2, title: "Generate Team map", description: "Design skills, solution architecture, and connectors", suggested_tools: ["ateam_get_spec", "ateam_get_examples", "ateam_get_workflows"] },
+      { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["ateam_validate_skill", "ateam_validate_solution"] },
+      { step: 4, title: "Deploy", description: "Push the Team to A-Team Core", suggested_tools: ["ateam_auth", "ateam_deploy_solution"] },
+      { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["ateam_get_solution", "ateam_update", "ateam_redeploy", "ateam_solution_chat"] },
     ],
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
@@ -371,7 +371,7 @@ const handlers = {
     },
   }),
 
-  adas_auth: async ({ api_key, tenant }, sessionId) => {
+  ateam_auth: async ({ api_key, tenant }, sessionId) => {
     // Auto-extract tenant from key if not provided
     let resolvedTenant = tenant;
     if (!resolvedTenant) {
@@ -396,29 +396,29 @@ const handlers = {
     }
   },
 
-  adas_get_spec: async ({ topic }, sid) => get(SPEC_PATHS[topic], sid),
+  ateam_get_spec: async ({ topic }, sid) => get(SPEC_PATHS[topic], sid),
 
-  adas_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
+  ateam_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
 
-  adas_get_examples: async ({ type }, sid) => get(EXAMPLE_PATHS[type], sid),
+  ateam_get_examples: async ({ type }, sid) => get(EXAMPLE_PATHS[type], sid),
 
-  adas_validate_skill: async ({ skill }, sid) => post("/validate/skill", { skill }, sid),
+  ateam_validate_skill: async ({ skill }, sid) => post("/validate/skill", { skill }, sid),
 
-  adas_validate_solution: async ({ solution, skills }, sid) =>
+  ateam_validate_solution: async ({ solution, skills }, sid) =>
     post("/validate/solution", { solution, skills }, sid),
 
-  adas_deploy_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
+  ateam_deploy_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
     post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid),
 
-  adas_deploy_skill: async ({ solution_id, skill }, sid) =>
+  ateam_deploy_skill: async ({ solution_id, skill }, sid) =>
     post(`/deploy/solutions/${solution_id}/skills`, { skill }, sid),
 
-  adas_deploy_connector: async ({ connector }, sid) =>
+  ateam_deploy_connector: async ({ connector }, sid) =>
     post("/deploy/connector", { connector }, sid),
 
-  adas_list_solutions: async (_args, sid) => get("/deploy/solutions", sid),
+  ateam_list_solutions: async (_args, sid) => get("/deploy/solutions", sid),
 
-  adas_get_solution: async ({ solution_id, view, skill_id }, sid) => {
+  ateam_get_solution: async ({ solution_id, view, skill_id }, sid) => {
     const base = `/deploy/solutions/${solution_id}`;
     if (skill_id) return get(`${base}/skills/${skill_id}`, sid);
     const paths = {
@@ -433,21 +433,21 @@ const handlers = {
     return get(paths[view], sid);
   },
 
-  adas_update: async ({ solution_id, target, skill_id, updates }, sid) => {
+  ateam_update: async ({ solution_id, target, skill_id, updates }, sid) => {
     if (target === "skill") {
       return patch(`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates }, sid);
     }
     return patch(`/deploy/solutions/${solution_id}`, { state_update: updates }, sid);
   },
 
-  adas_redeploy: async ({ solution_id, skill_id }, sid) => {
+  ateam_redeploy: async ({ solution_id, skill_id }, sid) => {
     if (skill_id) {
       return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {}, sid);
     }
     return post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid);
   },
 
-  adas_solution_chat: async ({ solution_id, message }, sid) =>
+  ateam_solution_chat: async ({ solution_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/chat`, { message }, sid),
 };
 
@@ -477,7 +477,7 @@ function formatResult(result, toolName) {
  */
 function summarizeLargeResult(result, toolName) {
   // Spec responses — keep content but cap size
-  if (toolName === "adas_get_spec" && result && typeof result === "object") {
+  if (toolName === "ateam_get_spec" && result && typeof result === "object") {
     const keys = Object.keys(result);
     return JSON.stringify({
       _note: `A-Team spec with ${keys.length} sections. Content truncated — ask about specific sections for detail.`,
@@ -487,7 +487,7 @@ function summarizeLargeResult(result, toolName) {
   }
 
   // Validation results — keep errors/warnings, trim echoed input
-  if ((toolName === "adas_validate_skill" || toolName === "adas_validate_solution") && result) {
+  if ((toolName === "ateam_validate_skill" || toolName === "ateam_validate_solution") && result) {
     const slim = { ...result };
     if (slim.skill) delete slim.skill;
     if (slim.solution) delete slim.solution;
@@ -496,9 +496,9 @@ function summarizeLargeResult(result, toolName) {
   }
 
   // Export results — summarize structure
-  if (toolName === "adas_get_solution" && result?.skills) {
+  if (toolName === "ateam_get_solution" && result?.skills) {
     return JSON.stringify({
-      _note: `Solution with ${result.skills.length} skill(s). Use adas_get_solution with skill_id to inspect individual skills.`,
+      _note: `Solution with ${result.skills.length} skill(s). Use ateam_get_solution with skill_id to inspect individual skills.`,
       solution_id: result.solution?.id || result.id,
       skill_ids: result.skills.map(s => s.id || s.name),
       ...result,
@@ -531,7 +531,7 @@ export async function handleToolCall(name, args, sessionId) {
           "This tool needs an API key. Please ask the user to:",
           "",
           "1. Get their API key at: https://mcp.ateam-ai.com/get-api-key",
-          "2. Then call: adas_auth(api_key: \"<their key>\")",
+          "2. Then call: ateam_auth(api_key: \"<their key>\")",
           "",
           "The key looks like: adas_<tenant>_<32hex>",
           "The tenant is auto-extracted — no separate tenant parameter needed.",

@@ -2,7 +2,7 @@
  * A-Team API client — thin HTTP wrapper for the External Agent API.
  *
  * Credentials resolve in this order:
- *   1. Per-session override (set via adas_auth tool — used by HTTP transport)
+ *   1. Per-session override (set via ateam_auth tool — used by HTTP transport)
  *   2. Environment variables (ADAS_API_KEY, ADAS_TENANT — used by stdio transport)
  *   3. Defaults (no key, tenant "main")
  */
@@ -33,7 +33,7 @@ export function parseApiKey(key) {
 }
 
 /**
- * Set credentials for a session (called by adas_auth tool).
+ * Set credentials for a session (called by ateam_auth tool).
  * If tenant is not provided, it's auto-extracted from the key.
  */
 export function setSessionCredentials(sessionId, { tenant, apiKey }) {
@@ -91,11 +91,11 @@ function headers(sessionId) {
  */
 function formatError(method, path, status, body) {
   const hints = {
-    401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call adas_auth(api_key: \"your_key\").",
+    401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call ateam_auth(api_key: \"your_key\").",
     403: "You don't have permission for this operation. Check your tenant and API key. Get a key at https://mcp.ateam-ai.com/get-api-key",
-    404: "Resource not found. Check the solution_id or skill_id you're using. Use adas_list_solutions to see available solutions.",
+    404: "Resource not found. Check the solution_id or skill_id you're using. Use ateam_list_solutions to see available solutions.",
     409: "Conflict — the resource may already exist or is in a conflicting state.",
-    422: "Validation failed. Check the request payload against the spec (use adas_get_spec).",
+    422: "Validation failed. Check the request payload against the spec (use ateam_get_spec).",
     429: "Rate limited. Wait a moment and try again.",
     500: "A-Team server error. The platform may be temporarily unavailable. Try again in a minute.",
     502: "A-Team API is unreachable. The service may be restarting. Try again in a minute.",
