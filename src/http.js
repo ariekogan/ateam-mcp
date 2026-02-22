@@ -17,6 +17,24 @@ export function startHttpServer(port = 3100) {
   const app = express();
   app.use(express.json());
 
+  // ─── CORS — required for ChatGPT connector ────────────────────
+  app.use("/mcp", (req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id, authorization");
+    res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
+  // ─── Root health check (ChatGPT connector validation) ─────────
+  app.get("/", (_req, res) => {
+    res.json({ ok: true, service: "ateam-mcp", transport: "http" });
+  });
+
   // ─── Health check ─────────────────────────────────────────────
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "ateam-mcp", transport: "http" });
@@ -43,6 +61,7 @@ export function startHttpServer(port = 3100) {
 
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => newSessionId,
+          enableJsonResponse: true,
           onsessioninitialized: (sid) => {
             transports[sid] = transport;
           },
