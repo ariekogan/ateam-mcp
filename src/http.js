@@ -24,6 +24,13 @@ export function startHttpServer(port = 3100) {
   app.set("trust proxy", 1); // behind Cloudflare tunnel
   app.use(express.json());
 
+  // ─── Request logging ─────────────────────────────────────────────
+  app.use((req, _res, next) => {
+    const skip = req.path === "/" || req.path === "/health";
+    if (!skip) console.log(`[HTTP] ${req.method} ${req.path}`);
+    next();
+  });
+
   // ─── OAuth setup ────────────────────────────────────────────────
   const oauthDisabled = process.env.ATEAM_OAUTH_DISABLED === "1";
   const baseUrl = process.env.ATEAM_BASE_URL || "https://mcp.ateam-ai.com";
