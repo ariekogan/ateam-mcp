@@ -42,10 +42,20 @@ export function startHttpServer(port = 3100) {
   // ─── Fix Accept header for MCP endpoint ─────────────────────────
   // Claude.ai may not send the required Accept header with text/event-stream.
   // The MCP SDK requires it per spec, so we inject it if missing.
+  // Must patch both parsed headers AND rawHeaders since @hono/node-server
+  // reads from rawHeaders when converting to Web Standard Request.
   app.use("/mcp", (req, _res, next) => {
     const accept = req.headers.accept || "";
     if (req.method === "POST" && !accept.includes("text/event-stream")) {
-      req.headers.accept = "application/json, text/event-stream";
+      const fixed = "application/json, text/event-stream";
+      req.headers.accept = fixed;
+      // Patch rawHeaders array (alternating key/value pairs)
+      const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "accept");
+      if (idx !== -1) {
+        req.rawHeaders[idx + 1] = fixed;
+      } else {
+        req.rawHeaders.push("Accept", fixed);
+      }
     }
     next();
   });
