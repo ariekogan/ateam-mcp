@@ -279,6 +279,120 @@ export const tools = [
       required: ["solution_id", "message"],
     },
   },
+
+  // ─── Developer Tools ────────────────────────────────────────────
+
+  {
+    name: "ateam_get_execution_logs",
+    description:
+      "Get execution logs for a solution — recent jobs with step traces, tool calls, errors, and timing. Essential for debugging what actually happened during skill execution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "Optional: filter logs to a specific skill",
+        },
+        job_id: {
+          type: "string",
+          description: "Optional: get detailed trace for a specific job ID",
+        },
+        limit: {
+          type: "number",
+          description: "Max jobs to return (default: 10, max: 50)",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_test_skill",
+    description:
+      "Send a test message to a deployed skill and get the full execution result. Starts a job, waits for completion (up to 60s), and returns the result with step traces and tool calls.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "The skill ID to test (original or internal ID)",
+        },
+        message: {
+          type: "string",
+          description: "The test message to send to the skill",
+        },
+      },
+      required: ["solution_id", "skill_id", "message"],
+    },
+  },
+  {
+    name: "ateam_get_connector_source",
+    description:
+      "Read the source code of a connector's MCP server. Returns the files that make up the connector implementation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        connector_id: {
+          type: "string",
+          description: "The connector ID",
+        },
+      },
+      required: ["solution_id", "connector_id"],
+    },
+  },
+  {
+    name: "ateam_get_metrics",
+    description:
+      "Get execution metrics — timing, tool stats, bottlenecks, signals, and recommendations. Use job_id for single-job deep analysis, or skill_id for recent history overview.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        job_id: {
+          type: "string",
+          description: "Optional: deep analysis for a specific job",
+        },
+        skill_id: {
+          type: "string",
+          description: "Optional: recent metrics for a specific skill",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_diff",
+    description:
+      "Compare the current Builder definition against what's deployed in ADAS Core. Shows which skills are undeployed, orphaned, or have changed fields. Use skill_id to diff a single skill.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "Optional: diff a single skill instead of the whole solution",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
 ];
 
 // ─── Tool handlers ──────────────────────────────────────────────────
@@ -306,6 +420,12 @@ const WRITE_TOOLS = new Set([
   "ateam_update",
   "ateam_redeploy",
   "ateam_solution_chat",
+  // Developer tools (read tenant-specific runtime data)
+  "ateam_get_execution_logs",
+  "ateam_test_skill",
+  "ateam_get_connector_source",
+  "ateam_get_metrics",
+  "ateam_diff",
 ]);
 
 const handlers = {
@@ -449,6 +569,36 @@ const handlers = {
 
   ateam_solution_chat: async ({ solution_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/chat`, { message }, sid),
+
+  // ─── Developer Tools ────────────────────────────────────────────
+
+  ateam_get_execution_logs: async ({ solution_id, skill_id, job_id, limit }, sid) => {
+    const qs = new URLSearchParams();
+    if (skill_id) qs.set("skill_id", skill_id);
+    if (job_id) qs.set("job_id", job_id);
+    if (limit) qs.set("limit", String(limit));
+    const qsStr = qs.toString() ? `?${qs}` : "";
+    return get(`/deploy/solutions/${solution_id}/logs${qsStr}`, sid);
+  },
+
+  ateam_test_skill: async ({ solution_id, skill_id, message }, sid) =>
+    post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, { message }, sid, { timeoutMs: 90_000 }),
+
+  ateam_get_connector_source: async ({ solution_id, connector_id }, sid) =>
+    get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid),
+
+  ateam_get_metrics: async ({ solution_id, job_id, skill_id }, sid) => {
+    const qs = new URLSearchParams();
+    if (job_id) qs.set("job_id", job_id);
+    if (skill_id) qs.set("skill_id", skill_id);
+    const qsStr = qs.toString() ? `?${qs}` : "";
+    return get(`/deploy/solutions/${solution_id}/metrics${qsStr}`, sid);
+  },
+
+  ateam_diff: async ({ solution_id, skill_id }, sid) => {
+    const qs = skill_id ? `?skill_id=${encodeURIComponent(skill_id)}` : "";
+    return get(`/deploy/solutions/${solution_id}/diff${qs}`, sid);
+  },
 };
 
 // ─── Response formatting ────────────────────────────────────────────

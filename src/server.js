@@ -18,7 +18,7 @@ import { tools, handleToolCall } from "./tools.js";
  */
 export function createServer(sessionId = "stdio") {
   const server = new Server(
-    { name: "ateam-mcp", version: "0.1.11" },
+    { name: "ateam-mcp", version: "0.2.0" },
     {
       capabilities: { tools: {} },
       instructions: [

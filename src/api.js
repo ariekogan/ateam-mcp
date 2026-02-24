@@ -114,22 +114,28 @@ function formatError(method, path, status, body) {
 
 /**
  * Core fetch wrapper with timeout and error formatting.
+ * @param {string} method
+ * @param {string} path
+ * @param {*} body
+ * @param {string} sessionId
+ * @param {{ timeoutMs?: number }} [opts]
  */
-async function request(method, path, body, sessionId) {
+async function request(method, path, body, sessionId, opts = {}) {
+  const timeoutMs = opts.timeoutMs || REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const opts = {
+    const fetchOpts = {
       method,
       headers: headers(sessionId),
       signal: controller.signal,
     };
     if (body !== undefined) {
-      opts.body = JSON.stringify(body);
+      fetchOpts.body = JSON.stringify(body);
     }
 
-    const res = await fetch(`${BASE_URL}${path}`, opts);
+    const res = await fetch(`${BASE_URL}${path}`, fetchOpts);
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -140,7 +146,7 @@ async function request(method, path, body, sessionId) {
   } catch (err) {
     if (err.name === "AbortError") {
       throw new Error(
-        `A-Team API timeout: ${method} ${path} did not respond within ${REQUEST_TIMEOUT_MS / 1000}s.\n` +
+        `A-Team API timeout: ${method} ${path} did not respond within ${timeoutMs / 1000}s.\n` +
         `Hint: The A-Team API at ${BASE_URL} may be down. Check https://api.ateam-ai.com/health`
       );
     }
@@ -162,18 +168,18 @@ async function request(method, path, body, sessionId) {
   }
 }
 
-export async function get(path, sessionId) {
-  return request("GET", path, undefined, sessionId);
+export async function get(path, sessionId, opts) {
+  return request("GET", path, undefined, sessionId, opts);
 }
 
-export async function post(path, body, sessionId) {
-  return request("POST", path, body, sessionId);
+export async function post(path, body, sessionId, opts) {
+  return request("POST", path, body, sessionId, opts);
 }
 
-export async function patch(path, body, sessionId) {
-  return request("PATCH", path, body, sessionId);
+export async function patch(path, body, sessionId, opts) {
+  return request("PATCH", path, body, sessionId, opts);
 }
 
-export async function del(path, sessionId) {
-  return request("DELETE", path, undefined, sessionId);
+export async function del(path, sessionId, opts) {
+  return request("DELETE", path, undefined, sessionId, opts);
 }
