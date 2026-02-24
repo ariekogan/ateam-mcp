@@ -35,7 +35,7 @@ const MCP_PATHS = ["/", "/mcp"];
 // Recently exchanged tokens — for auto-injection into MCP requests.
 // Key: token string, Value: { token, createdAt }
 const recentTokens = new Map();
-const TOKEN_TTL = 5 * 60 * 1000; // 5 minutes
+const TOKEN_TTL = 60 * 60 * 1000; // 60 minutes
 
 export function startHttpServer(port = 3100) {
   const app = express();
@@ -83,51 +83,32 @@ export function startHttpServer(port = 3100) {
 
   let bearerMiddleware = null;
   if (!oauthDisabled) {
-    const oauth = mountOAuth(app, baseUrl);
-    bearerMiddleware = oauth.bearerMiddleware;
-
-    // Capture tokens from successful exchanges for auto-injection
-    const origExchange = oauth.provider.exchangeAuthorizationCode.bind(oauth.provider);
-    oauth.provider.exchangeAuthorizationCode = async function (...args) {
-      console.log(`[Auth] exchangeAuthorizationCode called with ${args.length} args`);
-      const result = await origExchange(...args);
-      console.log(`[Auth] Token response:`, JSON.stringify(result, null, 2));
-      if (result.access_token) {
-        recentTokens.set(result.access_token, {
-          token: result.access_token,
-          createdAt: Date.now(),
-        });
-        console.log(`[Auth] Cached token for auto-injection (${recentTokens.size} active)`);
-        // Prune expired
-        for (const [k, v] of recentTokens) {
-          if (Date.now() - v.createdAt > TOKEN_TTL) recentTokens.delete(k);
-        }
-      }
-      return result;
-    };
-
-    // Same for refresh token exchanges
-    const origRefresh = oauth.provider.exchangeRefreshToken.bind(oauth.provider);
-    oauth.provider.exchangeRefreshToken = async function (...args) {
-      const result = await origRefresh(...args);
-      if (result.access_token) {
-        recentTokens.set(result.access_token, {
-          token: result.access_token,
-          createdAt: Date.now(),
-        });
-      }
-      return result;
-    };
-
-    // Log the actual /token response body for debugging
-    app.use("/token", (_req, res, next) => {
+    // ─── Token capture middleware — MUST be BEFORE mcpAuthRouter ───
+    // Intercepts POST /token responses to cache access_tokens for
+    // auto-injection. Placed before mountOAuth so it can monkey-patch
+    // res.json() before the SDK's token handler sends the response.
+    app.use("/token", (req, res, next) => {
+      if (req.method !== "POST") return next();
       const origJson = res.json.bind(res);
-      res.json = function (body) {
-        console.log(`[Auth] /token response body:`, JSON.stringify(body, null, 2));
-        return origJson(body);
+      res.json = (data) => {
+        if (data && data.access_token && res.statusCode >= 200 && res.statusCode < 300) {
+          recentTokens.set(data.access_token, {
+            token: data.access_token,
+            createdAt: Date.now(),
+          });
+          console.log(`[Auth] Cached token from /token response (${recentTokens.size} active)`);
+          // Prune expired
+          for (const [k, v] of recentTokens) {
+            if (Date.now() - v.createdAt > TOKEN_TTL) recentTokens.delete(k);
+          }
+        }
+        return origJson(data);
       };
       next();
     });
+
+    const oauth = mountOAuth(app, baseUrl);
+    bearerMiddleware = oauth.bearerMiddleware;
 
     console.log(`  OAuth: enabled (issuer: ${baseUrl})`);
   } else {

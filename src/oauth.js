@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { parseApiKey } from "./api.js";
 
 // ─── TTLs ─────────────────────────────────────────────────────────
@@ -104,6 +105,7 @@ class ATeamOAuthProvider {
       refresh_token: `rt_${entry.apiKey}`,
       token_type: "Bearer",
       expires_in: 3600,
+      scope: "claudeai",
     };
   }
 
@@ -126,7 +128,7 @@ class ATeamOAuthProvider {
    */
   async verifyAccessToken(token) {
     const parsed = parseApiKey(token);
-    if (!parsed.isValid) throw new Error("Invalid access token");
+    if (!parsed.isValid) throw new InvalidTokenError("Invalid access token");
     return {
       token,
       clientId: "ateam-public",
@@ -281,6 +283,16 @@ export function mountOAuth(app, baseUrl) {
     serviceDocumentationUrl: new URL("https://ateam-ai.com"),
     scopesSupported: [],
   }));
+
+  // ─── PRM at /mcp path (RFC 9728 path-based discovery) ──────────────
+  // Claude.ai looks for /.well-known/oauth-protected-resource/mcp when
+  // connecting to /mcp. The SDK only serves PRM at the root resource path.
+  app.get("/.well-known/oauth-protected-resource/mcp", (_req, res) => {
+    res.json({
+      resource: new URL("/mcp", baseUrl).href,
+      authorization_servers: [serverUrl.href],
+    });
+  });
 
   // ─── Custom POST /authorize-submit — processes the auth page form ──
   app.post("/authorize-submit", express.urlencoded({ extended: false }), (req, res) => {

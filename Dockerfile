@@ -12,6 +12,4 @@ COPY .env.example ./
 
 ENV ATEAM_BASE_URL=https://mcp.ateam-ai.com
 
-# STUB MODE: Minimal MCP server matching official example pattern.
-# Switch back to ["node", "src/index.js"] after testing.
-ENTRYPOINT ["node", "src/stub.js"]
+ENTRYPOINT ["node", "src/index.js", "--http"]
