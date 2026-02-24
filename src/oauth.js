@@ -267,6 +267,18 @@ export function mountOAuth(app, baseUrl) {
     scopesSupported: [],
   }));
 
+  // ─── Duplicate protected-resource metadata at root path ───────────
+  // Claude.ai derives metadata URL from the connector URL (https://mcp.ateam-ai.com)
+  // → /.well-known/oauth-protected-resource (root). The SDK mounts at /mcp suffix.
+  // Serve both so discovery works regardless of how the connector URL is configured.
+  app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+    res.json({
+      resource: mcpUrl.href,
+      authorization_servers: [serverUrl.href],
+      bearer_methods_supported: ["header"],
+    });
+  });
+
   // ─── Custom POST /authorize-submit — processes the auth page form ──
   app.post("/authorize-submit", express.urlencoded({ extended: false }), (req, res) => {
     const { pending_id, api_key } = req.body;
