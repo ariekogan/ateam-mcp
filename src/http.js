@@ -89,7 +89,9 @@ export function startHttpServer(port = 3100) {
     // Capture tokens from successful exchanges for auto-injection
     const origExchange = oauth.provider.exchangeAuthorizationCode.bind(oauth.provider);
     oauth.provider.exchangeAuthorizationCode = async function (...args) {
+      console.log(`[Auth] exchangeAuthorizationCode called with ${args.length} args`);
       const result = await origExchange(...args);
+      console.log(`[Auth] Token response:`, JSON.stringify(result, null, 2));
       if (result.access_token) {
         recentTokens.set(result.access_token, {
           token: result.access_token,
@@ -116,6 +118,16 @@ export function startHttpServer(port = 3100) {
       }
       return result;
     };
+
+    // Log the actual /token response body for debugging
+    app.use("/token", (_req, res, next) => {
+      const origJson = res.json.bind(res);
+      res.json = function (body) {
+        console.log(`[Auth] /token response body:`, JSON.stringify(body, null, 2));
+        return origJson(body);
+      };
+      next();
+    });
 
     console.log(`  OAuth: enabled (issuer: ${baseUrl})`);
   } else {
@@ -259,6 +271,20 @@ export function startHttpServer(port = 3100) {
     app.get(path, ...mcpAuth, mcpGet);
     app.delete(path, ...mcpAuth, mcpDelete);
   }
+
+  // ─── Catch-all: log unhandled requests ──────────────────────────
+  app.use((req, res, next) => {
+    console.log(`[HTTP] UNMATCHED: ${req.method} ${req.originalUrl || req.url}`);
+    if (!res.headersSent) res.status(404).json({ error: "Not found" });
+  });
+
+  // ─── Error handler ──────────────────────────────────────────────
+  app.use((err, req, res, next) => {
+    console.error(`[HTTP] ERROR in ${req.method} ${req.originalUrl}:`, err.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
 
   // ─── Start ────────────────────────────────────────────────────
   app.listen(port, "0.0.0.0", () => {
