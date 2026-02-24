@@ -21,6 +21,7 @@ const transports = {};
 
 export function startHttpServer(port = 3100) {
   const app = express();
+  app.set("trust proxy", 1); // behind Cloudflare tunnel
   app.use(express.json());
 
   // ─── OAuth setup ────────────────────────────────────────────────
