@@ -26,16 +26,14 @@ export function startHttpServer(port = 3100) {
 
   // ─── Request logging ─────────────────────────────────────────────
   app.use((req, res, next) => {
-    const skip = req.path === "/" || req.path === "/health";
-    if (!skip) {
-      const start = Date.now();
-      if (req.path === "/mcp") {
-        console.log(`[HTTP] ${req.method} ${req.path} Accept: ${req.headers.accept || "(none)"}`);
-      }
-      res.on("finish", () => {
-        console.log(`[HTTP] ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)`);
-      });
+    const url = req.originalUrl || req.url;
+    const start = Date.now();
+    if (url === "/mcp") {
+      console.log(`[HTTP] ${req.method} ${url} Accept: ${req.headers.accept || "(none)"}`);
     }
+    res.on("finish", () => {
+      console.log(`[HTTP] ${req.method} ${url} → ${res.statusCode} (${Date.now() - start}ms)`);
+    });
     next();
   });
 
