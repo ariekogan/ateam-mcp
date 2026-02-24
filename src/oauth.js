@@ -178,6 +178,20 @@ function generateAuthPage(pendingId, clientName, error) {
     .btn-primary:disabled { background: #1e3a5f; color: #6b7280; cursor: not-allowed; }
     .btn-cancel { background: #262626; color: #a3a3a3; }
     .btn-cancel:hover { background: #333; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid #6b7280; border-top-color: #fff;
+      border-radius: 50%; animation: spin 0.6s linear infinite;
+      vertical-align: middle; margin-right: 6px;
+    }
+    .status {
+      text-align: center; padding: 12px; border-radius: 8px;
+      margin-top: 16px; font-size: 14px; display: none;
+    }
+    .status.success {
+      display: block; background: #1a2e1a; border: 1px solid #166534; color: #86efac;
+    }
   </style>
 </head>
 <body>
@@ -187,7 +201,7 @@ function generateAuthPage(pendingId, clientName, error) {
       <span class="client-name">${escapeHtml(clientName)}</span> wants to connect to your A-Team account
     </div>
     ${errorHtml}
-    <form method="POST" action="/authorize-submit">
+    <form id="authForm" method="POST" action="/authorize-submit">
       <input type="hidden" name="pending_id" value="${escapeHtml(pendingId)}">
       <label for="api_key">API Key</label>
       <input type="text" id="api_key" name="api_key"
@@ -195,13 +209,25 @@ function generateAuthPage(pendingId, clientName, error) {
              autocomplete="off" spellcheck="false">
       <div class="hint">
         Don't have a key?
-        <a href="https://app.ateam-ai.com/builder/?show=api-key" target="_blank">Get your API key</a>
+        <a href="/get-api-key" target="_blank">Get your API key</a>
       </div>
       <div class="actions">
-        <button type="submit" class="btn-primary">Authorize</button>
+        <button type="submit" id="submitBtn" class="btn-primary">Authorize</button>
       </div>
+      <div id="status" class="status"></div>
     </form>
   </div>
+  <script>
+    document.getElementById('authForm').addEventListener('submit', function() {
+      var btn = document.getElementById('submitBtn');
+      var status = document.getElementById('status');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Authorizing\u2026';
+      status.className = 'status success';
+      status.style.display = 'block';
+      status.textContent = 'Redirecting you back to Claude\u2026';
+    });
+  </script>
 </body>
 </html>`;
 }
