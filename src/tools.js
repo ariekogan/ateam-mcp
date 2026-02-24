@@ -1,6 +1,6 @@
 /**
  * A-Team MCP tool definitions and handlers.
- * 15 tools covering the full A-Team External Agent API + auth + bootstrap.
+ * 17 tools covering the full A-Team External Agent API + auth + bootstrap.
  */
 
 import {
@@ -312,7 +312,7 @@ export const tools = [
   {
     name: "ateam_test_skill",
     description:
-      "Send a test message to a deployed skill and get the full execution result. Starts a job, waits for completion (up to 60s), and returns the result with step traces and tool calls.",
+      "Send a test message to a deployed skill and get the full execution result. By default waits for completion (up to 60s). Set wait=false for async mode — returns job_id immediately, then poll with ateam_test_status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -328,8 +328,59 @@ export const tools = [
           type: "string",
           description: "The test message to send to the skill",
         },
+        wait: {
+          type: "boolean",
+          description:
+            "If true (default), wait for completion. If false, return job_id immediately for polling via ateam_test_status.",
+        },
       },
       required: ["solution_id", "skill_id", "message"],
+    },
+  },
+  {
+    name: "ateam_test_status",
+    description:
+      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status, pending questions, and result when done. Uses the same data pipeline as the Job Progress UI.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "The skill ID",
+        },
+        job_id: {
+          type: "string",
+          description: "The job ID returned by ateam_test_skill",
+        },
+      },
+      required: ["solution_id", "skill_id", "job_id"],
+    },
+  },
+  {
+    name: "ateam_test_abort",
+    description:
+      "Abort a running skill test. Stops the job execution at the next iteration boundary.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "The skill ID",
+        },
+        job_id: {
+          type: "string",
+          description: "The job ID to abort",
+        },
+      },
+      required: ["solution_id", "skill_id", "job_id"],
     },
   },
   {
@@ -423,6 +474,8 @@ const WRITE_TOOLS = new Set([
   // Developer tools (read tenant-specific runtime data)
   "ateam_get_execution_logs",
   "ateam_test_skill",
+  "ateam_test_status",
+  "ateam_test_abort",
   "ateam_get_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
@@ -456,7 +509,7 @@ const handlers = {
       { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["ateam_validate_skill", "ateam_validate_solution"] },
       { step: 4, title: "Deploy", description: "Push the Team to A-Team Core", suggested_tools: ["ateam_auth", "ateam_deploy_solution"] },
       { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["ateam_get_solution", "ateam_update", "ateam_redeploy", "ateam_solution_chat"] },
-      { step: 6, title: "Operate & Debug", description: "Test skills, read execution logs, analyze metrics, diff definitions, inspect connector source", suggested_tools: ["ateam_test_skill", "ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"] },
+      { step: 6, title: "Operate & Debug", description: "Test skills (async or sync), poll progress, abort tests, read execution logs, analyze metrics, diff definitions, inspect connector source", suggested_tools: ["ateam_test_skill", "ateam_test_status", "ateam_test_abort", "ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"] },
     ],
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
@@ -582,8 +635,18 @@ const handlers = {
     return get(`/deploy/solutions/${solution_id}/logs${qsStr}`, sid);
   },
 
-  ateam_test_skill: async ({ solution_id, skill_id, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, { message }, sid, { timeoutMs: 90_000 }),
+  ateam_test_skill: async ({ solution_id, skill_id, message, wait }, sid) => {
+    const asyncMode = wait === false;
+    const body = { message, ...(asyncMode ? { async: true } : {}) };
+    const timeoutMs = asyncMode ? 15_000 : 90_000;
+    return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs });
+  },
+
+  ateam_test_status: async ({ solution_id, skill_id, job_id }, sid) =>
+    get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
+
+  ateam_test_abort: async ({ solution_id, skill_id, job_id }, sid) =>
+    del(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
 
   ateam_get_connector_source: async ({ solution_id, connector_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid),
