@@ -144,22 +144,22 @@ export function startHttpServer(port = 3100) {
   //   Phase 2: No token, OAuth in progress → HOLD request, poll every 2s
   //   Phase 3: Token arrives → inject into held request → bearer validates → success
   const autoInjectToken = (req, _res, next) => {
-    if (req.headers.authorization || req.method !== "POST") return next();
+    if (req.headers.authorization) return next();
 
-    // If we already have a token, inject immediately
+    // If we already have a token, inject immediately (any method: POST, GET, DELETE)
     const immediate = getNewestToken();
     if (immediate) {
       injectTokenIntoReq(req, immediate);
       return next();
     }
 
-    // If OAuth not yet in progress, pass through immediately.
-    // Bearer middleware returns 401, which triggers Claude.ai to start OAuth.
-    if (!oauthInProgress) {
+    // Only hold POST requests during active OAuth flow.
+    // GET/DELETE pass through immediately (bearer returns 401).
+    if (req.method !== "POST" || !oauthInProgress) {
       return next();
     }
 
-    // OAuth IS in progress — hold this request and wait for the token
+    // OAuth IS in progress — hold this POST request and wait for the token
     console.log(`[Auth] Holding ${req.method} ${req.originalUrl || req.url} — OAuth in progress, waiting for token...`);
     let resolved = false;
 
