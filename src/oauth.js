@@ -99,7 +99,6 @@ class ATeamOAuthProvider {
     // One-time use
     this.codes.delete(authorizationCode);
 
-    console.log(`[OAuth] exchangeAuthorizationCode: returning access_token=${entry.apiKey.substring(0, 30)}...`);
     return {
       access_token: entry.apiKey,
       refresh_token: `rt_${entry.apiKey}`,
@@ -123,17 +122,19 @@ class ATeamOAuthProvider {
 
   /**
    * Validates that the token is a structurally valid adas_* API key.
+   * Returns AuthInfo matching the MCP SDK format.
    */
   async verifyAccessToken(token) {
-    console.log(`[OAuth] verifyAccessToken called, token: ${token ? token.substring(0, 30) + '...' : 'NULL'}`);
     const parsed = parseApiKey(token);
-    console.log(`[OAuth] parseApiKey result: isValid=${parsed.isValid}, tenant=${parsed.tenant}`);
     if (!parsed.isValid) throw new Error("Invalid access token");
     return {
       token,
       clientId: "ateam-public",
-      scopes: [],
-      expiresAt: Math.floor(Date.now() / 1000) + 86400 * 365,
+      scopes: ["mcp"],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      extra: {
+        userId: parsed.tenant,
+      },
     };
   }
 }
