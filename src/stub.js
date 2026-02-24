@@ -1,12 +1,10 @@
 /**
- * Minimal MCP OAuth stub — follows the official example-remote-server pattern exactly.
- * Used to test if Claude.ai OAuth works with our infrastructure (Cloudflare tunnel).
+ * Minimal MCP OAuth stub — for testing Claude.ai OAuth flow.
  *
- * Differences from our main server:
- *   - MCP only at /mcp (NOT at /)
- *   - Minimal PRM (no extra fields)
- *   - Simple echo tool only
- *   - No auto-injection, no Accept fix, no extra middleware
+ * MCP served at BOTH "/" and "/mcp" (Claude.ai uses root, others use /mcp).
+ * PRM served at both /.well-known/oauth-protected-resource and .../mcp.
+ * Auto-approve OAuth (no API key page needed).
+ * Token auto-injection for Claude.ai proxy bug.
  */
 
 import { randomUUID } from "node:crypto";
@@ -21,7 +19,10 @@ import {
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { z } from "zod";
 
-// ─── Minimal OAuth Provider (matches official example pattern) ──────
+// MCP paths — Claude.ai uses "/" (connector URL root), others may use "/mcp"
+const MCP_PATHS = ["/", "/mcp"];
+
+// ─── Minimal OAuth Provider ──────────────────────────────────────────
 
 class StubClientsStore {
   constructor() {
@@ -43,7 +44,6 @@ class StubOAuthProvider {
     this._clientsStore = new StubClientsStore();
     this.codes = new Map();
     this.tokens = new Map();
-    this.pending = new Map();
   }
 
   get clientsStore() {
@@ -51,7 +51,6 @@ class StubOAuthProvider {
   }
 
   async authorize(client, params, res) {
-    // Auto-approve: generate code immediately, redirect back
     const code = randomUUID();
     const token = `stub_token_${randomUUID()}`;
     this.codes.set(code, { client, params, token });
@@ -131,30 +130,35 @@ app.use(express.json());
 // ─── OAuth ──────────────────────────────────────────────────────────
 const baseUrl = process.env.ATEAM_BASE_URL || "https://mcp.ateam-ai.com";
 const serverUrl = new URL(baseUrl);
-// resourceServerUrl must include the /mcp path so the PRM is served at
-// /.well-known/oauth-protected-resource/mcp (per RFC 9728).
-// Claude.ai constructs this URL from the connector URL path.
-const mcpServerUrl = new URL("/mcp", baseUrl);
 const provider = new StubOAuthProvider();
 
+// Mount OAuth router with resourceServerUrl = root (connector URL is root)
 app.use(
   mcpAuthRouter({
     provider,
     issuerUrl: serverUrl,
     baseUrl: serverUrl,
-    resourceServerUrl: mcpServerUrl,
+    resourceServerUrl: serverUrl,
   })
 );
+
+// Also serve PRM at /.well-known/oauth-protected-resource/mcp for clients
+// that use /mcp as the connector URL (RFC 9728 path-based discovery)
+app.get("/.well-known/oauth-protected-resource/mcp", (_req, res) => {
+  res.json({
+    resource: new URL("/mcp", baseUrl).href,
+    authorization_servers: [serverUrl.href],
+  });
+});
 
 const bearerMiddleware = requireBearerAuth({
   verifier: provider,
   requiredScopes: [],
-  resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpServerUrl),
+  resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(serverUrl),
 });
 
 // ─── Token auto-injection ───────────────────────────────────────────
 // Claude.ai's proxy drops the Bearer token (known bug: anthropics/claude-ai-mcp#35).
-// Cache tokens from exchange and inject into unauthenticated MCP requests.
 const recentTokens = new Map();
 const TOKEN_TTL = 5 * 60 * 1000;
 
@@ -196,86 +200,103 @@ const autoInjectToken = (req, _res, next) => {
   next();
 };
 
-// ─── Accept header fix for /mcp ─────────────────────────────────────
-// Claude.ai may not send Accept: text/event-stream (required by MCP SDK).
-app.use("/mcp", (req, _res, next) => {
-  const accept = req.headers.accept || "";
-  if (req.method === "POST" && !accept.includes("text/event-stream")) {
-    const fixed = "application/json, text/event-stream";
-    req.headers.accept = fixed;
-    const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "accept");
-    if (idx !== -1) {
-      req.rawHeaders[idx + 1] = fixed;
-    } else {
-      req.rawHeaders.push("Accept", fixed);
+// ─── Accept header fix + CORS for MCP paths ─────────────────────────
+for (const path of MCP_PATHS) {
+  // Fix Accept header (Claude.ai may not send text/event-stream)
+  app.use(path, (req, _res, next) => {
+    const accept = req.headers.accept || "";
+    if (req.method === "POST" && !accept.includes("text/event-stream")) {
+      const fixed = "application/json, text/event-stream";
+      req.headers.accept = fixed;
+      const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "accept");
+      if (idx !== -1) {
+        req.rawHeaders[idx + 1] = fixed;
+      } else {
+        req.rawHeaders.push("Accept", fixed);
+      }
     }
-  }
-  next();
-});
+    next();
+  });
 
-// ─── CORS for /mcp ─────────────────────────────────────────────────
-app.use("/mcp", (req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id, authorization");
-  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
-  if (req.method === "OPTIONS") return res.status(204).end();
-  next();
-});
+  // CORS
+  app.use(path, (req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id, authorization");
+    res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+    if (req.method === "OPTIONS") return res.status(204).end();
+    next();
+  });
+}
 
-// ─── MCP at /mcp only ──────────────────────────────────────────────
+// ─── MCP handlers at both "/" and "/mcp" ────────────────────────────
 const transports = {};
 
-app.post("/mcp", autoInjectToken, bearerMiddleware, async (req, res) => {
+const mcpPost = async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
 
+  try {
+    if (sessionId && transports[sessionId]) {
+      await transports[sessionId].handleRequest(req, res, req.body);
+      return;
+    }
+
+    if (!sessionId && isInitializeRequest(req.body)) {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        enableJsonResponse: true,
+        onsessioninitialized: (sid) => {
+          transports[sid] = transport;
+        },
+      });
+
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) delete transports[sid];
+      };
+
+      const server = new McpServer({ name: "stub-server", version: "1.0.0" });
+      server.tool("echo", "Echo a message back", { message: z.string() }, async ({ message }) => ({
+        content: [{ type: "text", text: `Echo: ${message}` }],
+      }));
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
+    }
+
+    res.status(400).json({ jsonrpc: "2.0", error: { code: -32600, message: "Bad request" }, id: null });
+  } catch (err) {
+    console.error("[Stub] MCP error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null });
+    }
+  }
+};
+
+const mcpGet = async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
   if (sessionId && transports[sessionId]) {
-    await transports[sessionId].handleRequest(req, res, req.body);
-    return;
+    await transports[sessionId].handleRequest(req, res);
+  } else {
+    res.json({ ok: true, service: "stub-mcp" });
   }
+};
 
-  if (!sessionId && isInitializeRequest(req.body)) {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (sid) => {
-        transports[sid] = transport;
-      },
-    });
-
-    transport.onclose = () => {
-      const sid = transport.sessionId;
-      if (sid) delete transports[sid];
-    };
-
-    const server = new McpServer({ name: "stub-server", version: "1.0.0" });
-    server.tool("echo", "Echo a message back", { message: z.string() }, async ({ message }) => ({
-      content: [{ type: "text", text: `Echo: ${message}` }],
-    }));
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-    return;
-  }
-
-  res.status(400).json({ jsonrpc: "2.0", error: { code: -32600, message: "Bad request" }, id: null });
-});
-
-app.get("/mcp", autoInjectToken, bearerMiddleware, async (req, res) => {
+const mcpDelete = async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
   if (sessionId && transports[sessionId]) {
     await transports[sessionId].handleRequest(req, res);
   } else {
     res.status(400).json({ error: "No session" });
   }
-});
+};
 
-app.delete("/mcp", autoInjectToken, bearerMiddleware, async (req, res) => {
-  const sessionId = req.headers["mcp-session-id"];
-  if (sessionId && transports[sessionId]) {
-    await transports[sessionId].handleRequest(req, res);
-  } else {
-    res.status(400).json({ error: "No session" });
-  }
-});
+// Mount at both "/" and "/mcp"
+for (const path of MCP_PATHS) {
+  app.post(path, autoInjectToken, bearerMiddleware, mcpPost);
+  app.get(path, autoInjectToken, bearerMiddleware, mcpGet);
+  app.delete(path, autoInjectToken, bearerMiddleware, mcpDelete);
+}
 
 // ─── Health ─────────────────────────────────────────────────────────
 app.get("/health", (_req, res) => {
@@ -286,6 +307,6 @@ app.get("/health", (_req, res) => {
 const port = parseInt(process.env.PORT || "3100", 10);
 app.listen(port, "0.0.0.0", () => {
   console.log(`Stub MCP server on port ${port}`);
-  console.log(`  MCP: http://localhost:${port}/mcp`);
+  console.log(`  MCP: http://localhost:${port}/ and /mcp`);
   console.log(`  OAuth: ${baseUrl}`);
 });
