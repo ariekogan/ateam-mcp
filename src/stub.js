@@ -65,12 +65,14 @@ class StubOAuthProvider {
 
   async challengeForAuthorizationCode(_client, code) {
     const entry = this.codes.get(code);
+    console.log(`[Stub] challengeForAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} codes=${this.codes.size}`);
     if (!entry) throw new Error("Invalid code");
     return entry.params.codeChallenge;
   }
 
   async exchangeAuthorizationCode(client, code) {
     const entry = this.codes.get(code);
+    console.log(`[Stub] exchangeAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} client=${client?.client_id?.substring(0, 8)}...`);
     if (!entry) throw new Error("Invalid code");
     this.codes.delete(code);
 
@@ -142,6 +144,17 @@ app.use(
     resourceServerUrl: serverUrl,
   })
 );
+
+// Log /token request body for debugging
+app.use("/token", (req, res, next) => {
+  console.log(`[Stub] /token body:`, JSON.stringify(req.body));
+  const origJson = res.json.bind(res);
+  res.json = (data) => {
+    console.log(`[Stub] /token response (${res.statusCode}):`, JSON.stringify(data));
+    return origJson(data);
+  };
+  next();
+});
 
 // Also serve PRM at /.well-known/oauth-protected-resource/mcp for clients
 // that use /mcp as the connector URL (RFC 9728 path-based discovery)
