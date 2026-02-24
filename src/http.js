@@ -29,9 +29,23 @@ export function startHttpServer(port = 3100) {
     const skip = req.path === "/" || req.path === "/health";
     if (!skip) {
       const start = Date.now();
+      if (req.path === "/mcp") {
+        console.log(`[HTTP] ${req.method} ${req.path} Accept: ${req.headers.accept || "(none)"}`);
+      }
       res.on("finish", () => {
         console.log(`[HTTP] ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)`);
       });
+    }
+    next();
+  });
+
+  // ─── Fix Accept header for MCP endpoint ─────────────────────────
+  // Claude.ai may not send the required Accept header with text/event-stream.
+  // The MCP SDK requires it per spec, so we inject it if missing.
+  app.use("/mcp", (req, _res, next) => {
+    const accept = req.headers.accept || "";
+    if (req.method === "POST" && !accept.includes("text/event-stream")) {
+      req.headers.accept = "application/json, text/event-stream";
     }
     next();
   });
