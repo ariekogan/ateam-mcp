@@ -12,6 +12,6 @@ COPY .env.example ./
 
 ENV ATEAM_BASE_URL=https://mcp.ateam-ai.com
 
-# Default: stdio transport (for Claude, Cursor, Windsurf, VS Code)
-# Override with: --http [port] for HTTP transport (for ChatGPT, remote clients)
-ENTRYPOINT ["node", "src/index.js"]
+# STUB MODE: Minimal MCP server matching official example pattern.
+# Switch back to ["node", "src/index.js"] after testing.
+ENTRYPOINT ["node", "src/stub.js"]
