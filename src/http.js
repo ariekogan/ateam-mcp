@@ -25,9 +25,14 @@ export function startHttpServer(port = 3100) {
   app.use(express.json());
 
   // ─── Request logging ─────────────────────────────────────────────
-  app.use((req, _res, next) => {
+  app.use((req, res, next) => {
     const skip = req.path === "/" || req.path === "/health";
-    if (!skip) console.log(`[HTTP] ${req.method} ${req.path}`);
+    if (!skip) {
+      const start = Date.now();
+      res.on("finish", () => {
+        console.log(`[HTTP] ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)`);
+      });
+    }
     next();
   });
 
