@@ -4,7 +4,9 @@
  * MCP served at BOTH "/" and "/mcp" (Claude.ai uses root, others use /mcp).
  * PRM served at both /.well-known/oauth-protected-resource and .../mcp.
  * Auto-approve OAuth (no API key page needed).
- * Token auto-injection for Claude.ai proxy bug.
+ * Token auto-injection for Claude.ai proxy bug (anthropics/claude-ai-mcp#35).
+ *
+ * IMPORTANT: Token capture middleware MUST be before mcpAuthRouter.
  */
 
 import { randomUUID } from "node:crypto";
@@ -65,14 +67,18 @@ class StubOAuthProvider {
 
   async challengeForAuthorizationCode(_client, code) {
     const entry = this.codes.get(code);
-    console.log(`[Stub] challengeForAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} codes=${this.codes.size}`);
+    console.log(
+      `[Stub] challengeForAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} codes=${this.codes.size}`
+    );
     if (!entry) throw new Error("Invalid code");
     return entry.params.codeChallenge;
   }
 
   async exchangeAuthorizationCode(client, code) {
     const entry = this.codes.get(code);
-    console.log(`[Stub] exchangeAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} client=${client?.client_id?.substring(0, 8)}...`);
+    console.log(
+      `[Stub] exchangeAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} client=${client?.client_id?.substring(0, 8)}...`
+    );
     if (!entry) throw new Error("Invalid code");
     this.codes.delete(code);
 
@@ -117,7 +123,7 @@ class StubOAuthProvider {
 const app = express();
 app.set("trust proxy", 1);
 
-// Request logging
+// Request logging — every request
 app.use((req, res, next) => {
   const url = req.originalUrl || req.url;
   const auth = req.headers.authorization;
@@ -130,12 +136,73 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+// ─── Token auto-injection setup ─────────────────────────────────────
+// This MUST be defined before the token capture middleware.
+const recentTokens = new Map();
+const TOKEN_TTL = 5 * 60 * 1000;
+
+function getNewestToken() {
+  let newest = null;
+  for (const [, entry] of recentTokens) {
+    if (Date.now() - entry.createdAt > TOKEN_TTL) continue;
+    if (!newest || entry.createdAt > newest.createdAt) newest = entry;
+  }
+  return newest?.token || null;
+}
+
+// ─── Token capture middleware — BEFORE mcpAuthRouter! ────────────────
+// Intercepts POST /token responses to cache the access_token for auto-injection.
+// This MUST run before mcpAuthRouter so it can monkey-patch res.json().
+app.use("/token", (req, res, next) => {
+  if (req.method !== "POST") return next();
+
+  console.log(`[Stub] /token interceptor — capturing response...`);
+
+  // Monkey-patch res.json to capture the token response
+  const origJson = res.json.bind(res);
+  res.json = (data) => {
+    console.log(`[Stub] /token response (${res.statusCode}):`, JSON.stringify(data));
+    if (data && data.access_token && res.statusCode >= 200 && res.statusCode < 300) {
+      recentTokens.set(data.access_token, {
+        token: data.access_token,
+        createdAt: Date.now(),
+      });
+      console.log(`[Stub] ✅ Cached token from /token response (${recentTokens.size} active): ${data.access_token.substring(0, 25)}...`);
+      // Clean up old tokens
+      for (const [k, v] of recentTokens) {
+        if (Date.now() - v.createdAt > TOKEN_TTL) recentTokens.delete(k);
+      }
+    }
+    return origJson(data);
+  };
+
+  // Also monkey-patch res.send for non-json responses
+  const origSend = res.send.bind(res);
+  res.send = (body) => {
+    if (typeof body === "string") {
+      try {
+        const data = JSON.parse(body);
+        if (data && data.access_token && res.statusCode >= 200 && res.statusCode < 300) {
+          recentTokens.set(data.access_token, {
+            token: data.access_token,
+            createdAt: Date.now(),
+          });
+          console.log(`[Stub] ✅ Cached token from /token send (${recentTokens.size} active): ${data.access_token.substring(0, 25)}...`);
+        }
+      } catch (_) {}
+    }
+    return origSend(body);
+  };
+
+  next();
+});
+
 // ─── OAuth ──────────────────────────────────────────────────────────
 const baseUrl = process.env.ATEAM_BASE_URL || "https://mcp.ateam-ai.com";
 const serverUrl = new URL(baseUrl);
 const provider = new StubOAuthProvider();
 
-// Mount OAuth router with resourceServerUrl = root (connector URL is root)
+// Mount OAuth router — resourceServerUrl = root (connector URL is root)
 app.use(
   mcpAuthRouter({
     provider,
@@ -144,17 +211,6 @@ app.use(
     resourceServerUrl: serverUrl,
   })
 );
-
-// Log /token request body for debugging
-app.use("/token", (req, res, next) => {
-  console.log(`[Stub] /token body:`, JSON.stringify(req.body));
-  const origJson = res.json.bind(res);
-  res.json = (data) => {
-    console.log(`[Stub] /token response (${res.statusCode}):`, JSON.stringify(data));
-    return origJson(data);
-  };
-  next();
-});
 
 // Also serve PRM at /.well-known/oauth-protected-resource/mcp for clients
 // that use /mcp as the connector URL (RFC 9728 path-based discovery)
@@ -171,45 +227,22 @@ const bearerMiddleware = requireBearerAuth({
   resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(serverUrl),
 });
 
-// ─── Token auto-injection ───────────────────────────────────────────
-// Claude.ai's proxy drops the Bearer token (known bug: anthropics/claude-ai-mcp#35).
-const recentTokens = new Map();
-const TOKEN_TTL = 5 * 60 * 1000;
-
-const origExchange = provider.exchangeAuthorizationCode.bind(provider);
-provider.exchangeAuthorizationCode = async function (...args) {
-  const result = await origExchange(...args);
-  if (result.access_token) {
-    recentTokens.set(result.access_token, { token: result.access_token, createdAt: Date.now() });
-    console.log(`[Stub] Cached token for auto-injection (${recentTokens.size} active)`);
-    for (const [k, v] of recentTokens) {
-      if (Date.now() - v.createdAt > TOKEN_TTL) recentTokens.delete(k);
-    }
-  }
-  return result;
-};
-
-function getNewestToken() {
-  let newest = null;
-  for (const [, entry] of recentTokens) {
-    if (Date.now() - entry.createdAt > TOKEN_TTL) continue;
-    if (!newest || entry.createdAt > newest.createdAt) newest = entry;
-  }
-  return newest?.token || null;
-}
-
+// ─── Auto-inject token into unauthenticated MCP requests ───────────
 const autoInjectToken = (req, _res, next) => {
   if (req.headers.authorization) return next();
   const token = getNewestToken();
   if (token) {
     req.headers.authorization = `Bearer ${token}`;
+    // Also patch rawHeaders for the SDK's bearer auth middleware
     const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "authorization");
     if (idx !== -1) {
       req.rawHeaders[idx + 1] = `Bearer ${token}`;
     } else {
       req.rawHeaders.push("Authorization", `Bearer ${token}`);
     }
-    console.log(`[Stub] Auto-injected token into ${req.method} ${req.originalUrl || req.url}`);
+    console.log(`[Stub] 🔑 Auto-injected token into ${req.method} ${req.originalUrl || req.url}`);
+  } else {
+    console.log(`[Stub] ⚠️ No token to inject for ${req.method} ${req.originalUrl || req.url} (cache size: ${recentTokens.size})`);
   }
   next();
 };
@@ -305,7 +338,7 @@ const mcpDelete = async (req, res) => {
   }
 };
 
-// Mount at both "/" and "/mcp"
+// Mount MCP at both "/" and "/mcp"
 for (const path of MCP_PATHS) {
   app.post(path, autoInjectToken, bearerMiddleware, mcpPost);
   app.get(path, autoInjectToken, bearerMiddleware, mcpGet);
@@ -317,10 +350,17 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "stub-mcp" });
 });
 
+// ─── Catch-all for unmatched routes ─────────────────────────────────
+app.use((req, res) => {
+  console.log(`[Stub] ❓ Unmatched: ${req.method} ${req.originalUrl || req.url}`);
+  res.status(404).json({ error: "Not found" });
+});
+
 // ─── Start ──────────────────────────────────────────────────────────
 const port = parseInt(process.env.PORT || "3100", 10);
 app.listen(port, "0.0.0.0", () => {
   console.log(`Stub MCP server on port ${port}`);
   console.log(`  MCP: http://localhost:${port}/ and /mcp`);
   console.log(`  OAuth: ${baseUrl}`);
+  console.log(`  Token capture: BEFORE mcpAuthRouter ✅`);
 });
