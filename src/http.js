@@ -134,10 +134,23 @@ export function startHttpServer(port = 3100) {
     next();
   };
 
-  // Bearer auth middleware chain for MCP routes
-  const mcpAuth = bearerMiddleware
+  // Bearer auth middleware chains for MCP routes:
+  // - "/" (Claude.ai): strict OAuth — Bearer token required
+  // - "/mcp" (ChatGPT): optional OAuth — validate Bearer if present, pass through if not
+  const mcpAuthStrict = bearerMiddleware
     ? [autoInjectToken, bearerMiddleware]
     : [];
+
+  // Optional auth: if Bearer token present, validate it (sets req.auth for seedCredentials).
+  // If no token, let the request through — user can authenticate via ateam_auth tool.
+  const optionalBearerAuth = bearerMiddleware
+    ? (req, res, next) => {
+        if (!req.headers.authorization) return next();
+        bearerMiddleware(req, res, next);
+      }
+    : (_req, _res, next) => next();
+
+  const mcpAuthOptional = [autoInjectToken, optionalBearerAuth];
 
   // ─── CORS — required for browser-based MCP clients ──────────────
   for (const path of MCP_PATHS) {
@@ -247,11 +260,10 @@ export function startHttpServer(port = 3100) {
   };
 
   // Mount MCP handlers at both "/" and "/mcp"
-  // OAuth is required on "/" (Claude.ai) but NOT on "/mcp" (ChatGPT).
-  // ChatGPT connects with "No Auth" and uses ateam_auth tool instead.
-  // The tools themselves enforce auth via isAuthenticated() for write ops.
+  // "/" (Claude.ai): strict OAuth — requires Bearer token
+  // "/mcp" (ChatGPT): optional auth — accepts OAuth OR ateam_auth tool
   for (const path of MCP_PATHS) {
-    const auth = path === "/" ? mcpAuth : [];
+    const auth = path === "/" ? mcpAuthStrict : mcpAuthOptional;
     app.post(path, ...auth, mcpPost);
     app.get(path, ...auth, mcpGet);
     app.delete(path, ...auth, mcpDelete);
