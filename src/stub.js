@@ -83,6 +83,7 @@ class StubOAuthProvider {
       refresh_token: `rt_${token}`,
       token_type: "Bearer",
       expires_in: 3600,
+      scope: "claudeai",
     };
   }
 
