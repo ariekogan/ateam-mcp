@@ -247,10 +247,14 @@ export function startHttpServer(port = 3100) {
   };
 
   // Mount MCP handlers at both "/" and "/mcp"
+  // OAuth is required on "/" (Claude.ai) but NOT on "/mcp" (ChatGPT).
+  // ChatGPT connects with "No Auth" and uses ateam_auth tool instead.
+  // The tools themselves enforce auth via isAuthenticated() for write ops.
   for (const path of MCP_PATHS) {
-    app.post(path, ...mcpAuth, mcpPost);
-    app.get(path, ...mcpAuth, mcpGet);
-    app.delete(path, ...mcpAuth, mcpDelete);
+    const auth = path === "/" ? mcpAuth : [];
+    app.post(path, ...auth, mcpPost);
+    app.get(path, ...auth, mcpGet);
+    app.delete(path, ...auth, mcpDelete);
   }
 
   // ─── Catch-all: log unhandled requests ──────────────────────────
