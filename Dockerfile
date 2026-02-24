@@ -10,6 +10,8 @@ RUN npm ci --omit=dev
 COPY src/ ./src/
 COPY .env.example ./
 
+ENV ATEAM_BASE_URL=https://mcp.ateam-ai.com
+
 # Default: stdio transport (for Claude, Cursor, Windsurf, VS Code)
 # Override with: --http [port] for HTTP transport (for ChatGPT, remote clients)
 ENTRYPOINT ["node", "src/index.js"]

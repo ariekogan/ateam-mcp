@@ -1,6 +1,11 @@
 /**
  * Streamable HTTP transport for ateam-mcp.
  * Enables ChatGPT and remote MCP clients to connect via HTTPS.
+ *
+ * OAuth2 (enabled by default):
+ *   Serves /.well-known/*, /authorize, /token, /register endpoints.
+ *   /mcp routes require a Bearer token — triggers OAuth discovery in Claude.ai.
+ *   Set ATEAM_OAUTH_DISABLED=1 to bypass (for ChatGPT or legacy clients).
  */
 
 import { randomUUID } from "node:crypto";
@@ -8,7 +13,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import { createServer } from "./server.js";
-import { clearSession } from "./api.js";
+import { clearSession, setSessionCredentials, parseApiKey } from "./api.js";
+import { mountOAuth } from "./oauth.js";
 
 // Active sessions
 const transports = {};
@@ -16,6 +22,22 @@ const transports = {};
 export function startHttpServer(port = 3100) {
   const app = express();
   app.use(express.json());
+
+  // ─── OAuth setup ────────────────────────────────────────────────
+  const oauthDisabled = process.env.ATEAM_OAUTH_DISABLED === "1";
+  const baseUrl = process.env.ATEAM_BASE_URL || "https://mcp.ateam-ai.com";
+
+  let bearerMiddleware = null;
+  if (!oauthDisabled) {
+    const oauth = mountOAuth(app, baseUrl);
+    bearerMiddleware = oauth.bearerMiddleware;
+    console.log(`  OAuth: enabled (issuer: ${baseUrl})`);
+  } else {
+    console.log("  OAuth: disabled (ATEAM_OAUTH_DISABLED=1)");
+  }
+
+  // Middleware array for /mcp routes — empty when OAuth is disabled
+  const mcpAuth = bearerMiddleware ? [bearerMiddleware] : [];
 
   // ─── CORS — required for ChatGPT connector ────────────────────
   app.use("/mcp", (req, res, next) => {
@@ -46,18 +68,22 @@ export function startHttpServer(port = 3100) {
   });
 
   // ─── MCP POST — handle tool calls + initialize ───────────────
-  app.post("/mcp", async (req, res) => {
+  app.post("/mcp", ...mcpAuth, async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
 
     try {
       let transport;
 
       if (sessionId && transports[sessionId]) {
-        // Reuse existing session
+        // Reuse existing session — seed credentials if Bearer token present
         transport = transports[sessionId];
+        seedCredentials(req, sessionId);
       } else if (!sessionId && isInitializeRequest(req.body)) {
         // New session — generate ID upfront so we can bind it to the server
         const newSessionId = randomUUID();
+
+        // Seed credentials from OAuth Bearer token before server starts
+        seedCredentials(req, newSessionId);
 
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => newSessionId,
@@ -102,7 +128,7 @@ export function startHttpServer(port = 3100) {
   });
 
   // ─── MCP GET — SSE stream for notifications ──────────────────
-  app.get("/mcp", async (req, res) => {
+  app.get("/mcp", ...mcpAuth, async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     if (!sessionId || !transports[sessionId]) {
       res.status(400).send("Invalid or missing session ID");
@@ -112,7 +138,7 @@ export function startHttpServer(port = 3100) {
   });
 
   // ─── MCP DELETE — session termination ────────────────────────
-  app.delete("/mcp", async (req, res) => {
+  app.delete("/mcp", ...mcpAuth, async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     if (!sessionId || !transports[sessionId]) {
       res.status(400).send("Invalid or missing session ID");
@@ -139,4 +165,18 @@ export function startHttpServer(port = 3100) {
     }
     process.exit(0);
   });
+}
+
+/**
+ * If the request has a validated Bearer token (set by requireBearerAuth),
+ * auto-seed session credentials so the user doesn't need to call ateam_auth.
+ */
+function seedCredentials(req, sessionId) {
+  const token = req.auth?.token;
+  if (!token) return;
+
+  const parsed = parseApiKey(token);
+  if (parsed.isValid) {
+    setSessionCredentials(sessionId, { tenant: parsed.tenant, apiKey: token });
+  }
 }
