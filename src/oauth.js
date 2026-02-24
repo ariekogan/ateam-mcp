@@ -99,23 +99,35 @@ class ATeamOAuthProvider {
     // One-time use
     this.codes.delete(authorizationCode);
 
+    console.log(`[OAuth] exchangeAuthorizationCode: returning access_token=${entry.apiKey.substring(0, 30)}...`);
     return {
       access_token: entry.apiKey,
-      token_type: "bearer",
-      // Long-lived — the API key doesn't expire on its own
-      expires_in: 86400 * 365,
+      refresh_token: `rt_${entry.apiKey}`,
+      token_type: "Bearer",
+      expires_in: 3600,
     };
   }
 
-  async exchangeRefreshToken() {
-    throw new Error("Refresh tokens not supported");
+  async exchangeRefreshToken(_client, refreshToken) {
+    // Refresh token is rt_<apiKey> — extract the API key
+    const apiKey = refreshToken.startsWith("rt_") ? refreshToken.slice(3) : refreshToken;
+    const parsed = parseApiKey(apiKey);
+    if (!parsed.isValid) throw new Error("Invalid refresh token");
+    return {
+      access_token: apiKey,
+      refresh_token: `rt_${apiKey}`,
+      token_type: "Bearer",
+      expires_in: 3600,
+    };
   }
 
   /**
    * Validates that the token is a structurally valid adas_* API key.
    */
   async verifyAccessToken(token) {
+    console.log(`[OAuth] verifyAccessToken called, token: ${token ? token.substring(0, 30) + '...' : 'NULL'}`);
     const parsed = parseApiKey(token);
+    console.log(`[OAuth] parseApiKey result: isValid=${parsed.isValid}, tenant=${parsed.tenant}`);
     if (!parsed.isValid) throw new Error("Invalid access token");
     return {
       token,
@@ -253,31 +265,21 @@ function escapeHtml(str) {
  */
 export function mountOAuth(app, baseUrl) {
   const serverUrl = new URL(baseUrl);
-  const mcpUrl = new URL("/mcp", serverUrl);
   const provider = new ATeamOAuthProvider();
 
   // Mount SDK OAuth router (/.well-known/*, /authorize, /token, /register)
+  // IMPORTANT: resourceServerUrl MUST match the connector URL that users configure
+  // in Claude.ai. Claude.ai validates resource == connector URL after token exchange.
+  // Connector URL is the root (https://mcp.ateam-ai.com), NOT /mcp.
   app.use(mcpAuthRouter({
     provider,
     issuerUrl: serverUrl,
     baseUrl: serverUrl,
-    resourceServerUrl: mcpUrl,
+    resourceServerUrl: serverUrl,
     resourceName: "A-Team MCP",
     serviceDocumentationUrl: new URL("https://ateam-ai.com"),
     scopesSupported: [],
   }));
-
-  // ─── Duplicate protected-resource metadata at root path ───────────
-  // Claude.ai derives metadata URL from the connector URL (https://mcp.ateam-ai.com)
-  // → /.well-known/oauth-protected-resource (root). The SDK mounts at /mcp suffix.
-  // Serve both so discovery works regardless of how the connector URL is configured.
-  app.get("/.well-known/oauth-protected-resource", (_req, res) => {
-    res.json({
-      resource: mcpUrl.href,
-      authorization_servers: [serverUrl.href],
-      bearer_methods_supported: ["header"],
-    });
-  });
 
   // ─── Custom POST /authorize-submit — processes the auth page form ──
   app.post("/authorize-submit", express.urlencoded({ extended: false }), (req, res) => {
@@ -318,11 +320,13 @@ export function mountOAuth(app, baseUrl) {
     res.redirect(redirectUrl.toString());
   });
 
-  // ─── Bearer middleware for /mcp routes ──────────────────────────
+  // ─── Bearer middleware for MCP routes ───────────────────────────
+  // resourceMetadataUrl must point to the PRM for the root resource
+  // → /.well-known/oauth-protected-resource (no /mcp suffix)
   const bearerMiddleware = requireBearerAuth({
     verifier: provider,
     requiredScopes: [],
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpUrl),
+    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(serverUrl),
   });
 
   // ─── Periodic cleanup of expired entries ────────────────────────
