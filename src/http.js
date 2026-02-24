@@ -10,6 +10,12 @@
  *   Serves /.well-known/*, /authorize, /token, /register endpoints.
  *   MCP routes require a Bearer token — triggers OAuth discovery in Claude.ai.
  *   Set ATEAM_OAUTH_DISABLED=1 to bypass (for ChatGPT or legacy clients).
+ *
+ * Token Auto-Injection:
+ *   Claude.ai's OAuth client and MCP client don't share Bearer tokens.
+ *   After a successful token exchange, we cache the token server-side and
+ *   inject it into subsequent unauthenticated MCP requests. This is a
+ *   simple cache lookup — no request holding, no polling, no flags.
  */
 
 import { randomUUID } from "node:crypto";
@@ -25,6 +31,11 @@ const transports = {};
 
 // MCP paths — Claude.ai uses "/" (connector URL), others may use "/mcp"
 const MCP_PATHS = ["/", "/mcp"];
+
+// Recently exchanged tokens — for auto-injection into MCP requests.
+// Key: token string, Value: { token, createdAt }
+const recentTokens = new Map();
+const TOKEN_TTL = 5 * 60 * 1000; // 5 minutes
 
 export function startHttpServer(port = 3100) {
   const app = express();
@@ -74,13 +85,66 @@ export function startHttpServer(port = 3100) {
   if (!oauthDisabled) {
     const oauth = mountOAuth(app, baseUrl);
     bearerMiddleware = oauth.bearerMiddleware;
+
+    // Capture tokens from successful exchanges for auto-injection
+    const origExchange = oauth.provider.exchangeAuthorizationCode.bind(oauth.provider);
+    oauth.provider.exchangeAuthorizationCode = async function (...args) {
+      const result = await origExchange(...args);
+      if (result.access_token) {
+        recentTokens.set(result.access_token, {
+          token: result.access_token,
+          createdAt: Date.now(),
+        });
+        console.log(`[Auth] Cached token for auto-injection (${recentTokens.size} active)`);
+        // Prune expired
+        for (const [k, v] of recentTokens) {
+          if (Date.now() - v.createdAt > TOKEN_TTL) recentTokens.delete(k);
+        }
+      }
+      return result;
+    };
+
+    // Same for refresh token exchanges
+    const origRefresh = oauth.provider.exchangeRefreshToken.bind(oauth.provider);
+    oauth.provider.exchangeRefreshToken = async function (...args) {
+      const result = await origRefresh(...args);
+      if (result.access_token) {
+        recentTokens.set(result.access_token, {
+          token: result.access_token,
+          createdAt: Date.now(),
+        });
+      }
+      return result;
+    };
+
     console.log(`  OAuth: enabled (issuer: ${baseUrl})`);
   } else {
     console.log("  OAuth: disabled (ATEAM_OAUTH_DISABLED=1)");
   }
 
-  // Bearer auth middleware for MCP routes (if OAuth enabled)
-  const mcpAuth = bearerMiddleware ? [bearerMiddleware] : [];
+  // ─── Token auto-injection middleware ────────────────────────────
+  // If a request has no Authorization header but we have a recently
+  // exchanged token, inject it. Simple cache lookup — never blocks.
+  const autoInjectToken = (req, _res, next) => {
+    if (req.headers.authorization) return next();
+    const token = getNewestToken();
+    if (token) {
+      req.headers.authorization = `Bearer ${token}`;
+      const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "authorization");
+      if (idx !== -1) {
+        req.rawHeaders[idx + 1] = `Bearer ${token}`;
+      } else {
+        req.rawHeaders.push("Authorization", `Bearer ${token}`);
+      }
+      console.log(`[Auth] Auto-injected token into ${req.method} ${req.originalUrl || req.url}`);
+    }
+    next();
+  };
+
+  // Bearer auth middleware chain for MCP routes
+  const mcpAuth = bearerMiddleware
+    ? [autoInjectToken, bearerMiddleware]
+    : [];
 
   // ─── CORS — required for browser-based MCP clients ──────────────
   for (const path of MCP_PATHS) {
@@ -214,6 +278,16 @@ export function startHttpServer(port = 3100) {
     }
     process.exit(0);
   });
+}
+
+/** Returns the most recently issued non-expired token, or null. */
+function getNewestToken() {
+  let newest = null;
+  for (const [, entry] of recentTokens) {
+    if (Date.now() - entry.createdAt > TOKEN_TTL) continue;
+    if (!newest || entry.createdAt > newest.createdAt) newest = entry;
+  }
+  return newest?.token || null;
 }
 
 /**
