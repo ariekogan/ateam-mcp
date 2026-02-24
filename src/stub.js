@@ -139,13 +139,21 @@ app.use(express.json());
 // ─── Token auto-injection setup ─────────────────────────────────────
 // This MUST be defined before the token capture middleware.
 const recentTokens = new Map();
-const TOKEN_TTL = 5 * 60 * 1000;
+const TOKEN_TTL = 60 * 60 * 1000; // 60 minutes (was 5 min — too short)
 
 function getNewestToken() {
   let newest = null;
-  for (const [, entry] of recentTokens) {
-    if (Date.now() - entry.createdAt > TOKEN_TTL) continue;
+  const now = Date.now();
+  for (const [key, entry] of recentTokens) {
+    const ageMs = now - entry.createdAt;
+    if (ageMs > TOKEN_TTL) {
+      console.log(`[Stub] Token ${key.substring(0, 20)}... expired (age: ${Math.round(ageMs / 1000)}s)`);
+      continue;
+    }
     if (!newest || entry.createdAt > newest.createdAt) newest = entry;
+  }
+  if (!newest && recentTokens.size > 0) {
+    console.log(`[Stub] ⚠️ All ${recentTokens.size} tokens expired!`);
   }
   return newest?.token || null;
 }
