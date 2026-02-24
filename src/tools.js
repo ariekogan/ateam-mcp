@@ -456,6 +456,7 @@ const handlers = {
       { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["ateam_validate_skill", "ateam_validate_solution"] },
       { step: 4, title: "Deploy", description: "Push the Team to A-Team Core", suggested_tools: ["ateam_auth", "ateam_deploy_solution"] },
       { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["ateam_get_solution", "ateam_update", "ateam_redeploy", "ateam_solution_chat"] },
+      { step: 6, title: "Operate & Debug", description: "Test skills, read execution logs, analyze metrics, diff definitions, inspect connector source", suggested_tools: ["ateam_test_skill", "ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"] },
     ],
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
