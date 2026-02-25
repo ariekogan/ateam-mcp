@@ -120,7 +120,7 @@ export const tools = [
   {
     name: "ateam_deploy_solution",
     description:
-      "Deploy a governed AI Team solution to A-Team Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. Used after defining system architecture. Always validate first using ateam_validate_solution. Requires authentication (call ateam_auth first if not using env vars).",
+      "Deploy a governed AI Team solution to A-Team Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. For connectors with UI or Node.js code, send SOURCE files only via mcp_store — the server runs npm install + npm run build automatically (like Vercel/Netlify). Never send dist/ or node_modules/. Always validate first using ateam_validate_solution. Requires authentication (call ateam_auth first if not using env vars).",
     inputSchema: {
       type: "object",
       properties: {
@@ -141,7 +141,7 @@ export const tools = [
         mcp_store: {
           type: "object",
           description:
-            "Optional: connector source code files. Key = connector id, value = array of {path, content}",
+            "Optional: connector source code files. Key = connector id, value = array of {path, content}. Send SOURCE files only (server.py, package.json, src/*.jsx, etc.) — the server runs npm install + npm run build automatically to produce dist/ files. Never include node_modules/ or dist/ folders.",
         },
       },
       required: ["solution", "skills"],
