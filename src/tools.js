@@ -180,6 +180,33 @@ export const tools = [
     },
   },
   {
+    name: "ateam_upload_connector_files",
+    description:
+      "Upload source files for a connector's MCP server. Use this INSTEAD of mcp_store in ateam_deploy_solution when the source code is too large to inline. Upload files first (one call per file or a few small files at a time), then deploy the solution without mcp_store, then redeploy. Files are staged and automatically included in the next deploy. Requires authentication.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connector_id: {
+          type: "string",
+          description: "The connector ID (must match the connector's id in the solution)",
+        },
+        files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: 'Relative file path (e.g. "server.js", "package.json", "src/utils.js")' },
+              content: { type: "string", description: "The file content as a string" },
+            },
+            required: ["path", "content"],
+          },
+          description: "Array of files to upload. Can send one file at a time for large files, or multiple small files together.",
+        },
+      },
+      required: ["connector_id", "files"],
+    },
+  },
+  {
     name: "ateam_list_solutions",
     description: "List all solutions deployed in the Skill Builder.",
     inputSchema: {
@@ -468,6 +495,7 @@ const WRITE_TOOLS = new Set([
   "ateam_deploy_solution",
   "ateam_deploy_skill",
   "ateam_deploy_connector",
+  "ateam_upload_connector_files",
   "ateam_update",
   "ateam_redeploy",
   "ateam_solution_chat",
@@ -507,7 +535,7 @@ const handlers = {
       { step: 1, title: "Clarify the goal", description: "Understand what the user wants their Team to do", suggested_tools: [] },
       { step: 2, title: "Generate Team map", description: "Design skills, solution architecture, and connectors", suggested_tools: ["ateam_get_spec", "ateam_get_examples", "ateam_get_workflows"] },
       { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["ateam_validate_skill", "ateam_validate_solution"] },
-      { step: 4, title: "Deploy", description: "Push the Team to A-Team Core", suggested_tools: ["ateam_auth", "ateam_deploy_solution"] },
+      { step: 4, title: "Deploy", description: "Push the Team to A-Team Core. If connector source code is too large for mcp_store, use ateam_upload_connector_files first (one file per call), then deploy without mcp_store.", suggested_tools: ["ateam_auth", "ateam_upload_connector_files", "ateam_deploy_solution"] },
       { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["ateam_get_solution", "ateam_update", "ateam_redeploy", "ateam_solution_chat"] },
       { step: 6, title: "Operate & Debug", description: "Test skills (async or sync), poll progress, abort tests, read execution logs, analyze metrics, diff definitions, inspect connector source", suggested_tools: ["ateam_test_skill", "ateam_test_status", "ateam_test_abort", "ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"] },
     ],
@@ -589,6 +617,9 @@ const handlers = {
 
   ateam_deploy_connector: async ({ connector }, sid) =>
     post("/deploy/connector", { connector }, sid),
+
+  ateam_upload_connector_files: async ({ connector_id, files }, sid) =>
+    post(`/deploy/mcp-store/${connector_id}`, { files }, sid),
 
   ateam_list_solutions: async (_args, sid) => get("/deploy/solutions", sid),
 
