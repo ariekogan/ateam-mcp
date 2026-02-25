@@ -40,7 +40,19 @@ class ATeamClientsStore {
   }
 
   async getClient(clientId) {
-    return this.clients.get(clientId);
+    const known = this.clients.get(clientId);
+    if (known) return known;
+
+    // Auto-accept unknown clients (e.g. after container restart wiped in-memory state).
+    // The real auth is the API key, not the client credentials.
+    return {
+      client_id: clientId,
+      client_name: clientId,
+      redirect_uris: [],   // SDK skips redirect_uri validation when empty
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+    };
   }
 
   async registerClient(clientMetadata) {
