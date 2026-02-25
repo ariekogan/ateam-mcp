@@ -17,7 +17,7 @@ if (httpFlag) {
   // ─── HTTP transport (for ChatGPT, remote clients) ─────────────
   const { startHttpServer } = await import("./http.js");
   const portArg = process.argv[process.argv.indexOf("--http") + 1];
-  const port = portArg && !portArg.startsWith("-") ? parseInt(portArg, 10) : 3100;
+  const port = portArg && !portArg.startsWith("-") ? parseInt(portArg, 10) : parseInt(process.env.PORT, 10) || 3100;
   startHttpServer(port);
 } else {
   // ─── Stdio transport (for Claude Code, Cursor, Windsurf, VS Code) ──
