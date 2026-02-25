@@ -136,12 +136,12 @@ export const tools = [
         connectors: {
           type: "array",
           items: { type: "object" },
-          description: "Array of connector metadata (id, name, transport, command, args). IMPORTANT: For stdio connectors with mcp_store code, args MUST use /mcp-store/<connector-id>/server.js as the entry point path (e.g. args: ['/mcp-store/my-connector/server.js']). This is where A-Team Core materializes the uploaded source code.",
+          description: "Array of connector metadata (id, name, transport). command and args are OPTIONAL when mcp_store provides the code — the system auto-detects the entry point (server.js, index.js, package.json main, server.py) and runtime (node, python3). You can still provide explicit command/args to override auto-detection.",
         },
         mcp_store: {
           type: "object",
           description:
-            "Optional: connector source code files. Key = connector id, value = array of {path, content}. Files are uploaded to /mcp-store/<connector-id>/ on the server. Send SOURCE files only (server.js, package.json, src/*.jsx, etc.) — the server runs npm install + npm run build automatically. Never include node_modules/ or dist/ folders.",
+            "Optional: connector source code files. Key = connector id, value = array of {path, content}. Send SOURCE files only (server.js, package.json, src/*.jsx, etc.) — the server runs npm install + npm run build automatically. Never include node_modules/ or dist/ folders. Entry point is auto-detected from the uploaded files.",
         },
       },
       required: ["solution", "skills"],
