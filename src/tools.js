@@ -196,11 +196,13 @@ export const tools = [
             type: "object",
             properties: {
               path: { type: "string", description: 'Relative file path (e.g. "server.js", "package.json", "src/utils.js")' },
-              content: { type: "string", description: "The file content as a string" },
+              content: { type: "string", description: "File content as a string. Use for small files." },
+              content_base64: { type: "string", description: "File content as base64-encoded string. Use when content has complex escaping." },
+              url: { type: "string", description: "URL to fetch file content from (e.g. raw GitHub URL). Server fetches it — no large payload needed." },
             },
-            required: ["path", "content"],
+            required: ["path"],
           },
-          description: "Array of files to upload. Can send one file at a time for large files, or multiple small files together.",
+          description: "Array of files to upload. Each file needs 'path' plus ONE of: 'content' (inline string), 'content_base64' (base64), or 'url' (server fetches it). Send one file per call for large files.",
         },
       },
       required: ["connector_id", "files"],
@@ -618,8 +620,27 @@ const handlers = {
   ateam_deploy_connector: async ({ connector }, sid) =>
     post("/deploy/connector", { connector }, sid),
 
-  ateam_upload_connector_files: async ({ connector_id, files }, sid) =>
-    post(`/deploy/mcp-store/${connector_id}`, { files }, sid),
+  ateam_upload_connector_files: async ({ connector_id, files }, sid) => {
+    // Resolve content_base64 and url into plain content before sending to backend
+    const resolved = [];
+    for (const file of files) {
+      if (!file.path) continue;
+      let content = file.content;
+      if (!content && file.content_base64) {
+        content = Buffer.from(file.content_base64, "base64").toString("utf-8");
+      }
+      if (!content && file.url) {
+        const resp = await fetch(file.url);
+        if (!resp.ok) throw new Error(`Failed to fetch ${file.url}: ${resp.status}`);
+        content = await resp.text();
+      }
+      if (content === undefined || content === null) {
+        throw new Error(`File "${file.path}": provide one of content, content_base64, or url`);
+      }
+      resolved.push({ path: file.path, content });
+    }
+    return post(`/deploy/mcp-store/${connector_id}`, { files: resolved }, sid);
+  },
 
   ateam_list_solutions: async (_args, sid) => get("/deploy/solutions", sid),
 
