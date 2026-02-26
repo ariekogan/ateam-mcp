@@ -569,6 +569,18 @@ const handlers = {
       security: "https://ateam-ai.com/#security",
       engine: "https://ateam-ai.com/#engine",
     },
+    critical_connector_rules: {
+      _note: "CRITICAL: Read this before writing ANY connector code. Violations are caught at deploy time and BLOCKED.",
+      transport: "A-Team connectors use STDIO transport — child processes communicating via stdin/stdout JSON-RPC.",
+      MUST_use: "StdioServerTransport from @modelcontextprotocol/sdk, or raw readline over process.stdin.",
+      MUST_NOT_use: [
+        "express(), fastify(), Koa, or any web framework",
+        "http.createServer() or app.listen(PORT)",
+        "HttpServerTransport, SSEServerTransport, or StreamableHTTPServerTransport",
+      ],
+      stdout_rule: "stdout = JSON-RPC channel. Use console.error() for logging, NOT console.log().",
+      lifecycle_rule: "MCP servers must stay alive. Never call process.exit().",
+    },
     assistant_behavior_contract: {
       first_run_requirements: [
         "Explain platform before endpoints",
@@ -582,11 +594,14 @@ const handlers = {
       always: [
         "Explain Skill vs Solution vs Connector before deploying anything",
         "Validate before deploy",
+        "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear",
       ],
       never: [
         "Deploy before validation",
         "Dump raw spec unless requested",
+        "Write connector code that starts a web server (express, http.createServer, app.listen) — connectors MUST use stdio transport",
+        "Use HttpServerTransport, SSEServerTransport, or any non-stdio MCP transport",
       ],
     },
   }),
