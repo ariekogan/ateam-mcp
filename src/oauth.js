@@ -20,19 +20,24 @@ const PENDING_TTL = 10 * 60 * 1000;    // 10 minutes
 
 // ─── Clients Store ────────────────────────────────────────────────
 
+// Known redirect URIs for MCP clients.
+// The real security gate is the API key — redirect_uri validation is just spec compliance.
+const KNOWN_REDIRECT_URIS = [
+  "https://claude.ai/api/mcp/auth_callback",
+  "https://claude.com/api/mcp/auth_callback",
+  "https://chatgpt.com/connector_platform_oauth_redirect",
+  "http://localhost",
+  "http://127.0.0.1",
+];
+
 class ATeamClientsStore {
   constructor() {
     this.clients = new Map();
-    // Pre-register the well-known public client for Claude.ai
+    // Pre-register the well-known public client
     this.clients.set("ateam-public", {
       client_id: "ateam-public",
       client_name: "A-Team MCP Public Client",
-      redirect_uris: [
-        "https://claude.ai/api/mcp/auth_callback",
-        "https://claude.com/api/mcp/auth_callback",
-        "http://localhost",
-        "http://127.0.0.1",
-      ],
+      redirect_uris: KNOWN_REDIRECT_URIS,
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code"],
       response_types: ["code"],
@@ -45,10 +50,11 @@ class ATeamClientsStore {
 
     // Auto-accept unknown clients (e.g. after container restart wiped in-memory state).
     // The real auth is the API key, not the client credentials.
+    // Include all known redirect URIs so OAuth flows work even after restart.
     return {
       client_id: clientId,
       client_name: clientId,
-      redirect_uris: [],   // SDK skips redirect_uri validation when empty
+      redirect_uris: KNOWN_REDIRECT_URIS,
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
@@ -57,7 +63,10 @@ class ATeamClientsStore {
 
   async registerClient(clientMetadata) {
     const clientId = clientMetadata.client_id || randomUUID();
-    const record = { ...clientMetadata, client_id: clientId };
+    // Merge client's redirect_uris with known ones to ensure OAuth works
+    const clientUris = clientMetadata.redirect_uris || [];
+    const mergedUris = [...new Set([...clientUris, ...KNOWN_REDIRECT_URIS])];
+    const record = { ...clientMetadata, client_id: clientId, redirect_uris: mergedUris };
     this.clients.set(clientId, record);
     return record;
   }
