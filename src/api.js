@@ -127,6 +127,7 @@ function headers(sessionId) {
  */
 function formatError(method, path, status, body) {
   const hints = {
+    400: "Bad request — see the error details above for what to fix.",
     401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call ateam_auth(api_key: \"your_key\").",
     403: "You don't have permission for this operation. Check your tenant and API key. Get a key at https://mcp.ateam-ai.com/get-api-key",
     404: "Resource not found. Check the solution_id or skill_id you're using. Use ateam_list_solutions to see available solutions.",
@@ -139,7 +140,7 @@ function formatError(method, path, status, body) {
   };
 
   const hint = hints[status] || "";
-  const detail = typeof body === "string" && body.length > 0 && body.length < 500 ? body : "";
+  const detail = typeof body === "string" && body.length > 0 && body.length < 2000 ? body : "";
 
   let msg = `A-Team API error: ${method} ${path} returned ${status}`;
   if (detail) msg += ` — ${detail}`;
