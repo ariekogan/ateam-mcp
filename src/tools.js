@@ -1,6 +1,6 @@
 /**
  * A-Team MCP tool definitions and handlers.
- * 17 tools covering the full A-Team External Agent API + auth + bootstrap.
+ * 18 tools covering the full A-Team External Agent API + auth + bootstrap.
  */
 
 import {
@@ -473,6 +473,21 @@ export const tools = [
       required: ["solution_id"],
     },
   },
+  {
+    name: "ateam_delete_solution",
+    description:
+      "Delete a deployed solution and all its skills from A-Team. Use with caution — this removes the solution from both the Skill Builder and A-Team Core. Useful for cleaning up test solutions or starting fresh.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID to delete",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
 ];
 
 // ─── Tool handlers ──────────────────────────────────────────────────
@@ -509,6 +524,7 @@ const WRITE_TOOLS = new Set([
   "ateam_get_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
+  "ateam_delete_solution",
 ]);
 
 const handlers = {
@@ -715,6 +731,9 @@ const handlers = {
     const qs = skill_id ? `?skill_id=${encodeURIComponent(skill_id)}` : "";
     return get(`/deploy/solutions/${solution_id}/diff${qs}`, sid);
   },
+
+  ateam_delete_solution: async ({ solution_id }, sid) =>
+    del(`/deploy/solutions/${solution_id}`, sid),
 };
 
 // ─── Response formatting ────────────────────────────────────────────

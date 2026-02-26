@@ -17,10 +17,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // Per-session credential store (sessionId → { tenant, apiKey })
 const sessions = new Map();
 
-// Global credential fallback — for MCP clients that don't persist sessions
+// Per-tenant credential fallback — for MCP clients that don't persist sessions
 // (e.g., ChatGPT's bridge creates a new session per tool call).
-// Set by ateam_auth, inherited by new sessions that have no credentials.
-let globalFallback = null; // { tenant, apiKey, createdAt }
+// Keyed by tenant to prevent cross-user credential leaks in shared MCP servers.
+const tenantFallbacks = new Map(); // tenant → { tenant, apiKey, createdAt }
 const FALLBACK_TTL = 60 * 60 * 1000; // 60 minutes
 
 /**
@@ -52,17 +52,20 @@ export function setSessionCredentials(sessionId, { tenant, apiKey }) {
   const creds = { tenant: resolvedTenant || "main", apiKey };
   sessions.set(sessionId, creds);
 
-  // Update global fallback — new sessions from the same client will inherit this
-  globalFallback = { ...creds, createdAt: Date.now() };
-  console.log(`[Auth] Credentials set for session ${sessionId}, global fallback updated (tenant: ${creds.tenant})`);
+  // Update per-tenant fallback — only sessions for the SAME tenant will inherit this
+  tenantFallbacks.set(creds.tenant, { ...creds, createdAt: Date.now() });
+  console.log(`[Auth] Credentials set for session ${sessionId}, tenant fallback updated (tenant: ${creds.tenant})`);
 }
 
 /**
- * Get credentials for a session, falling back to global fallback then env vars.
+ * Get credentials for a session, falling back to env vars.
  * Resolution order:
  *   1. Per-session (from ateam_auth or seedCredentials)
- *   2. Global fallback (recent ateam_auth from any session — for ChatGPT)
- *   3. Environment variables (ADAS_API_KEY, ADAS_TENANT)
+ *   2. Environment variables (ADAS_API_KEY, ADAS_TENANT)
+ *
+ * Note: tenantFallbacks are NOT used in getCredentials() to prevent
+ * cross-user credential leaks. They are only used in seedFromFallback()
+ * which requires explicit tenant matching.
  */
 export function getCredentials(sessionId) {
   // 1. Per-session credentials
@@ -71,17 +74,7 @@ export function getCredentials(sessionId) {
     return { tenant: session.tenant, apiKey: session.apiKey };
   }
 
-  // 2. Global fallback (from recent ateam_auth, for clients that drop sessions)
-  if (globalFallback && (Date.now() - globalFallback.createdAt < FALLBACK_TTL)) {
-    // Also seed into this session so subsequent lookups are fast
-    if (sessionId) {
-      sessions.set(sessionId, { tenant: globalFallback.tenant, apiKey: globalFallback.apiKey });
-      console.log(`[Auth] Inherited global fallback credentials into session ${sessionId}`);
-    }
-    return { tenant: globalFallback.tenant, apiKey: globalFallback.apiKey };
-  }
-
-  // 3. Environment variables
+  // 2. Environment variables
   const apiKey = ENV_API_KEY || "";
   let tenant = ENV_TENANT;
   if (!tenant && apiKey) {
@@ -89,6 +82,21 @@ export function getCredentials(sessionId) {
     if (parsed.tenant) tenant = parsed.tenant;
   }
   return { tenant: tenant || "main", apiKey };
+}
+
+/**
+ * Seed a session's credentials from a matching tenant fallback.
+ * Called by HTTP transport when a new session is created with a known tenant
+ * (e.g., from OAuth token). Only inherits from the SAME tenant.
+ */
+export function seedFromFallback(sessionId, tenant) {
+  const fallback = tenantFallbacks.get(tenant);
+  if (fallback && (Date.now() - fallback.createdAt < FALLBACK_TTL)) {
+    sessions.set(sessionId, { tenant: fallback.tenant, apiKey: fallback.apiKey });
+    console.log(`[Auth] Seeded session ${sessionId} from tenant fallback (tenant: ${tenant})`);
+    return true;
+  }
+  return false;
 }
 
 /**
