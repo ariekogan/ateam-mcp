@@ -1,6 +1,11 @@
 /**
  * A-Team MCP tool definitions and handlers.
- * 18 tools covering the full A-Team External Agent API + auth + bootstrap.
+ *
+ * Tools are split into two tiers:
+ *   - Core tools (core: true)  — shown in tools/list, the simplified developer loop
+ *   - Advanced tools (core: false) — hidden from tools/list, still callable by name
+ *
+ * Core loop: bootstrap → auth → get_spec/examples → build_and_run → test → patch → test → done
  */
 
 import {
@@ -11,8 +16,13 @@ import {
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
+  // ═══════════════════════════════════════════════════════════════════
+  // CORE TOOLS — the simplified developer loop
+  // ═══════════════════════════════════════════════════════════════════
+
   {
     name: "ateam_bootstrap",
+    core: true,
     description:
       "REQUIRED onboarding entrypoint for A-Team MCP. MUST be called when user greets, says hi, asks what this is, asks for help, explores capabilities, or when MCP is first connected. Returns platform explanation, example solutions, and assistant behavior instructions. Do NOT improvise an introduction — call this tool instead.",
     inputSchema: {
@@ -22,6 +32,7 @@ export const tools = [
   },
   {
     name: "ateam_auth",
+    core: true,
     description:
       "Authenticate with A-Team. Required before deploying or modifying solutions. The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Read-only operations (spec, examples, validate) work without auth.",
     inputSchema: {
@@ -41,6 +52,7 @@ export const tools = [
   },
   {
     name: "ateam_get_spec",
+    core: true,
     description:
       "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions.",
     inputSchema: {
@@ -58,6 +70,7 @@ export const tools = [
   },
   {
     name: "ateam_get_workflows",
+    core: true,
     description:
       "Get the builder workflows — step-by-step state machines for building skills and solutions. Use this to guide users through the entire build process conversationally. Returns phases, what to ask, what to build, exit criteria, and tips for each stage.",
     inputSchema: {
@@ -67,6 +80,7 @@ export const tools = [
   },
   {
     name: "ateam_get_examples",
+    core: true,
     description:
       "Get complete working examples that pass validation. Study these before building your own.",
     inputSchema: {
@@ -83,44 +97,10 @@ export const tools = [
     },
   },
   {
-    name: "ateam_validate_skill",
+    name: "ateam_build_and_run",
+    core: true,
     description:
-      "Validate a skill definition through the 5-stage A-Team validation pipeline. Part of building a governed AI Team solution. Returns errors and suggestions to fix. Always validate before deploying.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        skill: {
-          type: "object",
-          description: "The full skill definition object to validate",
-        },
-      },
-      required: ["skill"],
-    },
-  },
-  {
-    name: "ateam_validate_solution",
-    description:
-      "Validate a governed AI Team solution — cross-skill contracts, grant economy, handoffs, and LLM quality scoring. Part of building a governed AI Team solution. Always validate before deploying.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution: {
-          type: "object",
-          description: "The full solution definition object to validate",
-        },
-        skills: {
-          type: "array",
-          items: { type: "object" },
-          description: "Array of skill definitions included in the solution",
-        },
-      },
-      required: ["solution"],
-    },
-  },
-  {
-    name: "ateam_deploy_solution",
-    description:
-      "Deploy a governed AI Team solution to A-Team Core — identity, connectors, skills. The Skill Builder auto-generates MCP servers from tool definitions. For connectors with UI or Node.js code, send SOURCE files only via mcp_store — the server runs npm install + npm run build automatically (like Vercel/Netlify). Never send dist/ or node_modules/. Always validate first using ateam_validate_solution. Requires authentication (call ateam_auth first if not using env vars).",
+      "Build and deploy a governed AI Team solution in one step. Validates, deploys, health-checks, and optionally runs a warm test — all in one call. Use this instead of calling validate, deploy, and health separately. Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -136,210 +116,27 @@ export const tools = [
         connectors: {
           type: "array",
           items: { type: "object" },
-          description: "Array of connector metadata (id, name, transport). command and args are OPTIONAL when mcp_store provides the code — the system auto-detects the entry point (server.js, index.js, package.json main, server.py) and runtime (node, python3). You can still provide explicit command/args to override auto-detection.",
+          description: "Optional: connector metadata (id, name, transport). Entry points auto-detected from mcp_store.",
         },
         mcp_store: {
           type: "object",
-          description:
-            "Optional: connector source code files. Key = connector id, value = array of {path, content}. Send SOURCE files only (server.js, package.json, src/*.jsx, etc.) — the server runs npm install + npm run build automatically. Never include node_modules/ or dist/ folders. Entry point is auto-detected from the uploaded files.",
+          description: "Optional: connector source code files. Key = connector id, value = array of {path, content}.",
+        },
+        test_message: {
+          type: "string",
+          description: "Optional: send a test message after deployment to verify the skill works. Returns the full execution result.",
+        },
+        test_skill_id: {
+          type: "string",
+          description: "Optional: which skill to test (defaults to the first skill).",
         },
       },
       required: ["solution", "skills"],
     },
   },
   {
-    name: "ateam_deploy_skill",
-    description: "Deploy a single skill into an existing solution. Requires authentication.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The existing solution ID to add the skill to",
-        },
-        skill: {
-          type: "object",
-          description: "Full skill definition",
-        },
-      },
-      required: ["solution_id", "skill"],
-    },
-  },
-  {
-    name: "ateam_deploy_connector",
-    description: "Deploy a connector — registers in the Skill Builder catalog and connects in A-Team Core. Requires authentication.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        connector: {
-          type: "object",
-          description: "Connector metadata (id, name, transport, command, args)",
-        },
-      },
-      required: ["connector"],
-    },
-  },
-  {
-    name: "ateam_upload_connector_files",
-    description:
-      "Upload source files for a connector's MCP server. Use this INSTEAD of mcp_store in ateam_deploy_solution when the source code is too large to inline. Upload files first (one call per file or a few small files at a time), then deploy the solution without mcp_store, then redeploy. Files are staged and automatically included in the next deploy. Requires authentication.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        connector_id: {
-          type: "string",
-          description: "The connector ID (must match the connector's id in the solution)",
-        },
-        files: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              path: { type: "string", description: 'Relative file path (e.g. "server.js", "package.json", "src/utils.js")' },
-              content: { type: "string", description: "File content as a string. Use for small files." },
-              content_base64: { type: "string", description: "File content as base64-encoded string. Use when content has complex escaping." },
-              url: { type: "string", description: "URL to fetch file content from (e.g. raw GitHub URL). Server fetches it — no large payload needed." },
-            },
-            required: ["path"],
-          },
-          description: "Array of files to upload. Each file needs 'path' plus ONE of: 'content' (inline string), 'content_base64' (base64), or 'url' (server fetches it). Send one file per call for large files.",
-        },
-      },
-      required: ["connector_id", "files"],
-    },
-  },
-  {
-    name: "ateam_list_solutions",
-    description: "List all solutions deployed in the Skill Builder.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "ateam_get_solution",
-    description:
-      "Read solution state — definition, skills, health, status, or export. Use this to inspect deployed solutions.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The solution ID",
-        },
-        view: {
-          type: "string",
-          enum: ["definition", "skills", "health", "status", "export", "validate", "connectors_health"],
-          description:
-            "What to read: 'definition' = full solution def, 'skills' = list skills, 'health' = live health check, 'status' = deploy status, 'export' = exportable bundle, 'validate' = re-validate from stored state, 'connectors_health' = connector status",
-        },
-        skill_id: {
-          type: "string",
-          description: "Optional: read a specific skill by ID (original or internal)",
-        },
-      },
-      required: ["solution_id", "view"],
-    },
-  },
-  {
-    name: "ateam_update",
-    description:
-      "Update a deployed solution or skill incrementally using PATCH. Supports dot notation for scalar fields and _push/_delete/_update for arrays. Requires authentication.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The solution ID",
-        },
-        target: {
-          type: "string",
-          enum: ["solution", "skill"],
-          description: "What to update: 'solution' or 'skill'",
-        },
-        skill_id: {
-          type: "string",
-          description: "Required when target is 'skill'",
-        },
-        updates: {
-          type: "object",
-          description:
-            "The update payload — use dot notation for scalars (e.g. 'problem.statement'), and tools_push/tools_delete/tools_update for array operations",
-        },
-      },
-      required: ["solution_id", "target", "updates"],
-    },
-  },
-  {
-    name: "ateam_redeploy",
-    description:
-      "Re-deploy after making updates. Regenerates MCP servers and pushes to A-Team Core. Requires authentication.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The solution ID",
-        },
-        skill_id: {
-          type: "string",
-          description: "Optional: redeploy a single skill. Omit to redeploy all skills.",
-        },
-      },
-      required: ["solution_id"],
-    },
-  },
-  {
-    name: "ateam_solution_chat",
-    description:
-      "Send a message to the Solution Bot — an AI assistant that understands your deployed solution and can help with modifications.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The solution ID",
-        },
-        message: {
-          type: "string",
-          description: "Your message to the Solution Bot",
-        },
-      },
-      required: ["solution_id", "message"],
-    },
-  },
-
-  // ─── Developer Tools ────────────────────────────────────────────
-
-  {
-    name: "ateam_get_execution_logs",
-    description:
-      "Get execution logs for a solution — recent jobs with step traces, tool calls, errors, and timing. Essential for debugging what actually happened during skill execution.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The solution ID",
-        },
-        skill_id: {
-          type: "string",
-          description: "Optional: filter logs to a specific skill",
-        },
-        job_id: {
-          type: "string",
-          description: "Optional: get detailed trace for a specific job ID",
-        },
-        limit: {
-          type: "number",
-          description: "Max jobs to return (default: 10, max: 50)",
-        },
-      },
-      required: ["solution_id"],
-    },
-  },
-  {
     name: "ateam_test_skill",
+    core: true,
     description:
       "Send a test message to a deployed skill and get the full execution result. By default waits for completion (up to 60s). Set wait=false for async mode — returns job_id immediately, then poll with ateam_test_status.",
     inputSchema: {
@@ -367,9 +164,331 @@ export const tools = [
     },
   },
   {
-    name: "ateam_test_status",
+    name: "ateam_patch",
+    core: true,
     description:
-      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status, pending questions, and result when done. Uses the same data pipeline as the Job Progress UI.",
+      "Update a deployed skill or solution, redeploy, and optionally re-test — all in one step. Use this instead of calling update + redeploy separately. Requires authentication.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        target: {
+          type: "string",
+          enum: ["solution", "skill"],
+          description: "What to update: 'solution' or 'skill'",
+        },
+        skill_id: {
+          type: "string",
+          description: "Required when target is 'skill'",
+        },
+        updates: {
+          type: "object",
+          description:
+            "The update payload — use dot notation for scalars (e.g. 'problem.statement'), and tools_push/tools_delete/tools_update for array operations",
+        },
+        test_message: {
+          type: "string",
+          description: "Optional: re-test the skill after patching. Requires skill_id.",
+        },
+      },
+      required: ["solution_id", "target", "updates"],
+    },
+  },
+  {
+    name: "ateam_get_solution",
+    core: true,
+    description:
+      "Read solution state — definition, skills, health, status, or export. Use this to inspect deployed solutions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        view: {
+          type: "string",
+          enum: ["definition", "skills", "health", "status", "export", "validate", "connectors_health"],
+          description:
+            "What to read: 'definition' = full solution def, 'skills' = list skills, 'health' = live health check, 'status' = deploy status, 'export' = exportable bundle, 'validate' = re-validate from stored state, 'connectors_health' = connector status",
+        },
+        skill_id: {
+          type: "string",
+          description: "Optional: read a specific skill by ID (original or internal)",
+        },
+      },
+      required: ["solution_id", "view"],
+    },
+  },
+  {
+    name: "ateam_list_solutions",
+    core: true,
+    description: "List all solutions deployed in the Skill Builder.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "ateam_delete_solution",
+    core: true,
+    description:
+      "Delete a deployed solution and all its skills from A-Team. Use with caution — this removes the solution from both the Skill Builder and A-Team Core. Useful for cleaning up test solutions or starting fresh.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID to delete",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ADVANCED TOOLS — hidden from tools/list, still callable by name
+  // Use these for manual lifecycle control, debugging, and diagnostics
+  // ═══════════════════════════════════════════════════════════════════
+
+  {
+    name: "ateam_validate_skill",
+    core: false,
+    description:
+      "Validate a skill definition through the 5-stage A-Team validation pipeline. Returns errors and suggestions to fix. (Advanced — ateam_build_and_run validates automatically.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        skill: {
+          type: "object",
+          description: "The full skill definition object to validate",
+        },
+      },
+      required: ["skill"],
+    },
+  },
+  {
+    name: "ateam_validate_solution",
+    core: false,
+    description:
+      "Validate a governed AI Team solution — cross-skill contracts, grant economy, handoffs, and LLM quality scoring. (Advanced — ateam_build_and_run validates automatically.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution: {
+          type: "object",
+          description: "The full solution definition object to validate",
+        },
+        skills: {
+          type: "array",
+          items: { type: "object" },
+          description: "Array of skill definitions included in the solution",
+        },
+      },
+      required: ["solution"],
+    },
+  },
+  {
+    name: "ateam_deploy_solution",
+    core: false,
+    description:
+      "Deploy a governed AI Team solution to A-Team Core. (Advanced — prefer ateam_build_and_run which validates + deploys + health-checks in one step.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution: {
+          type: "object",
+          description: "Solution architecture — identity, grants, handoffs, routing",
+        },
+        skills: {
+          type: "array",
+          items: { type: "object" },
+          description: "Array of full skill definitions",
+        },
+        connectors: {
+          type: "array",
+          items: { type: "object" },
+          description: "Array of connector metadata (id, name, transport). command and args are OPTIONAL when mcp_store provides the code — the system auto-detects the entry point.",
+        },
+        mcp_store: {
+          type: "object",
+          description:
+            "Optional: connector source code files. Key = connector id, value = array of {path, content}.",
+        },
+      },
+      required: ["solution", "skills"],
+    },
+  },
+  {
+    name: "ateam_deploy_skill",
+    core: false,
+    description: "Deploy a single skill into an existing solution. (Advanced — use ateam_build_and_run for new solutions.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The existing solution ID to add the skill to",
+        },
+        skill: {
+          type: "object",
+          description: "Full skill definition",
+        },
+      },
+      required: ["solution_id", "skill"],
+    },
+  },
+  {
+    name: "ateam_deploy_connector",
+    core: false,
+    description: "Deploy a connector — registers in the Skill Builder catalog and connects in A-Team Core. (Advanced.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connector: {
+          type: "object",
+          description: "Connector metadata (id, name, transport, command, args)",
+        },
+      },
+      required: ["connector"],
+    },
+  },
+  {
+    name: "ateam_upload_connector_files",
+    core: false,
+    description:
+      "Upload source files for a connector's MCP server. Use this INSTEAD of mcp_store in ateam_build_and_run when the source code is too large to inline. Upload files first, then build_and_run without mcp_store. (Advanced.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connector_id: {
+          type: "string",
+          description: "The connector ID (must match the connector's id in the solution)",
+        },
+        files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: 'Relative file path (e.g. "server.js", "package.json", "src/utils.js")' },
+              content: { type: "string", description: "File content as a string. Use for small files." },
+              content_base64: { type: "string", description: "File content as base64-encoded string. Use when content has complex escaping." },
+              url: { type: "string", description: "URL to fetch file content from (e.g. raw GitHub URL). Server fetches it — no large payload needed." },
+            },
+            required: ["path"],
+          },
+          description: "Array of files to upload. Each file needs 'path' plus ONE of: 'content' (inline string), 'content_base64' (base64), or 'url' (server fetches it).",
+        },
+      },
+      required: ["connector_id", "files"],
+    },
+  },
+  {
+    name: "ateam_update",
+    core: false,
+    description:
+      "Update a deployed solution or skill incrementally using PATCH. (Advanced — prefer ateam_patch which updates + redeploys + tests in one step.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        target: {
+          type: "string",
+          enum: ["solution", "skill"],
+          description: "What to update: 'solution' or 'skill'",
+        },
+        skill_id: {
+          type: "string",
+          description: "Required when target is 'skill'",
+        },
+        updates: {
+          type: "object",
+          description:
+            "The update payload — use dot notation for scalars (e.g. 'problem.statement'), and tools_push/tools_delete/tools_update for array operations",
+        },
+      },
+      required: ["solution_id", "target", "updates"],
+    },
+  },
+  {
+    name: "ateam_redeploy",
+    core: false,
+    description:
+      "Re-deploy after making updates. (Advanced — prefer ateam_patch which updates + redeploys in one step.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "Optional: redeploy a single skill. Omit to redeploy all skills.",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_solution_chat",
+    core: false,
+    description:
+      "Send a message to the Solution Bot — an AI assistant that understands your deployed solution and can help with modifications. (Advanced.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        message: {
+          type: "string",
+          description: "Your message to the Solution Bot",
+        },
+      },
+      required: ["solution_id", "message"],
+    },
+  },
+  {
+    name: "ateam_get_execution_logs",
+    core: false,
+    description:
+      "Get execution logs for a solution — recent jobs with step traces, tool calls, errors, and timing. Essential for debugging what actually happened during skill execution. (Advanced.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "Optional: filter logs to a specific skill",
+        },
+        job_id: {
+          type: "string",
+          description: "Optional: get detailed trace for a specific job ID",
+        },
+        limit: {
+          type: "number",
+          description: "Max jobs to return (default: 10, max: 50)",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_test_status",
+    core: false,
+    description:
+      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status, pending questions, and result when done. (Advanced — use ateam_test_skill with wait=true for synchronous testing.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -391,8 +510,9 @@ export const tools = [
   },
   {
     name: "ateam_test_abort",
+    core: false,
     description:
-      "Abort a running skill test. Stops the job execution at the next iteration boundary.",
+      "Abort a running skill test. Stops the job execution at the next iteration boundary. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -414,8 +534,9 @@ export const tools = [
   },
   {
     name: "ateam_get_connector_source",
+    core: false,
     description:
-      "Read the source code of a connector's MCP server. Returns the files that make up the connector implementation.",
+      "Read the source code of a connector's MCP server. Returns the files that make up the connector implementation. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -433,8 +554,9 @@ export const tools = [
   },
   {
     name: "ateam_get_metrics",
+    core: false,
     description:
-      "Get execution metrics — timing, tool stats, bottlenecks, signals, and recommendations. Use job_id for single-job deep analysis, or skill_id for recent history overview.",
+      "Get execution metrics — timing, tool stats, bottlenecks, signals, and recommendations. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -456,8 +578,9 @@ export const tools = [
   },
   {
     name: "ateam_diff",
+    core: false,
     description:
-      "Compare the current Builder definition against what's deployed in ADAS Core. Shows which skills are undeployed, orphaned, or have changed fields. Use skill_id to diff a single skill.",
+      "Compare the current Builder definition against what's deployed in ADAS Core. Shows which skills are undeployed, orphaned, or have changed fields. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -473,22 +596,13 @@ export const tools = [
       required: ["solution_id"],
     },
   },
-  {
-    name: "ateam_delete_solution",
-    description:
-      "Delete a deployed solution and all its skills from A-Team. Use with caution — this removes the solution from both the Skill Builder and A-Team Core. Useful for cleaning up test solutions or starting fresh.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The solution ID to delete",
-        },
-      },
-      required: ["solution_id"],
-    },
-  },
 ];
+
+/**
+ * Core tools — shown in MCP tools/list.
+ * Advanced tools are still callable but not advertised.
+ */
+export const coreTools = tools.filter(t => t.core !== false);
 
 // ─── Tool handlers ──────────────────────────────────────────────────
 
@@ -509,6 +623,8 @@ const EXAMPLE_PATHS = {
 
 // Tools that require authentication (write operations)
 const WRITE_TOOLS = new Set([
+  "ateam_build_and_run",
+  "ateam_patch",
   "ateam_deploy_solution",
   "ateam_deploy_skill",
   "ateam_deploy_connector",
@@ -526,6 +642,9 @@ const WRITE_TOOLS = new Set([
   "ateam_diff",
   "ateam_delete_solution",
 ]);
+
+/** Small delay helper */
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const handlers = {
   ateam_bootstrap: async () => ({
@@ -549,20 +668,28 @@ const handlers = {
       { name: "Customer Support Operations Team", description: "Multi-role support system with escalation, refund controls, CRM integration" },
       { name: "Enterprise Compliance Platform", description: "Approval flows, audit logs, policy enforcement" },
     ],
-    recommended_flow: [
-      { step: 1, title: "Clarify the goal", description: "Understand what the user wants their Team to do", suggested_tools: [] },
-      { step: 2, title: "Generate Team map", description: "Design skills, solution architecture, and connectors", suggested_tools: ["ateam_get_spec", "ateam_get_examples", "ateam_get_workflows"] },
-      { step: 3, title: "Validate", description: "Run validation before deploying", suggested_tools: ["ateam_validate_skill", "ateam_validate_solution"] },
-      { step: 4, title: "Deploy", description: "Push the Team to A-Team Core. If connector source code is too large for mcp_store, use ateam_upload_connector_files first (one file per call), then deploy without mcp_store.", suggested_tools: ["ateam_auth", "ateam_upload_connector_files", "ateam_deploy_solution"] },
-      { step: 5, title: "Iterate", description: "Inspect, update, and redeploy as needed", suggested_tools: ["ateam_get_solution", "ateam_update", "ateam_redeploy", "ateam_solution_chat"] },
-      { step: 6, title: "Operate & Debug", description: "Test skills (async or sync), poll progress, abort tests, read execution logs, analyze metrics, diff definitions, inspect connector source", suggested_tools: ["ateam_test_skill", "ateam_test_status", "ateam_test_abort", "ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"] },
-    ],
+    developer_loop: {
+      _note: "This is the recommended build loop. Only 4 steps from definition to running skill.",
+      steps: [
+        { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
+        { step: 2, action: "Build & Run", description: "Define your solution + skills, then validate, deploy, and health-check in one call. Optionally include a test_message to verify it works immediately.", tools: ["ateam_build_and_run"] },
+        { step: 3, action: "Test", description: "Send test messages to your deployed skill and see the full execution trace.", tools: ["ateam_test_skill"] },
+        { step: 4, action: "Iterate", description: "Patch the skill (update + redeploy + re-test in one call), repeat until satisfied.", tools: ["ateam_patch"] },
+      ],
+    },
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
       { id: "domain", question: "Which domain fits best?", type: "enum", options: ["ecommerce", "logistics", "enterprise_ops", "other"] },
       { id: "systems", question: "Which systems should the Team connect to?", type: "multi_select", options: ["slack", "email", "zendesk", "shopify", "jira", "postgres", "custom_api", "none"] },
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
+    advanced_tools: {
+      _note: "These tools are available but hidden from the default tool list. Call them by name when you need fine-grained control.",
+      debugging: ["ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"],
+      manual_lifecycle: ["ateam_validate_skill", "ateam_validate_solution", "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector", "ateam_update", "ateam_redeploy"],
+      async_testing: ["ateam_test_status", "ateam_test_abort"],
+      other: ["ateam_upload_connector_files", "ateam_solution_chat"],
+    },
     static_pages: {
       features: "https://ateam-ai.com/#features",
       use_cases: "https://ateam-ai.com/#usecases",
@@ -589,19 +716,20 @@ const handlers = {
         "Define Skill vs Solution vs Connector",
         "Ask user what solution they want to build",
       ],
-      thinking_order: ["Platform", "Solution", "Skills", "Connectors", "Governance", "Validation", "Deployment"],
+      thinking_order: ["Platform", "Solution", "Skills", "Connectors", "Governance", "Build & Run"],
       tone: "Architectural, enterprise-grade, serious",
       always: [
-        "Explain Skill vs Solution vs Connector before deploying anything",
-        "Validate before deploy",
+        "Explain Skill vs Solution vs Connector before building",
+        "Use ateam_build_and_run for the full lifecycle (validates automatically)",
+        "Use ateam_patch for iterations (updates + redeploys automatically)",
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear",
       ],
       never: [
-        "Deploy before validation",
+        "Call validate + deploy + health separately when ateam_build_and_run does it in one step",
+        "Call update + redeploy separately when ateam_patch does it in one step",
         "Dump raw spec unless requested",
-        "Write connector code that starts a web server (express, http.createServer, app.listen) — connectors MUST use stdio transport",
-        "Use HttpServerTransport, SSEServerTransport, or any non-stdio MCP transport",
+        "Write connector code that starts a web server — connectors MUST use stdio transport",
       ],
     },
   }),
@@ -636,6 +764,188 @@ const handlers = {
   ateam_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
 
   ateam_get_examples: async ({ type }, sid) => get(EXAMPLE_PATHS[type], sid),
+
+  // ─── Composite: Build & Run ────────────────────────────────────────
+  // Validates → Deploys → Health-checks → Optionally tests
+  // One call replaces: validate_solution + deploy_solution + get_solution(health)
+
+  ateam_build_and_run: async ({ solution, skills, connectors, mcp_store, test_message, test_skill_id }, sid) => {
+    const phases = [];
+
+    // Phase 1: Validate
+    let validation;
+    try {
+      validation = await post("/validate/solution", { solution, skills }, sid);
+      phases.push({ phase: "validate", status: "done" });
+    } catch (err) {
+      return {
+        ok: false,
+        phase: "validation",
+        error: err.message,
+        message: "Validation call failed. Check your solution/skill format against the spec (ateam_get_spec topic='solution').",
+      };
+    }
+
+    // Check for blocking errors
+    const errors = validation.errors || validation.validation?.errors || [];
+    if (errors.length > 0) {
+      return {
+        ok: false,
+        phase: "validation",
+        errors,
+        warnings: validation.warnings || validation.validation?.warnings || [],
+        message: `Validation found ${errors.length} error(s). Fix them and try again.`,
+      };
+    }
+
+    // Phase 2: Deploy
+    let deploy;
+    try {
+      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid);
+      phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
+    } catch (err) {
+      return {
+        ok: false,
+        phase: "deployment",
+        phases,
+        error: err.message,
+        validation_warnings: validation.warnings || [],
+        message: "Deployment failed. See error details above.",
+      };
+    }
+
+    if (!deploy.ok) {
+      return {
+        ok: false,
+        phase: "deployment",
+        phases,
+        deploy,
+        validation_warnings: validation.warnings || [],
+        message: "Deployment returned an error. See deploy details above.",
+      };
+    }
+
+    // Phase 3: Health check (with brief wait for propagation)
+    let health;
+    try {
+      await sleep(2000);
+      health = await get(`/deploy/solutions/${solution.id}/health`, sid);
+      phases.push({ phase: "health", status: "done" });
+    } catch (err) {
+      health = { error: err.message };
+      phases.push({ phase: "health", status: "error", error: err.message });
+    }
+
+    // Phase 4: Warm test (optional)
+    let test_result;
+    if (test_message) {
+      const skillId = test_skill_id || skills?.[0]?.id;
+      if (skillId) {
+        try {
+          test_result = await post(
+            `/deploy/solutions/${solution.id}/skills/${skillId}/test`,
+            { message: test_message },
+            sid,
+            { timeoutMs: 90_000 },
+          );
+          phases.push({ phase: "test", status: "done", skill_id: skillId });
+        } catch (err) {
+          test_result = { error: err.message };
+          phases.push({ phase: "test", status: "error", error: err.message });
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      solution_id: solution.id,
+      phases,
+      deploy: {
+        skills_deployed: deploy.import?.skills || [],
+        connectors: deploy.import?.connectors || 0,
+        ...(deploy.deploy_warnings?.length > 0 && { warnings: deploy.deploy_warnings }),
+        ...(deploy.auto_expanded_skills?.length > 0 && { auto_expanded: deploy.auto_expanded_skills }),
+      },
+      health,
+      ...(test_result && { test_result }),
+      ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
+    };
+  },
+
+  // ─── Composite: Patch ──────────────────────────────────────────────
+  // Updates → Redeploys → Optionally tests
+  // One call replaces: ateam_update + ateam_redeploy
+
+  ateam_patch: async ({ solution_id, target, skill_id, updates, test_message }, sid) => {
+    const phases = [];
+
+    // Phase 1: Apply PATCH
+    let patchResult;
+    try {
+      if (target === "skill") {
+        patchResult = await patch(`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates }, sid);
+      } else {
+        patchResult = await patch(`/deploy/solutions/${solution_id}`, { state_update: updates }, sid);
+      }
+      phases.push({ phase: "update", status: "done" });
+    } catch (err) {
+      return {
+        ok: false,
+        phase: "update",
+        error: err.message,
+        message: "Patch failed. Check your updates payload format.",
+      };
+    }
+
+    // Phase 2: Redeploy
+    let redeployResult;
+    try {
+      if (target === "skill" && skill_id) {
+        redeployResult = await post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {}, sid);
+      } else {
+        redeployResult = await post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid);
+      }
+      phases.push({ phase: "redeploy", status: "done" });
+    } catch (err) {
+      return {
+        ok: false,
+        phase: "redeploy",
+        phases,
+        patch: patchResult,
+        error: err.message,
+        message: "Update succeeded but redeploy failed. Try ateam_redeploy manually.",
+      };
+    }
+
+    // Phase 3: Optional re-test
+    let test_result;
+    if (test_message && skill_id) {
+      try {
+        await sleep(1000);
+        test_result = await post(
+          `/deploy/solutions/${solution_id}/skills/${skill_id}/test`,
+          { message: test_message },
+          sid,
+          { timeoutMs: 90_000 },
+        );
+        phases.push({ phase: "test", status: "done" });
+      } catch (err) {
+        test_result = { error: err.message };
+        phases.push({ phase: "test", status: "error", error: err.message });
+      }
+    }
+
+    return {
+      ok: true,
+      solution_id,
+      phases,
+      patch: patchResult,
+      redeploy: redeployResult,
+      ...(test_result && { test_result }),
+    };
+  },
+
+  // ─── Original handlers (unchanged) ────────────────────────────────
 
   ateam_validate_skill: async ({ skill }, sid) => post("/validate/skill", { skill }, sid),
 
@@ -826,7 +1136,7 @@ export async function handleToolCall(name, args, sessionId) {
       content: [{
         type: "text",
         text: [
-          "🔐 Authentication required.",
+          "Authentication required.",
           "",
           "This tool needs an API key. Please ask the user to:",
           "",

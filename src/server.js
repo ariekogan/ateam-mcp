@@ -10,7 +10,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { tools, handleToolCall } from "./tools.js";
+import { tools, coreTools, handleToolCall } from "./tools.js";
 
 /**
  * @param {string} sessionId — identifier for credential isolation.
@@ -18,7 +18,7 @@ import { tools, handleToolCall } from "./tools.js";
  */
 export function createServer(sessionId = "stdio") {
   const server = new Server(
-    { name: "ateam-mcp", version: "0.2.0" },
+    { name: "ateam-mcp", version: "0.3.0" },
     {
       capabilities: { tools: {} },
       instructions: [
@@ -30,7 +30,9 @@ export function createServer(sessionId = "stdio") {
     }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  // Only advertise core tools — advanced tools are still callable but not listed.
+  // This reduces cognitive load from 23+ tools to ~11 in the tool surface.
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: coreTools }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
