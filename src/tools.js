@@ -51,6 +51,53 @@ export const tools = [
     },
   },
   {
+    name: "ateam_quick_start",
+    core: true,
+    description:
+      "Deploy a working AI solution in one call with MINIMAL input. Just provide a name, description, and simple tool list. The platform auto-generates everything else (scenarios, intents, role, guardrails, engine). This is the EASIEST and RECOMMENDED way to deploy. Use this FIRST — you can always refine later with ateam_patch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Solution name, e.g. 'Clinic Scheduler' or 'Order Tracker'",
+        },
+        description: {
+          type: "string",
+          description: "What the solution does in one sentence, e.g. 'Help patients book, cancel, and check clinic appointments'",
+        },
+        tools: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Tool name in snake_case, e.g. 'book_appointment'",
+              },
+              description: {
+                type: "string",
+                description: "What the tool does, e.g. 'Book a new appointment for a patient'",
+              },
+              inputs: {
+                type: "array",
+                items: { type: "string" },
+                description: "Input parameter names as simple strings, e.g. ['patient_name', 'date', 'doctor']. All are treated as required strings.",
+              },
+            },
+            required: ["name", "description"],
+          },
+          description: "The tools (capabilities) the agent can use. Keep it simple — just name, description, and input names.",
+        },
+        test_message: {
+          type: "string",
+          description: "Optional: send a test message after deployment to verify everything works, e.g. 'Book an appointment for John tomorrow at 2pm with Dr. Smith'",
+        },
+      },
+      required: ["name", "description", "tools"],
+    },
+  },
+  {
     name: "ateam_get_spec",
     core: true,
     description:
@@ -669,19 +716,27 @@ const handlers = {
       { name: "Enterprise Compliance Platform", description: "Approval flows, audit logs, policy enforcement" },
     ],
     developer_loop: {
-      _note: "This is the recommended build loop. Only 4 steps from definition to running skill.",
-      steps: [
-        { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
-        { step: 2, action: "Build & Run", description: "Define your solution + skills, then validate, deploy, and health-check in one call. Optionally include a test_message to verify it works immediately.", tools: ["ateam_build_and_run"] },
-        { step: 3, action: "Test", description: "Send test messages to your deployed skill and see the full execution trace.", tools: ["ateam_test_skill"] },
-        { step: 4, action: "Iterate", description: "Patch the skill (update + redeploy + re-test in one call), repeat until satisfied.", tools: ["ateam_patch"] },
-      ],
+      _note: "Two paths to deploy. Quick Start is RECOMMENDED for most use cases.",
+      quick_start: {
+        _recommended: true,
+        description: "Deploy a working solution in ONE call. Just provide name, description, and tools. Platform auto-generates everything else.",
+        steps: [
+          { step: 1, action: "Quick Start", description: "Call ateam_quick_start with a name, description, list of tools, and optional test_message. Done — solution is live.", tools: ["ateam_quick_start"] },
+          { step: 2, action: "Iterate", description: "Refine with ateam_patch. Update tools, guardrails, persona — one call per change.", tools: ["ateam_patch", "ateam_test_skill"] },
+        ],
+      },
+      advanced: {
+        _note: "Full control path. Use only when you need custom grants, handoffs, multi-skill, or connectors.",
+        steps: [
+          { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
+          { step: 2, action: "Build & Run", description: "Construct full solution + skill JSON, then validate, deploy, health-check in one call.", tools: ["ateam_build_and_run"] },
+          { step: 3, action: "Test", description: "Send test messages to deployed skill.", tools: ["ateam_test_skill"] },
+          { step: 4, action: "Iterate", description: "Patch and re-test.", tools: ["ateam_patch"] },
+        ],
+      },
     },
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
-      { id: "domain", question: "Which domain fits best?", type: "enum", options: ["ecommerce", "logistics", "enterprise_ops", "other"] },
-      { id: "systems", question: "Which systems should the Team connect to?", type: "multi_select", options: ["slack", "email", "zendesk", "shopify", "jira", "postgres", "custom_api", "none"] },
-      { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
     advanced_tools: {
       _note: "These tools are available but hidden from the default tool list. Call them by name when you need fine-grained control.",
@@ -710,25 +765,26 @@ const handlers = {
     },
     assistant_behavior_contract: {
       first_run_requirements: [
-        "Explain platform before endpoints",
-        "Frame as AI Team solution platform",
-        "Give at least one example solution",
-        "Define Skill vs Solution vs Connector",
-        "Ask user what solution they want to build",
+        "Explain platform briefly — AI Team solution platform",
+        "Ask user what they want to build",
+        "Use ateam_quick_start to deploy it immediately",
       ],
-      thinking_order: ["Platform", "Solution", "Skills", "Connectors", "Governance", "Build & Run"],
-      tone: "Architectural, enterprise-grade, serious",
+      thinking_order: ["What does the user want?", "Quick Start deploy", "Test", "Iterate"],
+      tone: "Action-oriented, get it running fast",
       always: [
-        "Explain Skill vs Solution vs Connector before building",
-        "Use ateam_build_and_run for the full lifecycle (validates automatically)",
+        "Use ateam_quick_start for first deployment — it handles everything automatically",
         "Use ateam_patch for iterations (updates + redeploys automatically)",
-        "Study the connector example (ateam_get_examples type='connector') before writing connector code",
-        "Ask discovery questions if goal unclear",
+        "Deploy FIRST, refine LATER — don't over-plan",
+        "Start with 1 skill, add more only if the user needs them",
+        "Keep tool lists small (3-5 tools) for first deploy",
+        "Include a test_message in quick_start to verify it works immediately",
       ],
       never: [
-        "Call validate + deploy + health separately when ateam_build_and_run does it in one step",
-        "Call update + redeploy separately when ateam_patch does it in one step",
-        "Dump raw spec unless requested",
+        "Tell the user to paste JSON in a UI — you have tools, USE THEM",
+        "Give up and say 'I cannot deploy through this tool layer' — you CAN",
+        "Over-architect: do NOT create 4 skills and 6 connectors for a simple app",
+        "Call validate + deploy + health separately when composite tools do it in one step",
+        "Spend multiple turns studying spec before deploying — just quick_start it",
         "Write connector code that starts a web server — connectors MUST use stdio transport",
       ],
     },
@@ -757,6 +813,84 @@ const handlers = {
         message: `Authentication failed: ${err.message}. The user can get a valid API key at https://mcp.ateam-ai.com/get-api-key`,
       };
     }
+  },
+
+  // ─── Quick Start ─────────────────────────────────────────────────
+  // Simplest possible deploy: name + description + tools → live solution
+  // Constructs the full valid payload internally, then delegates to build_and_run
+
+  ateam_quick_start: async ({ name, description, tools: toolDefs, test_message }, sid) => {
+    // Generate kebab-case IDs from name
+    const solutionId = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    const skillId = `${solutionId}-agent`;
+
+    // Expand simple tool definitions into full A-Team tool format
+    const expandedTools = (toolDefs || []).map((t) => {
+      const toolName = t.name.replace(/[^a-z0-9_]/gi, "_").toLowerCase();
+      return {
+        id: `tool-${toolName}`,
+        name: `${skillId}.${toolName}`,
+        description: t.description || toolName,
+        inputs: (t.inputs || []).map((inp) =>
+          typeof inp === "string"
+            ? { name: inp, type: "string", required: true, description: inp.replace(/_/g, " ") }
+            : inp,
+        ),
+        output: { type: "object", description: `Result of ${toolName}` },
+        security: { classification: "public" },
+        mock: { enabled: true, mode: "examples", examples: [] },
+      };
+    });
+
+    if (expandedTools.length === 0) {
+      return {
+        ok: false,
+        error: "At least one tool is required. Provide a tools array with {name, description, inputs?}.",
+      };
+    }
+
+    // Build minimal solution
+    const solution = {
+      id: solutionId,
+      name,
+      description,
+      version: "0.1.0",
+      skills: [{ id: skillId, name: `${name} Agent`, role: "gateway", description }],
+    };
+
+    // Build minimal skill — platform auto-expands scenarios, intents, role, engine
+    const skill = {
+      id: skillId,
+      name: `${name} Agent`,
+      description,
+      phase: "TOOL_DEFINITION",
+      problem: {
+        statement: description,
+        goals: [`Help users with ${name.toLowerCase()} tasks efficiently`],
+      },
+      tools: expandedTools,
+      policy: {
+        guardrails: {
+          never: [
+            "Make up information not provided by tools",
+            "Take destructive actions without user confirmation",
+          ],
+          always: [
+            "Use available tools to fulfill user requests",
+            "Confirm important actions with the user before executing",
+          ],
+        },
+      },
+    };
+
+    // Delegate to build_and_run
+    return handlers.ateam_build_and_run(
+      { solution, skills: [skill], test_message },
+      sid,
+    );
   },
 
   ateam_get_spec: async ({ topic }, sid) => get(SPEC_PATHS[topic], sid),
