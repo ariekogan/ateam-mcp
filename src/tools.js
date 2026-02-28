@@ -778,6 +778,7 @@ const handlers = {
         "Start with 1 skill, add more only if the user needs them",
         "Keep tool lists small (3-5 tools) for first deploy",
         "Include a test_message in quick_start to verify it works immediately",
+        "Every tool MUST have working mock examples — mock.examples array must NOT be empty. Each example needs id, input (matching the tool inputs), output (realistic response), and description.",
       ],
       never: [
         "Tell the user to paste JSON in a UI — you have tools, USE THEM",
@@ -786,6 +787,7 @@ const handlers = {
         "Call validate + deploy + health separately when composite tools do it in one step",
         "Spend multiple turns studying spec before deploying — just quick_start it",
         "Write connector code that starts a web server — connectors MUST use stdio transport",
+        "Deploy tools with empty mock examples (mock.examples: []) — the agent won't be able to call them",
       ],
     },
   }),
@@ -827,21 +829,40 @@ const handlers = {
       .replace(/^-|-$/g, "");
     const skillId = `${solutionId}-agent`;
 
-    // Expand simple tool definitions into full A-Team tool format
+    // Expand simple tool definitions into full A-Team tool format (with working mocks)
     const expandedTools = (toolDefs || []).map((t) => {
       const toolName = t.name.replace(/[^a-z0-9_]/gi, "_").toLowerCase();
+      const inputs = (t.inputs || []).map((inp) =>
+        typeof inp === "string"
+          ? { name: inp, type: "string", required: true, description: inp.replace(/_/g, " ") }
+          : inp,
+      );
+
+      // Generate a working mock example from the tool's inputs
+      const mockInput = {};
+      for (const inp of inputs) {
+        const n = typeof inp === "string" ? inp : inp.name;
+        mockInput[n] = `sample_${n}`;
+      }
+      const mockOutput = { success: true, message: `${toolName} completed successfully`, ...mockInput };
+
       return {
         id: `tool-${toolName}`,
         name: `${skillId}.${toolName}`,
         description: t.description || toolName,
-        inputs: (t.inputs || []).map((inp) =>
-          typeof inp === "string"
-            ? { name: inp, type: "string", required: true, description: inp.replace(/_/g, " ") }
-            : inp,
-        ),
+        inputs,
         output: { type: "object", description: `Result of ${toolName}` },
         security: { classification: "public" },
-        mock: { enabled: true, mode: "examples", examples: [] },
+        mock: {
+          enabled: true,
+          mode: "examples",
+          examples: [{
+            id: `${toolName}-example`,
+            input: mockInput,
+            output: mockOutput,
+            description: `Example: ${t.description || toolName}`,
+          }],
+        },
       };
     });
 
