@@ -108,6 +108,17 @@ export function isAuthenticated(sessionId) {
 }
 
 /**
+ * Check if a session has been explicitly authenticated via ateam_auth.
+ * This checks ONLY per-session credentials, ignoring env vars.
+ * Used to gate mutating operations — env vars alone are not sufficient
+ * to deploy, update, or delete solutions.
+ */
+export function isExplicitlyAuthenticated(sessionId) {
+  if (!sessionId) return false;
+  return sessions.has(sessionId);
+}
+
+/**
  * Remove session credentials (on disconnect).
  */
 export function clearSession(sessionId) {

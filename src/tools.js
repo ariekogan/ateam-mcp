@@ -10,7 +10,8 @@
 
 import {
   get, post, patch, del,
-  setSessionCredentials, isAuthenticated, getCredentials, parseApiKey,
+  setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
+  getCredentials, parseApiKey,
 } from "./api.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
@@ -34,7 +35,7 @@ export const tools = [
     name: "ateam_auth",
     core: true,
     description:
-      "Authenticate with A-Team. Required before deploying or modifying solutions. The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Read-only operations (spec, examples, validate) work without auth.",
+      "Authenticate with A-Team. Required before any tenant-aware operation (reading solutions, deploying, testing, etc.). The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Only global endpoints (spec, examples, validate) work without auth. IMPORTANT: Even if environment variables (ADAS_API_KEY) are configured, you MUST call ateam_auth explicitly — env vars alone are not sufficient.",
     inputSchema: {
       type: "object",
       properties: {
@@ -621,8 +622,12 @@ const EXAMPLE_PATHS = {
   solution: "/spec/examples/solution",
 };
 
-// Tools that require authentication (write operations)
-const WRITE_TOOLS = new Set([
+// Tools that are tenant-aware — require EXPLICIT ateam_auth (env vars alone not enough).
+// This prevents accidental reads/writes to the wrong tenant when env vars are
+// baked into MCP config (e.g., ADAS_TENANT + ADAS_API_KEY in ~/.claude.json).
+// Any tool that touches tenant-specific data (solutions, skills, logs, tests) is here.
+const TENANT_TOOLS = new Set([
+  // Write operations
   "ateam_build_and_run",
   "ateam_patch",
   "ateam_deploy_solution",
@@ -631,8 +636,11 @@ const WRITE_TOOLS = new Set([
   "ateam_upload_connector_files",
   "ateam_update",
   "ateam_redeploy",
+  "ateam_delete_solution",
   "ateam_solution_chat",
-  // Developer tools (read tenant-specific runtime data)
+  // Read operations (tenant-specific data)
+  "ateam_list_solutions",
+  "ateam_get_solution",
   "ateam_get_execution_logs",
   "ateam_test_skill",
   "ateam_test_status",
@@ -640,7 +648,6 @@ const WRITE_TOOLS = new Set([
   "ateam_get_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
-  "ateam_delete_solution",
 ]);
 
 /** Small delay helper */
@@ -1130,21 +1137,28 @@ export async function handleToolCall(name, args, sessionId) {
     };
   }
 
-  // Check auth for write operations
-  if (WRITE_TOOLS.has(name) && !isAuthenticated(sessionId)) {
+  // Check auth for tenant-aware operations — requires explicit ateam_auth call.
+  // Env vars (ADAS_API_KEY / ADAS_TENANT) are NOT sufficient — they may be
+  // baked into MCP config and silently target the wrong tenant.
+  // Only global/public tools (bootstrap, spec, examples, validate) bypass this.
+  if (TENANT_TOOLS.has(name) && !isExplicitlyAuthenticated(sessionId)) {
+    const hasEnvVars = isAuthenticated(sessionId);
     return {
       content: [{
         type: "text",
         text: [
-          "Authentication required.",
+          "Authentication required — call ateam_auth first.",
           "",
-          "This tool needs an API key. Please ask the user to:",
+          hasEnvVars
+            ? "Environment variables (ADAS_API_KEY) were detected, but they are not sufficient for tenant-aware operations. You must call ateam_auth explicitly to confirm which tenant you intend to use."
+            : "No authentication found.",
           "",
+          "Please ask the user to:",
           "1. Get their API key at: https://mcp.ateam-ai.com/get-api-key",
           "2. Then call: ateam_auth(api_key: \"<their key>\")",
           "",
-          "The key looks like: adas_<tenant>_<32hex>",
-          "The tenant is auto-extracted — no separate tenant parameter needed.",
+          "The key format is: adas_<tenant>_<32hex> — the tenant is auto-extracted.",
+          "This prevents accidental operations on the wrong tenant from pre-configured env vars.",
         ].join("\n"),
       }],
       isError: true,
