@@ -11,7 +11,7 @@
 import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
-  getCredentials, parseApiKey,
+  getCredentials, parseApiKey, touchSession, getSessionContext,
 } from "./api.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
@@ -1137,6 +1137,13 @@ export async function handleToolCall(name, args, sessionId) {
     };
   }
 
+  // Track activity + context on every tool call (keeps session alive, records what user is working on)
+  touchSession(sessionId, {
+    toolName: name,
+    solutionId: args?.solution_id,
+    skillId: args?.skill_id,
+  });
+
   // Check auth for tenant-aware operations — requires explicit ateam_auth call.
   // Env vars (ADAS_API_KEY / ADAS_TENANT) are NOT sufficient — they may be
   // baked into MCP config and silently target the wrong tenant.
@@ -1167,6 +1174,20 @@ export async function handleToolCall(name, args, sessionId) {
 
   try {
     const result = await handler(args, sessionId);
+
+    // For ateam_bootstrap, inject session context so the LLM knows what the user was working on
+    if (name === "ateam_bootstrap") {
+      const ctx = getSessionContext(sessionId);
+      if (ctx.activeSolutionId || ctx.lastSkillId) {
+        result.session_context = {
+          _note: "This user has an active session. You can reference their previous work.",
+          active_solution_id: ctx.activeSolutionId || null,
+          last_skill_id: ctx.lastSkillId || null,
+          last_tool_used: ctx.lastToolName || null,
+        };
+      }
+    }
+
     return {
       content: [{ type: "text", text: formatResult(result, name) }],
     };

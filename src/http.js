@@ -23,7 +23,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import { createServer } from "./server.js";
-import { clearSession, setSessionCredentials, parseApiKey } from "./api.js";
+import {
+  clearSession, setSessionCredentials, parseApiKey,
+  startSessionSweeper, getSessionStats, sweepStaleSessions,
+} from "./api.js";
 import { mountOAuth } from "./oauth.js";
 
 // Active sessions
@@ -169,7 +172,12 @@ export function startHttpServer(port = 3100) {
 
   // ─── Health check ─────────────────────────────────────────────
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, service: "ateam-mcp", transport: "http" });
+    res.json({
+      ok: true,
+      service: "ateam-mcp",
+      transport: "http",
+      sessions: getSessionStats(),
+    });
   });
 
   // ─── Get API Key — redirect to Skill Builder with auto-open ──
@@ -290,8 +298,12 @@ export function startHttpServer(port = 3100) {
     console.log(`  Health check: http://localhost:${port}/health`);
   });
 
-  // Graceful shutdown
+  // Start periodic session cleanup (sweeps stale sessions every 5 min)
+  startSessionSweeper();
+
+  // Graceful shutdown — close all transports and clear sessions
   process.on("SIGINT", async () => {
+    console.log(`[HTTP] Shutting down — closing ${Object.keys(transports).length} transport(s)...`);
     for (const sid of Object.keys(transports)) {
       try {
         await transports[sid].close();

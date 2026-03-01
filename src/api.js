@@ -5,6 +5,9 @@
  *   1. Per-session override (set via ateam_auth tool — used by HTTP transport)
  *   2. Environment variables (ADAS_API_KEY, ADAS_TENANT — used by stdio transport)
  *   3. Defaults (no key, tenant "main")
+ *
+ * Sessions also track activity timestamps and optional context (active solution,
+ * last skill) to support TTL-based cleanup and smarter UX.
  */
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
@@ -14,14 +17,15 @@ const ENV_API_KEY = process.env.ADAS_API_KEY || "";
 // Request timeout (30 seconds)
 const REQUEST_TIMEOUT_MS = 30_000;
 
-// Per-session credential store (sessionId → { tenant, apiKey })
-const sessions = new Map();
+// Session TTL — sessions idle longer than this are swept
+const SESSION_TTL = 60 * 60 * 1000; // 60 minutes
 
-// Per-tenant credential fallback — for MCP clients that don't persist sessions
-// (e.g., ChatGPT's bridge creates a new session per tool call).
-// Keyed by tenant to prevent cross-user credential leaks in shared MCP servers.
-const tenantFallbacks = new Map(); // tenant → { tenant, apiKey, createdAt }
-const FALLBACK_TTL = 60 * 60 * 1000; // 60 minutes
+// Sweep interval — how often we check for stale sessions
+const SWEEP_INTERVAL = 5 * 60 * 1000; // every 5 minutes
+
+// Per-session store (sessionId → { tenant, apiKey, lastActivity, context })
+// context: { activeSolutionId, lastSkillId, lastToolName }
+const sessions = new Map();
 
 /**
  * Parse a tenant-embedded API key.
@@ -41,7 +45,6 @@ export function parseApiKey(key) {
 /**
  * Set credentials for a session (called by ateam_auth tool).
  * If tenant is not provided, it's auto-extracted from the key.
- * Also updates the global fallback so new sessions inherit credentials.
  */
 export function setSessionCredentials(sessionId, { tenant, apiKey }) {
   let resolvedTenant = tenant;
@@ -49,12 +52,14 @@ export function setSessionCredentials(sessionId, { tenant, apiKey }) {
     const parsed = parseApiKey(apiKey);
     if (parsed.tenant) resolvedTenant = parsed.tenant;
   }
-  const creds = { tenant: resolvedTenant || "main", apiKey };
-  sessions.set(sessionId, creds);
-
-  // Update per-tenant fallback — only sessions for the SAME tenant will inherit this
-  tenantFallbacks.set(creds.tenant, { ...creds, createdAt: Date.now() });
-  console.log(`[Auth] Credentials set for session ${sessionId}, tenant fallback updated (tenant: ${creds.tenant})`);
+  const existing = sessions.get(sessionId);
+  sessions.set(sessionId, {
+    tenant: resolvedTenant || "main",
+    apiKey,
+    lastActivity: Date.now(),
+    context: existing?.context || {},
+  });
+  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"})`);
 }
 
 /**
@@ -62,10 +67,6 @@ export function setSessionCredentials(sessionId, { tenant, apiKey }) {
  * Resolution order:
  *   1. Per-session (from ateam_auth or seedCredentials)
  *   2. Environment variables (ADAS_API_KEY, ADAS_TENANT)
- *
- * Note: tenantFallbacks are NOT used in getCredentials() to prevent
- * cross-user credential leaks. They are only used in seedFromFallback()
- * which requires explicit tenant matching.
  */
 export function getCredentials(sessionId) {
   // 1. Per-session credentials
@@ -85,21 +86,6 @@ export function getCredentials(sessionId) {
 }
 
 /**
- * Seed a session's credentials from a matching tenant fallback.
- * Called by HTTP transport when a new session is created with a known tenant
- * (e.g., from OAuth token). Only inherits from the SAME tenant.
- */
-export function seedFromFallback(sessionId, tenant) {
-  const fallback = tenantFallbacks.get(tenant);
-  if (fallback && (Date.now() - fallback.createdAt < FALLBACK_TTL)) {
-    sessions.set(sessionId, { tenant: fallback.tenant, apiKey: fallback.apiKey });
-    console.log(`[Auth] Seeded session ${sessionId} from tenant fallback (tenant: ${tenant})`);
-    return true;
-  }
-  return false;
-}
-
-/**
  * Check if a session is authenticated (has an API key from any source).
  */
 export function isAuthenticated(sessionId) {
@@ -110,8 +96,8 @@ export function isAuthenticated(sessionId) {
 /**
  * Check if a session has been explicitly authenticated via ateam_auth.
  * This checks ONLY per-session credentials, ignoring env vars.
- * Used to gate mutating operations — env vars alone are not sufficient
- * to deploy, update, or delete solutions.
+ * Used to gate tenant-aware operations — env vars alone are not sufficient
+ * to deploy, update, or read solutions.
  */
 export function isExplicitlyAuthenticated(sessionId) {
   if (!sessionId) return false;
@@ -119,10 +105,84 @@ export function isExplicitlyAuthenticated(sessionId) {
 }
 
 /**
+ * Record activity on a session — called on every tool call.
+ * Keeps the session alive and updates context for smarter UX.
+ */
+export function touchSession(sessionId, { toolName, solutionId, skillId } = {}) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  session.lastActivity = Date.now();
+
+  // Update context — track what the user is working on
+  if (toolName) session.context.lastToolName = toolName;
+  if (solutionId) session.context.activeSolutionId = solutionId;
+  if (skillId) session.context.lastSkillId = skillId;
+}
+
+/**
+ * Get session context — what the user has been working on.
+ * Returns {} if no session or no context.
+ */
+export function getSessionContext(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return {};
+  return { ...session.context };
+}
+
+/**
  * Remove session credentials (on disconnect).
  */
 export function clearSession(sessionId) {
   sessions.delete(sessionId);
+}
+
+/**
+ * Sweep expired sessions — removes sessions idle longer than SESSION_TTL.
+ * Returns the number of sessions removed.
+ */
+export function sweepStaleSessions() {
+  const now = Date.now();
+  let swept = 0;
+  for (const [sid, session] of sessions) {
+    if (now - session.lastActivity > SESSION_TTL) {
+      sessions.delete(sid);
+      swept++;
+    }
+  }
+  if (swept > 0) {
+    console.log(`[Session] Swept ${swept} stale session(s). ${sessions.size} active.`);
+  }
+  return swept;
+}
+
+/**
+ * Start the periodic session sweep timer.
+ * Called once from HTTP transport on startup.
+ */
+export function startSessionSweeper() {
+  const timer = setInterval(sweepStaleSessions, SWEEP_INTERVAL);
+  timer.unref(); // don't prevent process exit
+  console.log(`[Session] Sweep timer started (interval: ${SWEEP_INTERVAL / 1000}s, TTL: ${SESSION_TTL / 1000}s)`);
+  return timer;
+}
+
+/**
+ * Get session stats — for health checks and debugging.
+ */
+export function getSessionStats() {
+  const now = Date.now();
+  let oldest = Infinity;
+  let newest = 0;
+  for (const [, session] of sessions) {
+    if (session.lastActivity < oldest) oldest = session.lastActivity;
+    if (session.lastActivity > newest) newest = session.lastActivity;
+  }
+  return {
+    active: sessions.size,
+    oldestAge: sessions.size > 0 ? Math.round((now - oldest) / 1000) : 0,
+    newestAge: sessions.size > 0 ? Math.round((now - newest) / 1000) : 0,
+  };
 }
 
 function headers(sessionId) {
