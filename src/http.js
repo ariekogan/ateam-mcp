@@ -26,6 +26,7 @@ import { createServer } from "./server.js";
 import {
   clearSession, setSessionCredentials, parseApiKey,
   startSessionSweeper, getSessionStats, sweepStaleSessions,
+  setSessionBearerToken, getBearerAuth,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
 
@@ -327,11 +328,25 @@ function getNewestToken() {
 /**
  * If the request has a validated Bearer token (set by requireBearerAuth),
  * auto-seed session credentials so the user doesn't need to call ateam_auth.
+ *
+ * Cross-session persistence: if a previous session with the same bearer
+ * token was authenticated via ateam_auth, inherit those credentials.
  */
 function seedCredentials(req, sessionId) {
   const token = req.auth?.token;
   if (!token) return;
 
+  // Track bearer → session mapping for cross-session auth persistence
+  setSessionBearerToken(sessionId, token);
+
+  // Check if a previous session with this bearer was auth'd via ateam_auth
+  const cached = getBearerAuth(token);
+  if (cached) {
+    setSessionCredentials(sessionId, cached);
+    return;
+  }
+
+  // First time — seed from the OAuth bearer token itself
   const parsed = parseApiKey(token);
   if (parsed.isValid) {
     setSessionCredentials(sessionId, { tenant: parsed.tenant, apiKey: token });

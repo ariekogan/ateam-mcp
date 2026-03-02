@@ -27,6 +27,14 @@ const SWEEP_INTERVAL = 5 * 60 * 1000; // every 5 minutes
 // context: { activeSolutionId, lastSkillId, lastToolName }
 const sessions = new Map();
 
+// Bearer-token-indexed auth cache — persists ateam_auth credentials across sessions.
+// When a user calls ateam_auth on session A, and session B starts with the same
+// OAuth bearer token, session B inherits those credentials automatically.
+const bearerAuth = new Map(); // bearerToken → { tenant, apiKey, updatedAt }
+
+// Session → bearer token mapping (for updating bearerAuth when ateam_auth is called)
+const sessionBearerTokens = new Map(); // sessionId → bearerToken
+
 /**
  * Parse a tenant-embedded API key.
  * Format: adas_<tenant>_<32hex>
@@ -134,7 +142,43 @@ export function getSessionContext(sessionId) {
  * Remove session credentials (on disconnect).
  */
 export function clearSession(sessionId) {
+  sessionBearerTokens.delete(sessionId);
   sessions.delete(sessionId);
+}
+
+/**
+ * Associate a session with its OAuth bearer token.
+ * Called from seedCredentials in http.js.
+ */
+export function setSessionBearerToken(sessionId, bearerToken) {
+  sessionBearerTokens.set(sessionId, bearerToken);
+}
+
+/**
+ * Get cached ateam_auth credentials for a bearer token.
+ * Returns null if no auth was cached for this token.
+ */
+export function getBearerAuth(bearerToken) {
+  if (!bearerToken) return null;
+  const entry = bearerAuth.get(bearerToken);
+  if (!entry) return null;
+  // Expire after 2 hours
+  if (Date.now() - entry.updatedAt > 2 * 60 * 60 * 1000) {
+    bearerAuth.delete(bearerToken);
+    return null;
+  }
+  return { tenant: entry.tenant, apiKey: entry.apiKey };
+}
+
+/**
+ * Cache ateam_auth credentials by the session's bearer token.
+ * Called from tools.js after a successful ateam_auth.
+ */
+export function cacheBearerAuth(sessionId, { tenant, apiKey }) {
+  const bearerToken = sessionBearerTokens.get(sessionId);
+  if (!bearerToken) return;
+  bearerAuth.set(bearerToken, { tenant, apiKey, updatedAt: Date.now() });
+  console.log(`[Auth] Cached bearer auth for cross-session persistence (tenant: ${tenant})`);
 }
 
 /**
