@@ -26,6 +26,7 @@ import { createServer } from "./server.js";
 import {
   clearSession, setSessionCredentials, parseApiKey,
   startSessionSweeper, getSessionStats, sweepStaleSessions,
+  bindSessionBearer, getAuthOverride,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
 
@@ -326,13 +327,27 @@ function getNewestToken() {
 }
 
 /**
- * If the request has a validated Bearer token (set by requireBearerAuth),
- * auto-seed session credentials so the user doesn't need to call ateam_auth.
+ * Seed session credentials from the OAuth bearer token.
+ *
+ * The bearer IS the user's API key (set during OAuth authorization).
+ * If the user previously called ateam_auth to override (e.g., switch tenants),
+ * that override is stored per bearer and takes priority here.
  */
 function seedCredentials(req, sessionId) {
   const token = req.auth?.token;
   if (!token) return;
 
+  // Track bearer → session (persistent actor identity)
+  bindSessionBearer(sessionId, token);
+
+  // Check for ateam_auth override for this bearer
+  const override = getAuthOverride(token);
+  if (override) {
+    setSessionCredentials(sessionId, { ...override, explicit: true });
+    return;
+  }
+
+  // Default: use the bearer token itself as credentials
   const parsed = parseApiKey(token);
   if (parsed.isValid) {
     setSessionCredentials(sessionId, { tenant: parsed.tenant, apiKey: token });

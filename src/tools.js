@@ -12,6 +12,7 @@ import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, touchSession, getSessionContext,
+  setAuthOverride,
 } from "./api.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
@@ -748,7 +749,9 @@ const handlers = {
       const parsed = parseApiKey(api_key);
       resolvedTenant = parsed.tenant || "main";
     }
-    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key });
+    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, explicit: true });
+    // Persist override per bearer (survives session changes)
+    setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key });
     // Verify the key works by listing solutions
     try {
       const result = await get("/deploy/solutions", sessionId);

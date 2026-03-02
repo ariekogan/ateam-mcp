@@ -27,6 +27,16 @@ const SWEEP_INTERVAL = 5 * 60 * 1000; // every 5 minutes
 // context: { activeSolutionId, lastSkillId, lastToolName }
 const sessions = new Map();
 
+// ── Bearer-based auth (persistent across sessions) ──────────────
+// The OAuth bearer token IS the user's API key (oauth.js exchangeAuthorizationCode).
+// Each user has a unique bearer. MCP clients create new sessions per tool call,
+// so we use the bearer as the persistent actor identity.
+//
+// When a user calls ateam_auth to override (e.g., switch tenants), the override
+// is stored per bearer and applied to all future sessions from that user.
+const authOverrides = new Map();  // bearerToken → { tenant, apiKey, updatedAt }
+const sessionBearers = new Map(); // sessionId → bearerToken
+
 /**
  * Parse a tenant-embedded API key.
  * Format: adas_<tenant>_<32hex>
@@ -43,10 +53,11 @@ export function parseApiKey(key) {
 }
 
 /**
- * Set credentials for a session (called by ateam_auth tool).
+ * Set credentials for a session.
  * If tenant is not provided, it's auto-extracted from the key.
+ * Set explicit=true when called from ateam_auth (not from seedCredentials).
  */
-export function setSessionCredentials(sessionId, { tenant, apiKey }) {
+export function setSessionCredentials(sessionId, { tenant, apiKey, explicit = false }) {
   let resolvedTenant = tenant;
   if (!resolvedTenant && apiKey) {
     const parsed = parseApiKey(apiKey);
@@ -56,10 +67,11 @@ export function setSessionCredentials(sessionId, { tenant, apiKey }) {
   sessions.set(sessionId, {
     tenant: resolvedTenant || "main",
     apiKey,
+    authExplicit: explicit || existing?.authExplicit || false,
     lastActivity: Date.now(),
     context: existing?.context || {},
   });
-  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"})`);
+  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"}${explicit ? ", explicit" : ""})`);
 }
 
 /**
@@ -95,13 +107,17 @@ export function isAuthenticated(sessionId) {
 
 /**
  * Check if a session has been explicitly authenticated via ateam_auth.
- * This checks ONLY per-session credentials, ignoring env vars.
+ * Checks per-session credentials AND bearer auth overrides.
  * Used to gate tenant-aware operations — env vars alone are not sufficient
  * to deploy, update, or read solutions.
  */
 export function isExplicitlyAuthenticated(sessionId) {
   if (!sessionId) return false;
-  return sessions.has(sessionId);
+  // Session has credentials AND they came from ateam_auth (not just seedCredentials)
+  const session = sessions.get(sessionId);
+  if (session?.authExplicit) return true;
+  // Bearer has an active auth override from a previous session's ateam_auth
+  return hasBearerAuth(sessionId);
 }
 
 /**
@@ -134,7 +150,40 @@ export function getSessionContext(sessionId) {
  * Remove session credentials (on disconnect).
  */
 export function clearSession(sessionId) {
+  sessionBearers.delete(sessionId);
   sessions.delete(sessionId);
+}
+
+// ── Bearer identity functions ──────────────────────────────────────
+
+/** Bind a session to its OAuth bearer token. Called from seedCredentials. */
+export function bindSessionBearer(sessionId, bearerToken) {
+  sessionBearers.set(sessionId, bearerToken);
+}
+
+/** Store ateam_auth override for this user (by bearer). Called from tools.js. */
+export function setAuthOverride(sessionId, { tenant, apiKey }) {
+  const bearer = sessionBearers.get(sessionId);
+  if (!bearer) return;
+  authOverrides.set(bearer, { tenant, apiKey, updatedAt: Date.now() });
+  console.log(`[Auth] Override stored for bearer (tenant: ${tenant})`);
+}
+
+/** Get ateam_auth override for a bearer token. Returns null if none/expired. */
+export function getAuthOverride(bearerToken) {
+  const entry = authOverrides.get(bearerToken);
+  if (!entry) return null;
+  if (Date.now() - entry.updatedAt > SESSION_TTL) {
+    authOverrides.delete(bearerToken);
+    return null;
+  }
+  return { tenant: entry.tenant, apiKey: entry.apiKey };
+}
+
+/** Check if a bearer has an active auth override. */
+export function hasBearerAuth(sessionId) {
+  const bearer = sessionBearers.get(sessionId);
+  return bearer ? authOverrides.has(bearer) : false;
 }
 
 /**
@@ -146,12 +195,21 @@ export function sweepStaleSessions() {
   let swept = 0;
   for (const [sid, session] of sessions) {
     if (now - session.lastActivity > SESSION_TTL) {
+      sessionBearers.delete(sid);
       sessions.delete(sid);
       swept++;
     }
   }
-  if (swept > 0) {
-    console.log(`[Session] Swept ${swept} stale session(s). ${sessions.size} active.`);
+  // Also sweep expired auth overrides
+  let overridesSwept = 0;
+  for (const [bearer, entry] of authOverrides) {
+    if (now - entry.updatedAt > SESSION_TTL) {
+      authOverrides.delete(bearer);
+      overridesSwept++;
+    }
+  }
+  if (swept > 0 || overridesSwept > 0) {
+    console.log(`[Session] Swept ${swept} session(s), ${overridesSwept} override(s). ${sessions.size} active, ${authOverrides.size} overrides.`);
   }
   return swept;
 }
