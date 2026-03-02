@@ -12,7 +12,6 @@ import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, touchSession, getSessionContext,
-  cacheBearerAuth,
 } from "./api.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
@@ -750,8 +749,6 @@ const handlers = {
       resolvedTenant = parsed.tenant || "main";
     }
     setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key });
-    // Cache by bearer token for cross-session persistence
-    cacheBearerAuth(sessionId, { tenant: resolvedTenant, apiKey: api_key });
     // Verify the key works by listing solutions
     try {
       const result = await get("/deploy/solutions", sessionId);
