@@ -706,7 +706,7 @@ const handlers = {
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills, then validate, deploy, and health-check in one call. Optionally include a test_message to verify it works immediately.", tools: ["ateam_build_and_run"] },
-        { step: 3, action: "Test", description: "Send test messages to your deployed skill and see the full execution trace.", tools: ["ateam_test_skill"] },
+        { step: 3, action: "Test", description: "Test the decision pipeline (intent + planning) with ateam_test_pipeline, or run the full execution with ateam_test_skill.", tools: ["ateam_test_pipeline", "ateam_test_skill"] },
         { step: 4, action: "Iterate", description: "Patch the skill (update + redeploy + re-test in one call), repeat until satisfied.", tools: ["ateam_patch"] },
       ],
     },
