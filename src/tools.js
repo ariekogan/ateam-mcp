@@ -48,6 +48,10 @@ export const tools = [
           type: "string",
           description: "Tenant name (e.g., dev, main). Optional if your key has the format adas_<tenant>_<hex> — the tenant is auto-extracted.",
         },
+        url: {
+          type: "string",
+          description: "Optional API URL override (e.g., https://dev-api.ateam-ai.com). Use this to target a different environment without restarting the MCP server.",
+        },
       },
       required: ["api_key"],
     },
@@ -767,23 +771,26 @@ const handlers = {
     },
   }),
 
-  ateam_auth: async ({ api_key, tenant }, sessionId) => {
+  ateam_auth: async ({ api_key, tenant, url }, sessionId) => {
     // Auto-extract tenant from key if not provided
     let resolvedTenant = tenant;
     if (!resolvedTenant) {
       const parsed = parseApiKey(api_key);
       resolvedTenant = parsed.tenant || "main";
     }
-    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, explicit: true });
+    // Normalize URL: strip trailing slash
+    const apiUrl = url ? url.replace(/\/+$/, "") : undefined;
+    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true });
     // Persist override per bearer (survives session changes)
-    setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key });
+    setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl });
     // Verify the key works by listing solutions
     try {
       const result = await get("/deploy/solutions", sessionId);
+      const urlNote = apiUrl ? ` (via ${apiUrl})` : "";
       return {
         ok: true,
         tenant: resolvedTenant,
-        message: `Authenticated to tenant "${resolvedTenant}". ${result.solutions?.length || 0} solution(s) found.`,
+        message: `Authenticated to tenant "${resolvedTenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found.`,
       };
     } catch (err) {
       return {

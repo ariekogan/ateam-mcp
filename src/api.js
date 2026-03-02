@@ -57,7 +57,7 @@ export function parseApiKey(key) {
  * If tenant is not provided, it's auto-extracted from the key.
  * Set explicit=true when called from ateam_auth (not from seedCredentials).
  */
-export function setSessionCredentials(sessionId, { tenant, apiKey, explicit = false }) {
+export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, explicit = false }) {
   let resolvedTenant = tenant;
   if (!resolvedTenant && apiKey) {
     const parsed = parseApiKey(apiKey);
@@ -67,11 +67,13 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, explicit = fa
   sessions.set(sessionId, {
     tenant: resolvedTenant || "main",
     apiKey,
+    apiUrl: apiUrl || existing?.apiUrl || null,
     authExplicit: explicit || existing?.authExplicit || false,
     lastActivity: Date.now(),
     context: existing?.context || {},
   });
-  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"}${explicit ? ", explicit" : ""})`);
+  const urlNote = apiUrl ? `, url: ${apiUrl}` : "";
+  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"}${explicit ? ", explicit" : ""}${urlNote})`);
 }
 
 /**
@@ -162,11 +164,11 @@ export function bindSessionBearer(sessionId, bearerToken) {
 }
 
 /** Store ateam_auth override for this user (by bearer). Called from tools.js. */
-export function setAuthOverride(sessionId, { tenant, apiKey }) {
+export function setAuthOverride(sessionId, { tenant, apiKey, apiUrl }) {
   const bearer = sessionBearers.get(sessionId);
   if (!bearer) return;
-  authOverrides.set(bearer, { tenant, apiKey, updatedAt: Date.now() });
-  console.log(`[Auth] Override stored for bearer (tenant: ${tenant})`);
+  authOverrides.set(bearer, { tenant, apiKey, apiUrl: apiUrl || null, updatedAt: Date.now() });
+  console.log(`[Auth] Override stored for bearer (tenant: ${tenant}${apiUrl ? ", url: " + apiUrl : ""})`);
 }
 
 /** Get ateam_auth override for a bearer token. Returns null if none/expired. */
@@ -177,7 +179,30 @@ export function getAuthOverride(bearerToken) {
     authOverrides.delete(bearerToken);
     return null;
   }
-  return { tenant: entry.tenant, apiKey: entry.apiKey };
+  return { tenant: entry.tenant, apiKey: entry.apiKey, apiUrl: entry.apiUrl || null };
+}
+
+/**
+ * Get the base URL for a session. Resolution order:
+ *   1. Per-session apiUrl (set via ateam_auth url parameter)
+ *   2. Bearer auth override apiUrl
+ *   3. Environment variable ADAS_API_URL
+ *   4. Default: https://api.ateam-ai.com
+ */
+export function getBaseUrl(sessionId) {
+  // 1. Per-session
+  const session = sessionId ? sessions.get(sessionId) : null;
+  if (session?.apiUrl) return session.apiUrl;
+  // 2. Bearer override
+  if (sessionId) {
+    const bearer = sessionBearers.get(sessionId);
+    if (bearer) {
+      const override = getAuthOverride(bearer);
+      if (override?.apiUrl) return override.apiUrl;
+    }
+  }
+  // 3/4. Env or default
+  return BASE_URL;
 }
 
 /** Check if a bearer has an active auth override. */
@@ -301,7 +326,8 @@ async function request(method, path, body, sessionId, opts = {}) {
       fetchOpts.body = JSON.stringify(body);
     }
 
-    const res = await fetch(`${BASE_URL}${path}`, fetchOpts);
+    const baseUrl = getBaseUrl(sessionId);
+    const res = await fetch(`${baseUrl}${path}`, fetchOpts);
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -313,18 +339,18 @@ async function request(method, path, body, sessionId, opts = {}) {
     if (err.name === "AbortError") {
       throw new Error(
         `A-Team API timeout: ${method} ${path} did not respond within ${timeoutMs / 1000}s.\n` +
-        `Hint: The A-Team API at ${BASE_URL} may be down. Check https://api.ateam-ai.com/health`
+        `Hint: The A-Team API at ${baseUrl} may be down. Check ${baseUrl}/health`
       );
     }
     if (err.cause?.code === "ECONNREFUSED") {
       throw new Error(
-        `Cannot connect to A-Team API at ${BASE_URL}.\n` +
-        `Hint: The service may be down. Check https://api.ateam-ai.com/health`
+        `Cannot connect to A-Team API at ${baseUrl}.\n` +
+        `Hint: The service may be down. Check ${baseUrl}/health`
       );
     }
     if (err.cause?.code === "ENOTFOUND") {
       throw new Error(
-        `Cannot resolve A-Team API host: ${BASE_URL}.\n` +
+        `Cannot resolve A-Team API host: ${baseUrl}.\n` +
         `Hint: Check your internet connection and ADAS_API_URL setting.`
       );
     }
