@@ -166,6 +166,30 @@ export const tools = [
     },
   },
   {
+    name: "ateam_test_pipeline",
+    core: true,
+    description:
+      "Test the decision pipeline (intent detection → planning) for a skill WITHOUT executing tools. Returns intent classification, first planned action, and timing. Use this to debug why a skill classifies intent incorrectly or plans the wrong action.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        skill_id: {
+          type: "string",
+          description: "The skill ID to test",
+        },
+        message: {
+          type: "string",
+          description: "The test message to classify and plan for",
+        },
+      },
+      required: ["solution_id", "skill_id", "message"],
+    },
+  },
+  {
     name: "ateam_patch",
     core: true,
     description:
@@ -644,6 +668,7 @@ const TENANT_TOOLS = new Set([
   "ateam_get_solution",
   "ateam_get_execution_logs",
   "ateam_test_skill",
+  "ateam_test_pipeline",
   "ateam_test_status",
   "ateam_test_abort",
   "ateam_get_connector_source",
@@ -1044,6 +1069,9 @@ const handlers = {
     const timeoutMs = asyncMode ? 15_000 : 90_000;
     return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs });
   },
+
+  ateam_test_pipeline: async ({ solution_id, skill_id, message }, sid) =>
+    post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test-pipeline`, { message }, sid, { timeoutMs: 30_000 }),
 
   ateam_test_status: async ({ solution_id, skill_id, job_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
