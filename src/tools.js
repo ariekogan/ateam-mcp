@@ -702,12 +702,13 @@ const handlers = {
       { name: "Enterprise Compliance Platform", description: "Approval flows, audit logs, policy enforcement" },
     ],
     developer_loop: {
-      _note: "This is the recommended build loop. Only 4 steps from definition to running skill.",
+      _note: "This is the recommended build loop. 5 steps from definition to running skill.",
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills, then validate, deploy, and health-check in one call. Optionally include a test_message to verify it works immediately.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Test", description: "Test the decision pipeline (intent + planning) with ateam_test_pipeline, or run the full execution with ateam_test_skill.", tools: ["ateam_test_pipeline", "ateam_test_skill"] },
-        { step: 4, action: "Iterate", description: "Patch the skill (update + redeploy + re-test in one call), repeat until satisfied.", tools: ["ateam_patch"] },
+        { step: 4, action: "Diagnose", description: "View execution logs (job traces, tool calls, errors), analyze metrics (timing, bottlenecks), and compare Builder vs Core state.", tools: ["ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff"] },
+        { step: 5, action: "Iterate", description: "Patch the skill (update + redeploy + re-test in one call), repeat until satisfied.", tools: ["ateam_patch"] },
       ],
     },
     first_questions: [
