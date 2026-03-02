@@ -194,8 +194,9 @@ export function startHttpServer(port = 3100) {
       let transport;
 
       if (sessionId && transports[sessionId]) {
-        // Reuse existing session — don't re-seed, ateam_auth may have overridden
+        // Reuse existing session — seed credentials if Bearer token present
         transport = transports[sessionId];
+        seedCredentials(req, sessionId);
       } else if (!sessionId && isInitializeRequest(req.body)) {
         // New session — generate ID upfront so we can bind it to the server
         const newSessionId = randomUUID();
