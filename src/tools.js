@@ -194,6 +194,39 @@ export const tools = [
     },
   },
   {
+    name: "ateam_test_voice",
+    core: true,
+    description:
+      "Simulate a voice conversation with a deployed solution. Runs the full voice pipeline (session → caller verification → prompt → skill dispatch → response) using text instead of audio. Returns each turn with bot response, verification status, tool calls, and entities. Use this to test voice-enabled solutions end-to-end without making a phone call.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        messages: {
+          type: "array",
+          items: { type: "string" },
+          description: "Array of user messages to send sequentially (simulates a multi-turn phone conversation)",
+        },
+        phone_number: {
+          type: "string",
+          description: "Optional: simulated caller phone number (e.g., '+14155551234'). If the number is in the solution's known phones list, the caller is auto-verified.",
+        },
+        skill_slug: {
+          type: "string",
+          description: "Optional: target a specific skill by slug instead of using voice routing.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Optional: max wait time per skill execution in milliseconds (default: 60000).",
+        },
+      },
+      required: ["solution_id", "messages"],
+    },
+  },
+  {
     name: "ateam_patch",
     core: true,
     description:
@@ -673,6 +706,7 @@ const TENANT_TOOLS = new Set([
   "ateam_get_execution_logs",
   "ateam_test_skill",
   "ateam_test_pipeline",
+  "ateam_test_voice",
   "ateam_test_status",
   "ateam_test_abort",
   "ateam_get_connector_source",
@@ -710,7 +744,7 @@ const handlers = {
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills, then validate, deploy, and health-check in one call. Optionally include a test_message to verify it works immediately.", tools: ["ateam_build_and_run"] },
-        { step: 3, action: "Test & Debug", description: "Test the decision pipeline or full execution, then diagnose with logs and metrics.", tools: ["ateam_test_pipeline", "ateam_test_skill", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 3, action: "Test & Debug", description: "Test the decision pipeline or full execution, then diagnose with logs and metrics. For voice-enabled solutions, use ateam_test_voice to simulate phone conversations.", tools: ["ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 4, action: "Iterate", description: "Patch the skill (update + redeploy + re-test in one call), repeat until satisfied.", tools: ["ateam_patch"] },
       ],
     },
@@ -1079,6 +1113,17 @@ const handlers = {
 
   ateam_test_pipeline: async ({ solution_id, skill_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test-pipeline`, { message }, sid, { timeoutMs: 30_000 }),
+
+  ateam_test_voice: async ({ solution_id, messages, phone_number, skill_slug, timeout_ms }, sid) => {
+    const body = { messages };
+    if (phone_number) body.phone_number = phone_number;
+    if (skill_slug) body.skill_slug = skill_slug;
+    if (timeout_ms) body.timeout_ms = timeout_ms;
+    // Timeout scales with message count — each turn may invoke skills
+    const perTurnMs = timeout_ms || 60_000;
+    const timeoutTotal = Math.min(perTurnMs * messages.length + 30_000, 600_000);
+    return post(`/deploy/voice-test`, body, sid, { timeoutMs: timeoutTotal });
+  },
 
   ateam_test_status: async ({ solution_id, skill_id, job_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
