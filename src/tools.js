@@ -851,7 +851,7 @@ const handlers = {
     // Phase 1: Validate
     let validation;
     try {
-      validation = await post("/validate/solution", { solution, skills }, sid);
+      validation = await post("/validate/solution", { solution, skills, connectors, mcp_store }, sid);
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
       return {
@@ -1025,8 +1025,8 @@ const handlers = {
 
   ateam_validate_skill: async ({ skill }, sid) => post("/validate/skill", { skill }, sid),
 
-  ateam_validate_solution: async ({ solution, skills }, sid) =>
-    post("/validate/solution", { solution, skills }, sid),
+  ateam_validate_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
+    post("/validate/solution", { solution, skills, connectors, mcp_store }, sid),
 
   ateam_deploy_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
     post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid),
