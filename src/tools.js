@@ -599,17 +599,17 @@ export const tools = [
     name: "ateam_get_connector_source",
     core: false,
     description:
-      "Read the source code of a connector's MCP server. Returns the files that make up the connector implementation. (Advanced.)",
+      `Read the source code files of a deployed MCP connector. Returns all files (server.js, package.json, etc.) stored in the mcp_store for this connector. Use this BEFORE patching or rewriting a connector — always read the current code first so you can make surgical fixes instead of blind full rewrites.`,
     inputSchema: {
       type: "object",
       properties: {
         solution_id: {
           type: "string",
-          description: "The solution ID",
+          description: "The solution ID (e.g. 'smart-home-assistant')",
         },
         connector_id: {
           type: "string",
-          description: "The connector ID",
+          description: "The connector ID to read (e.g. 'home-assistant-mcp')",
         },
       },
       required: ["solution_id", "connector_id"],
