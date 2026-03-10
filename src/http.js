@@ -198,8 +198,13 @@ export function startHttpServer(port = 3100) {
         // Reuse existing session — seed credentials if Bearer token present
         transport = transports[sessionId];
         seedCredentials(req, sessionId);
-      } else if (!sessionId && isInitializeRequest(req.body)) {
-        // New session — generate ID upfront so we can bind it to the server
+      } else if (isInitializeRequest(req.body)) {
+        // New session (or stale session after server restart) — create fresh session.
+        // Accept initialize requests even if they carry a stale mcp-session-id.
+        if (sessionId) {
+          console.log(`[HTTP] Stale session ${sessionId} — creating new session (server was restarted)`);
+        }
+
         const newSessionId = randomUUID();
 
         // Seed credentials from OAuth Bearer token before server starts
@@ -224,6 +229,16 @@ export function startHttpServer(port = 3100) {
         const server = createServer(newSessionId);
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
+        return;
+      } else if (sessionId && !transports[sessionId]) {
+        // Stale session (non-initialize request) — tell client to re-initialize.
+        // This happens after server restarts when the client still has the old session ID.
+        console.log(`[HTTP] Stale session ${sessionId} — returning 400 to trigger re-init`);
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32600, message: "Session expired. Please re-initialize." },
+          id: req.body?.id || null,
+        });
         return;
       } else {
         res.status(400).json({
