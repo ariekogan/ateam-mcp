@@ -128,6 +128,10 @@ export const tools = [
           type: "object",
           description: "Optional: connector source code files. Key = connector id, value = array of {path, content}.",
         },
+        github: {
+          type: "boolean",
+          description: "Optional: if true, pull connector source code from the solution's GitHub repo instead of requiring mcp_store. Use this after the first deploy (which creates the repo). Cannot be used on first deploy.",
+        },
         test_message: {
           type: "string",
           description: "Optional: send a test message after deployment to verify the skill works. Returns the full execution result.",
@@ -872,12 +876,13 @@ const handlers = {
       { name: "Enterprise Compliance Platform", description: "Approval flows, audit logs, policy enforcement" },
     ],
     developer_loop: {
-      _note: "This is the recommended build loop. Only 4 steps from definition to running skill.",
+      _note: "This is the recommended build loop. 5 steps from definition to running skill with GitHub version control.",
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
-        { step: 2, action: "Build & Run", description: "Define your solution + skills, then validate, deploy, and health-check in one call. Optionally include a test_message to verify it works immediately.", tools: ["ateam_build_and_run"] },
-        { step: 3, action: "Test & Debug", description: "Test the decision pipeline or full execution, then diagnose with logs and metrics. For voice-enabled solutions, use ateam_test_voice to simulate phone conversations.", tools: ["ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
-        { step: 4, action: "Iterate", description: "Patch the skill (update + redeploy + re-test in one call), repeat until satisfied.", tools: ["ateam_patch"] },
+        { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
+        { step: 3, action: "Version", description: "Every deploy auto-pushes to GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
+        { step: 4, action: "Iterate", description: "Edit connector code via ateam_github_patch, then redeploy with ateam_build_and_run(github:true). For skill definition changes (intents, tools, policy), use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
+        { step: 5, action: "Test & Debug", description: "Test the decision pipeline or full execution, then diagnose with logs and metrics. For voice-enabled solutions, use ateam_test_voice to simulate phone conversations.", tools: ["ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
       ],
     },
     first_questions: [
@@ -887,8 +892,25 @@ const handlers = {
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
     github_tools: {
-      _note: "Version control for solutions. Every deploy auto-pushes to GitHub. Use these for direct repo access.",
+      _note: "Version control for solutions. Every deploy auto-pushes to GitHub. The repo is the source of truth for connector code.",
       tools: ["ateam_github_push", "ateam_github_pull", "ateam_github_status", "ateam_github_read", "ateam_github_patch", "ateam_github_log"],
+      repo_structure: {
+        "solution.json": "Full solution definition",
+        "skills/{skill-id}/skill.json": "Individual skill definitions",
+        "connectors/{connector-id}/server.js": "Connector MCP server code",
+        "connectors/{connector-id}/package.json": "Connector dependencies",
+      },
+      iteration_workflow: {
+        code_changes: "ateam_github_patch (edit connector files) → ateam_build_and_run(github:true) (redeploy from repo)",
+        definition_changes: "ateam_patch (edit skill/solution definitions directly in Builder)",
+        first_deploy: "Must include mcp_store — this creates the GitHub repo",
+      },
+      when_to_use_what: {
+        ateam_github_patch: "Edit connector source code (server.js, utils, package.json, UI assets)",
+        ateam_patch: "Edit skill definitions (intents, tools, policy) or solution definitions (grants, handoffs, routing)",
+        "ateam_build_and_run(github:true)": "Redeploy solution pulling latest connector code from GitHub",
+        "ateam_build_and_run(mcp_store)": "First deploy or when you want to pass connector code inline",
+      },
     },
     advanced_tools: {
       _note: "These tools are available but hidden from the default tool list. Call them by name when you need fine-grained control.",
@@ -928,7 +950,8 @@ const handlers = {
       always: [
         "Explain Skill vs Solution vs Connector before building",
         "Use ateam_build_and_run for the full lifecycle (validates automatically)",
-        "Use ateam_patch for iterations (updates + redeploys automatically)",
+        "Use ateam_patch for skill/solution definition changes (updates + redeploys automatically)",
+        "Use ateam_github_patch + ateam_build_and_run(github:true) for connector code changes after first deploy",
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear",
       ],
@@ -981,13 +1004,49 @@ const handlers = {
   // Validates → Deploys → Health-checks → Optionally tests
   // One call replaces: validate_solution + deploy_solution + get_solution(health)
 
-  ateam_build_and_run: async ({ solution, skills, connectors, mcp_store, test_message, test_skill_id }, sid) => {
+  ateam_build_and_run: async ({ solution, skills, connectors, mcp_store, github, test_message, test_skill_id }, sid) => {
     const phases = [];
+
+    // Phase 0: GitHub pull (if github:true — pull connector source from repo)
+    let effectiveMcpStore = mcp_store;
+    if (github && !mcp_store) {
+      try {
+        const pullResult = await post(
+          `/deploy/solutions/${solution.id}/github/pull-connectors`,
+          {},
+          sid,
+          { timeoutMs: 30_000 },
+        );
+        if (!pullResult.ok) {
+          return {
+            ok: false,
+            phase: "github_pull",
+            error: pullResult.error || "Failed to pull connectors from GitHub",
+            hint: pullResult.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
+            message: "Cannot pull connector code from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+          };
+        }
+        effectiveMcpStore = pullResult.mcp_store;
+        phases.push({
+          phase: "github_pull",
+          status: "done",
+          connectors_found: pullResult.connectors_found || 0,
+          files_loaded: pullResult.files_loaded || 0,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          phase: "github_pull",
+          error: err.message,
+          message: "Failed to pull connector code from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+        };
+      }
+    }
 
     // Phase 1: Validate
     let validation;
     try {
-      validation = await post("/validate/solution", { solution, skills, connectors, mcp_store }, sid);
+      validation = await post("/validate/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid);
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
       return {
@@ -1013,7 +1072,7 @@ const handlers = {
     // Phase 2: Deploy
     let deploy;
     try {
-      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid);
+      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid);
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       return {
