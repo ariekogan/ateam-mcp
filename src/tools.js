@@ -659,6 +659,131 @@ export const tools = [
       required: ["solution_id"],
     },
   },
+
+  // ═══════════════════════════════════════════════════════════════════
+  // GITHUB TOOLS — version control for solutions
+  // ═══════════════════════════════════════════════════════════════════
+
+  {
+    name: "ateam_github_push",
+    core: true,
+    description:
+      "Push the current deployed solution to GitHub. Auto-creates the repo on first use. Commits the full bundle (solution + skills + connector source) atomically. Use after ateam_build_and_run to version your solution, or anytime you want to snapshot the current state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID (e.g. 'smart-home-assistant')",
+        },
+        message: {
+          type: "string",
+          description: "Optional commit message (default: 'Deploy <solution_id>')",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_github_pull",
+    core: true,
+    description:
+      "Deploy a solution FROM its GitHub repo. Reads .ateam/export.json + connector source from the repo and feeds it into the deploy pipeline. Use this to restore a previous version or deploy from GitHub as the source of truth.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID to pull and deploy from GitHub",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_github_status",
+    core: true,
+    description:
+      "Check if a solution has a GitHub repo, its URL, and the latest commit. Use this to verify GitHub integration is working for a solution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_github_read",
+    core: true,
+    description:
+      "Read any file from a solution's GitHub repo. Returns the file content. Use this to read connector source code, skill definitions, or any versioned file. Great for reviewing previous versions or understanding what's in the repo.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        path: {
+          type: "string",
+          description: "File path in the repo (e.g. 'connectors/home-assistant-mcp/server.js', 'solution.json', 'skills/order-support/skill.json')",
+        },
+      },
+      required: ["solution_id", "path"],
+    },
+  },
+  {
+    name: "ateam_github_patch",
+    core: true,
+    description:
+      "Edit a specific file in the solution's GitHub repo and commit. Creates the file if it doesn't exist. Use this to make surgical fixes to connector source code, update skill definitions, or add new files directly in the repo.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        path: {
+          type: "string",
+          description: "File path to create/update (e.g. 'connectors/home-assistant-mcp/server.js')",
+        },
+        content: {
+          type: "string",
+          description: "The full file content to write",
+        },
+        message: {
+          type: "string",
+          description: "Optional commit message (default: 'Update <path>')",
+        },
+      },
+      required: ["solution_id", "path", "content"],
+    },
+  },
+  {
+    name: "ateam_github_log",
+    core: true,
+    description:
+      "View commit history for a solution's GitHub repo. Shows recent commits with messages, SHAs, timestamps, and links. Use this to see what changes have been made and when.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        limit: {
+          type: "number",
+          description: "Max commits to return (default: 10)",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
 ];
 
 /**
@@ -712,6 +837,13 @@ const TENANT_TOOLS = new Set([
   "ateam_get_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
+  // GitHub operations
+  "ateam_github_push",
+  "ateam_github_pull",
+  "ateam_github_status",
+  "ateam_github_read",
+  "ateam_github_patch",
+  "ateam_github_log",
 ]);
 
 /** Small delay helper */
@@ -754,6 +886,10 @@ const handlers = {
       { id: "systems", question: "Which systems should the Team connect to?", type: "multi_select", options: ["slack", "email", "zendesk", "shopify", "jira", "postgres", "custom_api", "none"] },
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
+    github_tools: {
+      _note: "Version control for solutions. Every deploy auto-pushes to GitHub. Use these for direct repo access.",
+      tools: ["ateam_github_push", "ateam_github_pull", "ateam_github_status", "ateam_github_read", "ateam_github_patch", "ateam_github_log"],
+    },
     advanced_tools: {
       _note: "These tools are available but hidden from the default tool list. Call them by name when you need fine-grained control.",
       debugging: ["ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"],
@@ -932,6 +1068,25 @@ const handlers = {
       }
     }
 
+    // Phase 5: GitHub push (auto — non-blocking, failures don't fail the deploy)
+    let github_result;
+    try {
+      github_result = await post(
+        `/deploy/solutions/${solution.id}/github/push`,
+        { message: `Deploy: ${solution.name || solution.id}` },
+        sid,
+        { timeoutMs: 60_000 },
+      );
+      phases.push({
+        phase: "github",
+        status: github_result.skipped ? "skipped" : "done",
+        ...(github_result.repo_url && { repo_url: github_result.repo_url }),
+      });
+    } catch (err) {
+      github_result = { error: err.message };
+      phases.push({ phase: "github", status: "error", error: err.message });
+    }
+
     return {
       ok: true,
       solution_id: solution.id,
@@ -944,6 +1099,7 @@ const handlers = {
       },
       health,
       ...(test_result && { test_result }),
+      ...(github_result && !github_result.error && !github_result.skipped && { github: github_result }),
       ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
     };
   },
@@ -1145,6 +1301,28 @@ const handlers = {
   ateam_diff: async ({ solution_id, skill_id }, sid) => {
     const qs = skill_id ? `?skill_id=${encodeURIComponent(skill_id)}` : "";
     return get(`/deploy/solutions/${solution_id}/diff${qs}`, sid);
+  },
+
+  // ─── GitHub tools ──────────────────────────────────────────────────
+
+  ateam_github_push: async ({ solution_id, message }, sid) =>
+    post(`/deploy/solutions/${solution_id}/github/push`, { message }, sid, { timeoutMs: 60_000 }),
+
+  ateam_github_pull: async ({ solution_id }, sid) =>
+    post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000 }),
+
+  ateam_github_status: async ({ solution_id }, sid) =>
+    get(`/deploy/solutions/${solution_id}/github/status`, sid),
+
+  ateam_github_read: async ({ solution_id, path: filePath }, sid) =>
+    get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid),
+
+  ateam_github_patch: async ({ solution_id, path: filePath, content, message }, sid) =>
+    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message }, sid),
+
+  ateam_github_log: async ({ solution_id, limit }, sid) => {
+    const qs = limit ? `?limit=${limit}` : "";
+    return get(`/deploy/solutions/${solution_id}/github/log${qs}`, sid);
   },
 
   ateam_delete_solution: async ({ solution_id }, sid) =>
