@@ -597,7 +597,7 @@ export const tools = [
   },
   {
     name: "ateam_get_connector_source",
-    core: false,
+    core: true,
     description:
       `Read the source code files of a deployed MCP connector. Returns all files (server.js, package.json, etc.) stored in the mcp_store for this connector. Use this BEFORE patching or rewriting a connector — always read the current code first so you can make surgical fixes instead of blind full rewrites.`,
     inputSchema: {
