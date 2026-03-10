@@ -161,12 +161,16 @@ export function clearSession(sessionId) {
 /** Bind a session to its OAuth bearer token. Called from seedCredentials. */
 export function bindSessionBearer(sessionId, bearerToken) {
   sessionBearers.set(sessionId, bearerToken);
+  console.log(`[Auth] Bearer bound for session ${sessionId} (bearer: ${bearerToken.substring(0, 25)}...)`);
 }
 
 /** Store ateam_auth override for this user (by bearer). Called from tools.js. */
 export function setAuthOverride(sessionId, { tenant, apiKey, apiUrl }) {
   const bearer = sessionBearers.get(sessionId);
-  if (!bearer) return;
+  if (!bearer) {
+    console.log(`[Auth] WARNING: No bearer bound for session ${sessionId} — override NOT stored. sessionBearers has ${sessionBearers.size} entries.`);
+    return;
+  }
   authOverrides.set(bearer, { tenant, apiKey, apiUrl: apiUrl || null, updatedAt: Date.now() });
   console.log(`[Auth] Override stored for bearer (tenant: ${tenant}${apiUrl ? ", url: " + apiUrl : ""})`);
 }
