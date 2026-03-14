@@ -12,7 +12,7 @@ import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, touchSession, getSessionContext,
-  setAuthOverride,
+  setAuthOverride, switchTenant, isMasterMode, listTenants,
 } from "./api.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
@@ -36,7 +36,7 @@ export const tools = [
     name: "ateam_auth",
     core: true,
     description:
-      "Authenticate with A-Team. Required before any tenant-aware operation (reading solutions, deploying, testing, etc.). The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Only global endpoints (spec, examples, validate) work without auth. IMPORTANT: Even if environment variables (ADAS_API_KEY) are configured, you MUST call ateam_auth explicitly — env vars alone are not sufficient.",
+      "Authenticate with A-Team. Required before any tenant-aware operation (reading solutions, deploying, testing, etc.). The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Only global endpoints (spec, examples, validate) work without auth. IMPORTANT: Even if environment variables (ADAS_API_KEY) are configured, you MUST call ateam_auth explicitly — env vars alone are not sufficient. For cross-tenant admin operations, use master_key instead of api_key.",
     inputSchema: {
       type: "object",
       properties: {
@@ -44,16 +44,19 @@ export const tools = [
           type: "string",
           description: "Your A-Team API key (e.g., adas_xxxxx)",
         },
+        master_key: {
+          type: "string",
+          description: "Master key for cross-tenant operations. Authenticates across ALL tenants without per-tenant API keys. Requires tenant parameter.",
+        },
         tenant: {
           type: "string",
-          description: "Tenant name (e.g., dev, main). Optional if your key has the format adas_<tenant>_<hex> — the tenant is auto-extracted.",
+          description: "Tenant name (e.g., dev, main). Optional with api_key if format is adas_<tenant>_<hex>. REQUIRED with master_key.",
         },
         url: {
           type: "string",
           description: "Optional API URL override (e.g., https://dev-api.ateam-ai.com). Use this to target a different environment without restarting the MCP server.",
         },
       },
-      required: ["api_key"],
     },
   },
   {
@@ -788,6 +791,40 @@ export const tools = [
       required: ["solution_id"],
     },
   },
+
+  // ═══════════════════════════════════════════════════════════════════
+  // MASTER KEY TOOLS — cross-tenant bulk operations (master key only)
+  // ═══════════════════════════════════════════════════════════════════
+
+  {
+    name: "ateam_status_all",
+    core: true,
+    description:
+      "Show GitHub sync status for ALL tenants and solutions in one call. Requires master key authentication. Returns a summary table of every tenant's solutions with their GitHub sync state.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "ateam_sync_all",
+    core: true,
+    description:
+      "Sync ALL tenants: push Builder FS → GitHub, then pull GitHub → Core MongoDB. Requires master key authentication. Returns a summary table with results for each tenant/solution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        push_only: {
+          type: "boolean",
+          description: "Only push to GitHub (skip pull to Core). Default: false (full sync).",
+        },
+        pull_only: {
+          type: "boolean",
+          description: "Only pull from GitHub to Core (skip push). Default: false (full sync).",
+        },
+      },
+    },
+  },
 ];
 
 /**
@@ -848,6 +885,9 @@ const TENANT_TOOLS = new Set([
   "ateam_github_read",
   "ateam_github_patch",
   "ateam_github_log",
+  // Master key bulk operations
+  "ateam_status_all",
+  "ateam_sync_all",
 ]);
 
 /** Small delay helper */
@@ -964,7 +1004,33 @@ const handlers = {
     },
   }),
 
-  ateam_auth: async ({ api_key, tenant, url }, sessionId) => {
+  ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId) => {
+    // Master key mode: cross-tenant auth using shared secret
+    if (master_key) {
+      if (!tenant) {
+        return { ok: false, message: "Master key requires a tenant parameter. Specify which tenant to operate on." };
+      }
+      const apiUrl = url ? url.replace(/\/+$/, "") : undefined;
+      setSessionCredentials(sessionId, { tenant, apiKey: null, apiUrl, explicit: true, masterKey: master_key });
+      // Verify by listing solutions
+      try {
+        const result = await get("/deploy/solutions", sessionId);
+        const urlNote = apiUrl ? ` (via ${apiUrl})` : "";
+        return {
+          ok: true,
+          tenant,
+          masterMode: true,
+          message: `Master key authenticated to tenant "${tenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found. Use tenant parameter on any tool to switch tenants without re-auth.`,
+        };
+      } catch (err) {
+        return { ok: false, tenant, message: `Master key auth failed: ${err.message}` };
+      }
+    }
+
+    // Normal API key mode
+    if (!api_key) {
+      return { ok: false, message: "Provide either api_key or master_key." };
+    }
     // Auto-extract tenant from key if not provided
     let resolvedTenant = tenant;
     if (!resolvedTenant) {
@@ -1386,6 +1452,88 @@ const handlers = {
 
   ateam_delete_solution: async ({ solution_id }, sid) =>
     del(`/deploy/solutions/${solution_id}`, sid),
+
+  // ─── Master Key Bulk Tools ───────────────────────────────────────────
+
+  ateam_status_all: async (_args, sid) => {
+    if (!isMasterMode(sid)) {
+      return { ok: false, message: "Master key required. Call ateam_auth(master_key: \"<key>\", tenant: \"<any>\") first." };
+    }
+    const tenants = await listTenants(sid);
+    const results = [];
+    for (const t of tenants) {
+      switchTenant(sid, t.id);
+      try {
+        const { solutions } = await get("/deploy/solutions", sid);
+        for (const sol of (solutions || [])) {
+          let ghStatus = null;
+          try {
+            ghStatus = await get(`/deploy/solutions/${sol.id}/github/status`, sid);
+          } catch { /* no github config */ }
+          results.push({
+            tenant: t.id,
+            solution: sol.id,
+            name: sol.name || sol.id,
+            github: ghStatus ? {
+              repo: ghStatus.repo || ghStatus.repoUrl,
+              lastCommit: ghStatus.lastCommit?.message?.slice(0, 60),
+              lastPush: ghStatus.lastCommit?.date,
+              branch: ghStatus.branch,
+            } : "not configured",
+          });
+        }
+      } catch (err) {
+        results.push({ tenant: t.id, error: err.message });
+      }
+    }
+    return { ok: true, tenants: tenants.length, solutions: results.length, results };
+  },
+
+  ateam_sync_all: async ({ push_only, pull_only }, sid) => {
+    if (!isMasterMode(sid)) {
+      return { ok: false, message: "Master key required. Call ateam_auth(master_key: \"<key>\", tenant: \"<any>\") first." };
+    }
+    const tenants = await listTenants(sid);
+    const results = [];
+    for (const t of tenants) {
+      switchTenant(sid, t.id);
+      try {
+        const { solutions } = await get("/deploy/solutions", sid);
+        for (const sol of (solutions || [])) {
+          const entry = { tenant: t.id, solution: sol.id, name: sol.name || sol.id };
+          // Push: Builder FS → GitHub
+          if (!pull_only) {
+            try {
+              const pushResult = await post(`/deploy/solutions/${sol.id}/github/push`, {}, sid);
+              entry.push = { ok: true, commit: pushResult.commitSha?.slice(0, 8), files: pushResult.filesCommitted };
+            } catch (err) {
+              entry.push = { ok: false, error: err.message.slice(0, 100) };
+            }
+          }
+          // Pull: GitHub → Core MongoDB
+          if (!push_only) {
+            try {
+              const pullResult = await post(`/deploy/solutions/${sol.id}/github/pull`, {}, sid);
+              entry.pull = { ok: true, skills: pullResult.skills?.length, connectors: pullResult.connectors?.length };
+            } catch (err) {
+              entry.pull = { ok: false, error: err.message.slice(0, 100) };
+            }
+          }
+          results.push(entry);
+        }
+      } catch (err) {
+        results.push({ tenant: t.id, error: err.message });
+      }
+    }
+    const pushCount = results.filter(r => r.push?.ok).length;
+    const pullCount = results.filter(r => r.pull?.ok).length;
+    const errors = results.filter(r => r.error || r.push?.ok === false || r.pull?.ok === false).length;
+    return {
+      ok: errors === 0,
+      summary: `Synced ${tenants.length} tenant(s), ${results.length} solution(s). Push: ${pushCount} ok. Pull: ${pullCount} ok. Errors: ${errors}.`,
+      results,
+    };
+  },
 };
 
 // ─── Response formatting ────────────────────────────────────────────
@@ -1490,6 +1638,11 @@ export async function handleToolCall(name, args, sessionId) {
       }],
       isError: true,
     };
+  }
+
+  // Master mode: per-call tenant override (no re-auth needed)
+  if (TENANT_TOOLS.has(name) && isMasterMode(sessionId) && args?.tenant) {
+    switchTenant(sessionId, args.tenant);
   }
 
   try {

@@ -11,6 +11,7 @@
  */
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
+const CORE_URL = process.env.ADAS_CORE_URL || "";  // Direct Core access (for tenant list, etc.)
 const ENV_TENANT = process.env.ADAS_TENANT || "";
 const ENV_API_KEY = process.env.ADAS_API_KEY || "";
 
@@ -56,8 +57,9 @@ export function parseApiKey(key) {
  * Set credentials for a session.
  * If tenant is not provided, it's auto-extracted from the key.
  * Set explicit=true when called from ateam_auth (not from seedCredentials).
+ * Set masterKey for cross-tenant master mode (uses shared secret auth).
  */
-export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, explicit = false }) {
+export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, explicit = false, masterKey = null }) {
   let resolvedTenant = tenant;
   if (!resolvedTenant && apiKey) {
     const parsed = parseApiKey(apiKey);
@@ -69,11 +71,34 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     apiKey,
     apiUrl: apiUrl || existing?.apiUrl || null,
     authExplicit: explicit || existing?.authExplicit || false,
+    masterKey: masterKey || existing?.masterKey || null,
     lastActivity: Date.now(),
     context: existing?.context || {},
   });
   const urlNote = apiUrl ? `, url: ${apiUrl}` : "";
-  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"}${explicit ? ", explicit" : ""}${urlNote})`);
+  const masterNote = masterKey ? ", MASTER MODE" : "";
+  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"}${explicit ? ", explicit" : ""}${urlNote}${masterNote})`);
+}
+
+/**
+ * Switch the active tenant for a master-key session (no re-auth needed).
+ * Returns true if switched, false if not in master mode.
+ */
+export function switchTenant(sessionId, newTenant) {
+  const session = sessions.get(sessionId);
+  if (!session?.masterKey) return false;
+  session.tenant = newTenant;
+  session.lastActivity = Date.now();
+  console.log(`[Auth] Master mode tenant switch: ${newTenant} (session ${sessionId})`);
+  return true;
+}
+
+/**
+ * Check if a session is in master key mode.
+ */
+export function isMasterMode(sessionId) {
+  const session = sessions.get(sessionId);
+  return !!(session?.masterKey);
 }
 
 /**
@@ -273,6 +298,17 @@ export function getSessionStats() {
 }
 
 function headers(sessionId) {
+  const session = sessionId ? sessions.get(sessionId) : null;
+
+  // Master mode: use shared secret auth (x-adas-token) instead of API key
+  if (session?.masterKey) {
+    const h = { "Content-Type": "application/json" };
+    h["x-adas-token"] = session.masterKey;
+    h["X-ADAS-TENANT"] = session.tenant || "main";
+    return h;
+  }
+
+  // Normal mode: API key auth
   const { tenant, apiKey } = getCredentials(sessionId);
   const h = { "Content-Type": "application/json" };
   if (tenant) h["X-ADAS-TENANT"] = tenant;
@@ -378,4 +414,37 @@ export async function patch(path, body, sessionId, opts) {
 
 export async function del(path, sessionId, opts) {
   return request("DELETE", path, undefined, sessionId, opts);
+}
+
+/**
+ * List all active tenants from Core API (requires master key).
+ * Calls Core directly (not through Builder) using shared secret auth.
+ */
+export async function listTenants(sessionId) {
+  const session = sessionId ? sessions.get(sessionId) : null;
+  if (!session?.masterKey) throw new Error("listTenants requires master key auth");
+
+  // Resolve Core URL: env var > derive from Builder URL > fallback
+  const coreUrl = CORE_URL || BASE_URL.replace(/:\d+$/, ":4000");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${coreUrl}/api/tenants/list`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "x-adas-token": session.masterKey,
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Core API error: GET /api/tenants/list returned ${res.status} — ${text}`);
+    }
+    const data = await res.json();
+    return data.tenants || [];
+  } finally {
+    clearTimeout(timeout);
+  }
 }
