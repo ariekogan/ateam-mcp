@@ -1134,7 +1134,7 @@ const handlers = {
     // Phase 1: Validate
     let validation;
     try {
-      validation = await post("/validate/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid);
+      validation = await post("/validate/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
       return {
@@ -1160,7 +1160,7 @@ const handlers = {
     // Phase 2: Deploy
     let deploy;
     try {
-      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid);
+      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 300_000 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       return {

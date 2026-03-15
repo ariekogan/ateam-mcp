@@ -15,8 +15,8 @@ const CORE_URL = process.env.ADAS_CORE_URL || "";  // Direct Core access (for te
 const ENV_TENANT = process.env.ADAS_TENANT || "";
 const ENV_API_KEY = process.env.ADAS_API_KEY || "";
 
-// Request timeout (30 seconds)
-const REQUEST_TIMEOUT_MS = 30_000;
+// Request timeout (120 seconds — deploys can take 60-90s)
+const REQUEST_TIMEOUT_MS = 120_000;
 
 // Session TTL — sessions idle longer than this are swept
 const SESSION_TTL = 60 * 60 * 1000; // 60 minutes
@@ -355,6 +355,7 @@ async function request(method, path, body, sessionId, opts = {}) {
   const timeoutMs = opts.timeoutMs || REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const baseUrl = getBaseUrl(sessionId);
 
   try {
     const fetchOpts = {
@@ -366,7 +367,6 @@ async function request(method, path, body, sessionId, opts = {}) {
       fetchOpts.body = JSON.stringify(body);
     }
 
-    const baseUrl = getBaseUrl(sessionId);
     const res = await fetch(`${baseUrl}${path}`, fetchOpts);
 
     if (!res.ok) {
