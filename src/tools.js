@@ -507,26 +507,6 @@ export const tools = [
     },
   },
   {
-    name: "ateam_redeploy",
-    core: false,
-    description:
-      "Re-deploy after making updates. (Advanced — prefer ateam_patch which updates + redeploys in one step.)",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: {
-          type: "string",
-          description: "The solution ID",
-        },
-        skill_id: {
-          type: "string",
-          description: "Optional: redeploy a single skill. Omit to redeploy all skills.",
-        },
-      },
-      required: ["solution_id"],
-    },
-  },
-  {
     name: "ateam_solution_chat",
     core: false,
     description:
@@ -820,13 +800,17 @@ export const tools = [
     name: "ateam_redeploy",
     core: true,
     description:
-      "Re-deploy all skills in a solution without changing anything. Regenerates MCP servers and pushes to A-Team Core. Use after connector restarts, Core hiccups, or when you just need a fresh deploy without modifying the solution/skill definitions.",
+      "Re-deploy skills WITHOUT changing any definitions. ⚠️ HEAVY OPERATION: regenerates MCP servers (Python code) for every skill, pushes each to A-Team Core, restarts connectors, and verifies tool discovery. Takes 30-120s depending on skill count. Use after connector restarts, Core hiccups, or stale state. For incremental changes, prefer ateam_patch (which updates + redeploys in one step).",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: {
           type: "string",
-          description: "The solution ID to redeploy (e.g. 'smart-home-assistant')",
+          description: "The solution ID to redeploy",
+        },
+        skill_id: {
+          type: "string",
+          description: "Optional: redeploy a single skill only. Omit to redeploy ALL skills in the solution.",
         },
       },
       required: ["solution_id"],
@@ -903,7 +887,6 @@ const TENANT_TOOLS = new Set([
   "ateam_redeploy",
   "ateam_delete_solution",
   "ateam_delete_connector",
-  "ateam_redeploy",
   "ateam_solution_chat",
   // Read operations (tenant-specific data)
   "ateam_list_solutions",
@@ -1403,12 +1386,6 @@ const handlers = {
     return patch(`/deploy/solutions/${solution_id}`, { state_update: updates }, sid);
   },
 
-  ateam_redeploy: async ({ solution_id, skill_id }, sid) => {
-    if (skill_id) {
-      return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {}, sid);
-    }
-    return post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid);
-  },
 
   ateam_solution_chat: async ({ solution_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/chat`, { message }, sid),
@@ -1495,17 +1472,23 @@ const handlers = {
   ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
 
-  ateam_redeploy: async ({ solution_id }, sid) => {
-    const result = await post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid, { timeoutMs: 300_000 });
+  ateam_redeploy: async ({ solution_id, skill_id }, sid) => {
+    const endpoint = skill_id
+      ? `/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
+      : `/deploy/solutions/${solution_id}/redeploy`;
+    const result = await post(endpoint, {}, sid, { timeoutMs: 300_000 });
     return {
       ok: result.ok,
       solution_id,
-      deployed: result.deployed || 0,
+      ...(skill_id && { skill_id }),
+      deployed: result.deployed || (result.ok ? 1 : 0),
       failed: result.failed || 0,
-      total: result.total || 0,
+      total: result.total || (result.ok ? 1 : 0),
       skills: result.skills || [],
       message: result.ok
-        ? `Re-deployed ${result.deployed || 0} skill(s) successfully.`
+        ? skill_id
+          ? `Re-deployed skill "${skill_id}" successfully.`
+          : `Re-deployed ${result.deployed || 0} skill(s) successfully.`
         : `Re-deploy had ${result.failed || 0} failure(s). Check skills array for details.`,
     };
   },
