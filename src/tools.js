@@ -817,6 +817,22 @@ export const tools = [
   // ═══════════════════════════════════════════════════════════════════
 
   {
+    name: "ateam_redeploy",
+    core: true,
+    description:
+      "Re-deploy all skills in a solution without changing anything. Regenerates MCP servers and pushes to A-Team Core. Use after connector restarts, Core hiccups, or when you just need a fresh deploy without modifying the solution/skill definitions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID to redeploy (e.g. 'smart-home-assistant')",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
     name: "ateam_status_all",
     core: true,
     description:
@@ -887,6 +903,7 @@ const TENANT_TOOLS = new Set([
   "ateam_redeploy",
   "ateam_delete_solution",
   "ateam_delete_connector",
+  "ateam_redeploy",
   "ateam_solution_chat",
   // Read operations (tenant-specific data)
   "ateam_list_solutions",
@@ -1477,6 +1494,21 @@ const handlers = {
 
   ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
+
+  ateam_redeploy: async ({ solution_id }, sid) => {
+    const result = await post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid, { timeoutMs: 300_000 });
+    return {
+      ok: result.ok,
+      solution_id,
+      deployed: result.deployed || 0,
+      failed: result.failed || 0,
+      total: result.total || 0,
+      skills: result.skills || [],
+      message: result.ok
+        ? `Re-deployed ${result.deployed || 0} skill(s) successfully.`
+        : `Re-deploy had ${result.failed || 0} failure(s). Check skills array for details.`,
+    };
+  },
 
   // ─── Master Key Bulk Tools ───────────────────────────────────────────
 
