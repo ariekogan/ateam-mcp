@@ -109,7 +109,7 @@ export const tools = [
     name: "ateam_build_and_run",
     core: true,
     description:
-      "Build and deploy a governed AI Team solution in one step. Validates, deploys, health-checks, and optionally runs a warm test — all in one call. Use this instead of calling validate, deploy, and health separately. Requires authentication.",
+      "Build and deploy a governed AI Team solution in one step. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to A-Team Core (regenerates MCP servers) → health-checks → optionally runs a warm test → auto-pushes to GitHub. Use this instead of calling validate, deploy, and health separately. For small changes to an already-deployed solution, prefer ateam_patch (faster, incremental). Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
