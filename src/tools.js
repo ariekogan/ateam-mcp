@@ -69,9 +69,9 @@ export const tools = [
       properties: {
         topic: {
           type: "string",
-          enum: ["overview", "skill", "solution", "enums"],
+          enum: ["overview", "skill", "solution", "enums", "connector-multi-user"],
           description:
-            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values",
+            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide (actor isolation, zod gotcha, complete examples)",
         },
       },
       required: ["topic"],
@@ -860,6 +860,7 @@ const SPEC_PATHS = {
   skill: "/spec/skill",
   solution: "/spec/solution",
   enums: "/spec/enums",
+  "connector-multi-user": "/spec/multi-user-connector",
 };
 
 const EXAMPLE_PATHS = {
