@@ -318,6 +318,26 @@ export const tools = [
       required: ["solution_id"],
     },
   },
+  {
+    name: "ateam_delete_connector",
+    core: true,
+    description:
+      "Remove a connector from a deployed solution. Stops and deletes it from A-Team Core, removes references from the solution definition (grants, platform_connectors) and skill definitions (connectors array), and cleans up mcp-store files.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID (e.g. 'smart-home-assistant')",
+        },
+        connector_id: {
+          type: "string",
+          description: "The connector ID to remove (e.g. 'device-mock-mcp')",
+        },
+      },
+      required: ["solution_id", "connector_id"],
+    },
+  },
 
   // ═══════════════════════════════════════════════════════════════════
   // ADVANCED TOOLS — hidden from tools/list, still callable by name
@@ -865,6 +885,7 @@ const TENANT_TOOLS = new Set([
   "ateam_update",
   "ateam_redeploy",
   "ateam_delete_solution",
+  "ateam_delete_connector",
   "ateam_solution_chat",
   // Read operations (tenant-specific data)
   "ateam_list_solutions",
@@ -1452,6 +1473,9 @@ const handlers = {
 
   ateam_delete_solution: async ({ solution_id }, sid) =>
     del(`/deploy/solutions/${solution_id}`, sid),
+
+  ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
+    del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
 
   // ─── Master Key Bulk Tools ───────────────────────────────────────────
 
