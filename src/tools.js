@@ -237,7 +237,22 @@ export const tools = [
     name: "ateam_patch",
     core: true,
     description:
-      "Update a deployed skill or solution, redeploy, and optionally re-test — all in one step. Use this instead of calling update + redeploy separately. Requires authentication.",
+      "Surgically update ANY field in a skill or solution definition, redeploy, and optionally re-test — all in one step.\n\n" +
+      "SUPPORTED OPERATIONS:\n" +
+      "1. Scalar (dot notation): { \"problem.statement\": \"new value\", \"role.persona\": \"You are...\" }\n" +
+      "2. Deep nested: { \"intents.thresholds.accept\": 0.9, \"policy.escalation.enabled\": true }\n" +
+      "3. Array push: { \"tools_push\": [{ name: \"new_tool\", description: \"...\" }] }\n" +
+      "4. Array delete: { \"tools_delete\": [\"tool_name\"] }\n" +
+      "5. Array update: { \"tools_update\": [{ name: \"existing_tool\", description: \"updated\" }] }\n" +
+      "6. Replace whole section: { \"role\": { persona: \"...\", goals: [...] } }\n\n" +
+      "EXAMPLES:\n" +
+      "- Change persona: updates: { \"role.persona\": \"You are a friendly assistant\" }\n" +
+      "- Add a guardrail: updates: { \"policy.guardrails.never_push\": [\"Never share passwords\"] }\n" +
+      "- Update problem: updates: { \"problem.statement\": \"...\", \"problem.goals\": [\"goal1\"] }\n" +
+      "- Add a tool: updates: { \"tools_push\": [{ name: \"conn.tool\", description: \"...\", inputs: [...], output: {...} }] }\n" +
+      "- Change intent: updates: { \"intents.supported_update\": [{ id: \"i1\", description: \"new desc\" }] }\n" +
+      "- Force redeploy: updates: { \"_force_redeploy\": true }\n\n" +
+      "Use target='skill' + skill_id for skill fields. Use target='solution' for solution-level fields (linked_skills, platform_connectors, ui_plugins).",
     inputSchema: {
       type: "object",
       properties: {
@@ -248,16 +263,18 @@ export const tools = [
         target: {
           type: "string",
           enum: ["solution", "skill"],
-          description: "What to update: 'solution' or 'skill'",
+          description: "What to update: 'solution' for solution definition, 'skill' for skill definition fields (problem, role, intents, tools, policy, engine, scenarios, etc.)",
         },
         skill_id: {
           type: "string",
-          description: "Required when target is 'skill'",
+          description: "Required when target is 'skill'. The skill ID to patch.",
         },
         updates: {
           type: "object",
           description:
-            "The update payload — use dot notation for scalars (e.g. 'problem.statement'), and tools_push/tools_delete/tools_update for array operations",
+            "The update payload. Use dot notation for nested scalars (e.g. 'problem.statement': 'new value'). " +
+            "For arrays, use _push/_delete/_update suffixes (e.g. 'tools_push', 'tools_delete'). " +
+            "You can update ANY field in the skill definition: problem, role, intents, tools, policy, engine, scenarios, glossary, etc.",
         },
         test_message: {
           type: "string",
