@@ -63,7 +63,7 @@ export const tools = [
     name: "ateam_get_spec",
     core: true,
     description:
-      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions.",
+      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec.",
     inputSchema: {
       type: "object",
       properties: {
@@ -71,7 +71,18 @@ export const tools = [
           type: "string",
           enum: ["overview", "skill", "solution", "enums", "connector-multi-user"],
           description:
-            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide (actor isolation, zod gotcha, complete examples)",
+            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide",
+        },
+        section: {
+          type: "string",
+          enum: ["engine", "tools", "intents", "policy", "triggers", "connectors", "role", "template", "guide"],
+          description:
+            "Optional: get just one section of the skill spec (only works with topic='skill'). Sections: 'engine' = model/reasoning/planner optimization/bootstrap tools, 'tools' = tool definitions/meta tools, 'intents' = intents/problem/scenarios, 'policy' = access control/grants/workflows, 'triggers' = automation triggers, 'connectors' = connector linking/channels, 'role' = persona/goals, 'template' = minimal quick start, 'guide' = build steps/common mistakes",
+        },
+        search: {
+          type: "string",
+          description:
+            "Optional: filter the spec to only sections containing this search term. Works with any topic. Example: search='bootstrap' returns only fields/sections mentioning 'bootstrap'.",
         },
       },
       required: ["topic"],
@@ -1110,7 +1121,15 @@ const handlers = {
     }
   },
 
-  ateam_get_spec: async ({ topic }, sid) => get(SPEC_PATHS[topic], sid),
+  ateam_get_spec: async ({ topic, section, search }, sid) => {
+    let path = SPEC_PATHS[topic];
+    const params = new URLSearchParams();
+    if (section) params.set('section', section);
+    if (search) params.set('search', search);
+    const qs = params.toString();
+    if (qs) path += `?${qs}`;
+    return get(path, sid);
+  },
 
   ateam_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
 
