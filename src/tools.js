@@ -747,7 +747,10 @@ export const tools = [
     name: "ateam_github_patch",
     core: true,
     description:
-      "Edit a specific file in the solution's GitHub repo and commit. Creates the file if it doesn't exist. Use this to make surgical fixes to connector source code, update skill definitions, or add new files directly in the repo.",
+      "Edit a file in the solution's GitHub repo and commit. Two modes:\n" +
+      "1. FULL FILE: provide `content` — replaces entire file (good for new files or small files)\n" +
+      "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
+      "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.",
     inputSchema: {
       type: "object",
       properties: {
@@ -761,14 +764,22 @@ export const tools = [
         },
         content: {
           type: "string",
-          description: "The full file content to write",
+          description: "The full file content to write (mode 1 — full file replacement)",
+        },
+        search: {
+          type: "string",
+          description: "Exact text to find in the file (mode 2 — search/replace). Must match exactly including whitespace.",
+        },
+        replace: {
+          type: "string",
+          description: "Text to replace the search string with (mode 2 — required with search)",
         },
         message: {
           type: "string",
           description: "Optional commit message (default: 'Update <path>')",
         },
       },
-      required: ["solution_id", "path", "content"],
+      required: ["solution_id", "path"],
     },
   },
   {
@@ -1458,8 +1469,8 @@ const handlers = {
   ateam_github_read: async ({ solution_id, path: filePath }, sid) =>
     get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid),
 
-  ateam_github_patch: async ({ solution_id, path: filePath, content, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message }, sid),
+  ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message }, sid) =>
+    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message }, sid),
 
   ateam_github_log: async ({ solution_id, limit }, sid) => {
     const qs = limit ? `?limit=${limit}` : "";
