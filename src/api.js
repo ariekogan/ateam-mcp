@@ -353,50 +353,74 @@ function formatError(method, path, status, body) {
  */
 async function request(method, path, body, sessionId, opts = {}) {
   const timeoutMs = opts.timeoutMs || REQUEST_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const maxRetries = opts.retries ?? 0;
   const baseUrl = getBaseUrl(sessionId);
 
-  try {
-    const fetchOpts = {
-      method,
-      headers: headers(sessionId),
-      signal: controller.signal,
-    };
-    if (body !== undefined) {
-      fetchOpts.body = JSON.stringify(body);
-    }
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    const res = await fetch(`${baseUrl}${path}`, fetchOpts);
+    try {
+      const fetchOpts = {
+        method,
+        headers: headers(sessionId),
+        signal: controller.signal,
+      };
+      if (body !== undefined) {
+        fetchOpts.body = JSON.stringify(body);
+      }
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(formatError(method, path, res.status, text));
-    }
+      const res = await fetch(`${baseUrl}${path}`, fetchOpts);
 
-    return res.json();
-  } catch (err) {
-    if (err.name === "AbortError") {
-      throw new Error(
-        `A-Team API timeout: ${method} ${path} did not respond within ${timeoutMs / 1000}s.\n` +
-        `Hint: The A-Team API at ${baseUrl} may be down. Check ${baseUrl}/health`
-      );
+      // Auto-retry on 502/504 (proxy timeout during long deploys)
+      if ((res.status === 502 || res.status === 504) && attempt < maxRetries) {
+        const wait = Math.min(5000 * (attempt + 1), 15000);
+        console.error(`[MCP] ${method} ${path} returned ${res.status}, retrying in ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(formatError(method, path, res.status, text));
+      }
+
+      return res.json();
+    } catch (err) {
+      if (err.name === "AbortError") {
+        if (attempt < maxRetries) {
+          const wait = Math.min(5000 * (attempt + 1), 15000);
+          console.error(`[MCP] ${method} ${path} timed out, retrying in ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        throw new Error(
+          `A-Team API timeout: ${method} ${path} did not respond within ${timeoutMs / 1000}s.\n` +
+          `Hint: The A-Team API at ${baseUrl} may be down. Check ${baseUrl}/health`
+        );
+      }
+      if (err.cause?.code === "ECONNREFUSED") {
+        if (attempt < maxRetries) {
+          const wait = Math.min(5000 * (attempt + 1), 15000);
+          console.error(`[MCP] ${method} ${path} connection refused, retrying in ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        throw new Error(
+          `Cannot connect to A-Team API at ${baseUrl}.\n` +
+          `Hint: The service may be down. Check ${baseUrl}/health`
+        );
+      }
+      if (err.cause?.code === "ENOTFOUND") {
+        throw new Error(
+          `Cannot resolve A-Team API host: ${baseUrl}.\n` +
+          `Hint: Check your internet connection and ADAS_API_URL setting.`
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
     }
-    if (err.cause?.code === "ECONNREFUSED") {
-      throw new Error(
-        `Cannot connect to A-Team API at ${baseUrl}.\n` +
-        `Hint: The service may be down. Check ${baseUrl}/health`
-      );
-    }
-    if (err.cause?.code === "ENOTFOUND") {
-      throw new Error(
-        `Cannot resolve A-Team API host: ${baseUrl}.\n` +
-        `Hint: Check your internet connection and ADAS_API_URL setting.`
-      );
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

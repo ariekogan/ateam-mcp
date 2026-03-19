@@ -1268,7 +1268,7 @@ const handlers = {
     // Phase 2: Deploy
     let deploy;
     try {
-      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 300_000 });
+      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 300_000, retries: 2 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       return {
@@ -1558,7 +1558,7 @@ const handlers = {
     post(`/deploy/solutions/${solution_id}/github/push`, { message }, sid, { timeoutMs: 60_000 }),
 
   ateam_github_pull: async ({ solution_id }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000 }),
+    post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000, retries: 2 }),
 
   ateam_github_status: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/github/status`, sid),
@@ -1593,7 +1593,7 @@ const handlers = {
     const endpoint = skill_id
       ? `/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
       : `/deploy/solutions/${solution_id}/redeploy`;
-    const result = await post(endpoint, {}, sid, { timeoutMs: 300_000 });
+    const result = await post(endpoint, {}, sid, { timeoutMs: 300_000, retries: 2 });
     return {
       ok: result.ok,
       solution_id,
