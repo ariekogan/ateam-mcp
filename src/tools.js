@@ -367,6 +367,46 @@ export const tools = [
     },
   },
 
+  {
+    name: "ateam_upload_connector",
+    core: true,
+    description:
+      "Upload connector code to Core and restart — WITHOUT redeploying skills. " +
+      "Use this to update connector source code (server.js, UI assets, plugins) quickly. " +
+      "Set github=true to pull files from the solution's GitHub repo, or pass files directly. " +
+      "Much faster than ateam_build_and_run for connector-only changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        connector_id: {
+          type: "string",
+          description: "The connector ID to upload (e.g. 'personal-assistant-ui-mcp')",
+        },
+        github: {
+          type: "boolean",
+          description: "If true, pull connector files from GitHub repo. Default: false.",
+        },
+        files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Relative file path (e.g. 'server.js', 'ui-dist/panel/1.0.0/index.html')" },
+              content: { type: "string", description: "File content" },
+            },
+            required: ["path", "content"],
+          },
+          description: "Files to upload. Alternative to github=true.",
+        },
+      },
+      required: ["solution_id", "connector_id"],
+    },
+  },
+
   // ═══════════════════════════════════════════════════════════════════
   // ADVANCED TOOLS — hidden from tools/list, still callable by name
   // Use these for manual lifecycle control, debugging, and diagnostics
@@ -987,6 +1027,7 @@ const TENANT_TOOLS = new Set([
   "ateam_redeploy",
   "ateam_delete_solution",
   "ateam_delete_connector",
+  "ateam_upload_connector",
   "ateam_solution_chat",
   // Read operations (tenant-specific data)
   "ateam_list_solutions",
@@ -1588,6 +1629,14 @@ const handlers = {
 
   ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
+
+  ateam_upload_connector: async ({ solution_id, connector_id, github, files }, sid) =>
+    post(
+      `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
+      { github, files },
+      sid,
+      { timeoutMs: 300_000, retries: 1 },
+    ),
 
   ateam_redeploy: async ({ solution_id, skill_id }, sid) => {
     const endpoint = skill_id
