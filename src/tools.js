@@ -832,7 +832,68 @@ export const tools = [
   },
 
   // ═══════════════════════════════════════════════════════════════════
-  // MASTER KEY TOOLS — cross-tenant bulk operations (master key only)
+  // RELEASE MANAGEMENT — promote, rollback, version listing
+  // ═══════════════════════════════════════════════════════════════════
+
+  {
+    name: "ateam_github_promote",
+    core: true,
+    description:
+      "Promote a dev version to main (production). By default promotes the latest dev tag. Optionally specify a specific dev tag to promote. Creates a prod-YYYY-MM-DD-NNN tag on main.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        tag: {
+          type: "string",
+          description: "Optional: specific dev tag to promote (e.g., 'dev-2026-03-11-005'). If omitted, promotes the latest dev tag.",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_github_rollback",
+    core: true,
+    description:
+      "Rollback main (production) to a previous production tag. Resets main branch to the specified prod tag commit. ⚠️ DESTRUCTIVE — use with caution. Use ateam_github_list_versions to find available production tags first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        tag: {
+          type: "string",
+          description: "Required: production tag to rollback to (e.g., 'prod-2026-03-10-001')",
+        },
+      },
+      required: ["solution_id", "tag"],
+    },
+  },
+  {
+    name: "ateam_github_list_versions",
+    core: true,
+    description:
+      "List all available dev version tags for a solution. Shows tag name, date, counter, and commit SHA. Use before promoting to see what's available.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  // INFRASTRUCTURE — redeploy, master key bulk operations
   // ═══════════════════════════════════════════════════════════════════
 
   {
@@ -1512,6 +1573,15 @@ const handlers = {
     const qs = limit ? `?limit=${limit}` : "";
     return get(`/deploy/solutions/${solution_id}/github/log${qs}`, sid);
   },
+
+  ateam_github_promote: async ({ solution_id, tag }, sid) =>
+    post(`/deploy/solutions/${solution_id}/promote`, tag ? { tag } : {}, sid),
+
+  ateam_github_rollback: async ({ solution_id, tag }, sid) =>
+    post(`/deploy/solutions/${solution_id}/rollback`, { tag }, sid),
+
+  ateam_github_list_versions: async ({ solution_id }, sid) =>
+    get(`/deploy/solutions/${solution_id}/versions/dev`, sid),
 
   ateam_delete_solution: async ({ solution_id }, sid) =>
     del(`/deploy/solutions/${solution_id}`, sid),
