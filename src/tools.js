@@ -1455,7 +1455,10 @@ const handlers = {
     // Phase 2: Deploy
     let deploy;
     try {
-      deploy = await post("/deploy/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 300_000, retries: 2 });
+      deploy = await post("/deploy/solution", {
+        solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
+        ...(github && { skip_github_push: true }),
+      }, sid, { timeoutMs: 300_000, retries: 2 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       return {
