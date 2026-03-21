@@ -1079,14 +1079,23 @@ const handlers = {
       { name: "Enterprise Compliance Platform", description: "Approval flows, audit logs, policy enforcement" },
     ],
     developer_loop: {
-      _note: "This is the recommended build loop. 5 steps from definition to running skill with GitHub version control.",
+      _note: "This is the recommended build loop. 6 steps from definition to running skill with GitHub version control.",
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
-        { step: 3, action: "Version", description: "Every deploy auto-pushes to GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
-        { step: 4, action: "Iterate", description: "Edit connector code via ateam_github_patch, then redeploy with ateam_build_and_run(github:true). For skill definition changes (intents, tools, policy), use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
+        { step: 3, action: "Version", description: "Every deploy auto-pushes to the 'dev' branch on GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
+        { step: 4, action: "Iterate", description: "Edit connector code via ateam_github_patch (commits to dev), then redeploy with ateam_build_and_run(github:true). For skill definition changes, use ateam_patch (also pushes to dev).", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
         { step: 5, action: "Test & Debug", description: "Test the decision pipeline or full execution, then diagnose with logs and metrics. For voice-enabled solutions, use ateam_test_voice to simulate phone conversations.", tools: ["ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 6, action: "Promote", description: "When stable, promote the dev branch to main (production). This creates a production tag and merges dev → main.", tools: ["ateam_github_promote"] },
       ],
+    },
+    branching: {
+      _important: "ALL changes go to the 'dev' branch. The 'main' branch is production — only updated via explicit promote.",
+      dev: "Staging branch. Every build_and_run, patch, and github_patch commits here automatically.",
+      main: "Production branch. Updated ONLY via ateam_github_promote(). First deploy also pushes to main as baseline.",
+      workflow: "Build → iterate on dev → test → promote to main when stable.",
+      promote: "ateam_github_promote(solution_id) — merges latest dev tag to main, creates prod tag.",
+      rollback: "ateam_github_rollback(solution_id) — reverts main to previous production tag.",
     },
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
@@ -1095,24 +1104,31 @@ const handlers = {
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
     github_tools: {
-      _note: "Version control for solutions. Every deploy auto-pushes to GitHub. The repo is the source of truth for connector code.",
-      tools: ["ateam_github_push", "ateam_github_pull", "ateam_github_status", "ateam_github_read", "ateam_github_patch", "ateam_github_log"],
+      _note: "Version control for solutions. ALL operations target the 'dev' branch. Promote to 'main' (production) explicitly.",
+      tools: ["ateam_github_push", "ateam_github_pull", "ateam_github_status", "ateam_github_read", "ateam_github_patch", "ateam_github_log", "ateam_github_promote", "ateam_github_rollback"],
       repo_structure: {
         "solution.json": "Full solution definition",
         "skills/{skill-id}/skill.json": "Individual skill definitions",
         "connectors/{connector-id}/server.js": "Connector MCP server code",
         "connectors/{connector-id}/package.json": "Connector dependencies",
       },
+      branches: {
+        dev: "All changes land here (auto-push on build/patch). This is the working branch.",
+        main: "Production snapshot. Only updated via ateam_github_promote(). Safe rollback target.",
+      },
       iteration_workflow: {
-        code_changes: "ateam_github_patch (edit connector files) → ateam_build_and_run(github:true) (redeploy from repo)",
-        definition_changes: "ateam_patch (edit skill/solution definitions directly in Builder)",
-        first_deploy: "Must include mcp_store — this creates the GitHub repo",
+        code_changes: "ateam_github_patch (commits to dev) → ateam_build_and_run(github:true) (pulls from dev, redeploys)",
+        definition_changes: "ateam_patch (updates + redeploys + auto-pushes to dev)",
+        first_deploy: "Must include mcp_store — this creates the GitHub repo with both dev and main branches",
+        promote: "ateam_github_promote(solution_id) — when solution is stable, merge dev → main",
       },
       when_to_use_what: {
-        ateam_github_patch: "Edit connector source code (server.js, utils, package.json, UI assets)",
-        ateam_patch: "Edit skill definitions (intents, tools, policy) or solution definitions (grants, handoffs, routing)",
-        "ateam_build_and_run(github:true)": "Redeploy solution pulling latest connector code from GitHub",
+        ateam_github_patch: "Edit connector source code on dev branch (server.js, utils, package.json, UI assets)",
+        ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to dev",
+        "ateam_build_and_run(github:true)": "Redeploy solution pulling latest connector code from dev branch",
         "ateam_build_and_run(mcp_store)": "First deploy or when you want to pass connector code inline",
+        ateam_github_promote: "Promote dev → main when stable (creates production tag)",
+        ateam_github_rollback: "Revert main to previous production tag",
       },
     },
     advanced_tools: {
@@ -1157,12 +1173,15 @@ const handlers = {
         "Use ateam_github_patch + ateam_build_and_run(github:true) for connector code changes after first deploy",
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear",
+        "ALL changes go to the dev branch — remind user to ateam_github_promote() when ready for production",
+        "After every build/patch, tell the user: 'Deployed to Core ✅ | Pushed to dev branch | Promote to main: ateam_github_promote()'",
       ],
       never: [
         "Call validate + deploy + health separately when ateam_build_and_run does it in one step",
         "Call update + redeploy separately when ateam_patch does it in one step",
         "Dump raw spec unless requested",
         "Write connector code that starts a web server — connectors MUST use stdio transport",
+        "Assume changes are on main — they are always on dev until explicitly promoted",
       ],
     },
   }),
@@ -1386,6 +1405,7 @@ const handlers = {
     return {
       ok: true,
       solution_id: solution.id,
+      branch: 'dev',
       phases,
       deploy: {
         skills_deployed: deploy.import?.skills || [],
@@ -1397,6 +1417,8 @@ const handlers = {
       ...(test_result && { test_result }),
       ...(github_result && !github_result.error && !github_result.skipped && { github: github_result }),
       ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
+      _status: '✅ Deployed to Core + pushed to dev branch.',
+      _next: 'To promote to production (main branch): ateam_github_promote(solution_id)',
     };
   },
 
@@ -1463,13 +1485,32 @@ const handlers = {
       }
     }
 
+    // Phase 4: Auto-push to dev branch (non-blocking)
+    let github_result;
+    try {
+      github_result = await post(
+        `/deploy/solutions/${solution_id}/github/push`,
+        { message: `Patch: ${target}${skill_id ? ` ${skill_id}` : ''} — ${Object.keys(updates || {}).join(', ')}` },
+        sid,
+        { timeoutMs: 60_000 },
+      );
+      phases.push({ phase: 'github', status: github_result.skipped ? 'skipped' : 'done' });
+    } catch (err) {
+      github_result = { error: err.message };
+      phases.push({ phase: 'github', status: 'error', error: err.message });
+    }
+
     return {
       ok: true,
       solution_id,
+      branch: 'dev',
       phases,
       patch: patchResult,
       redeploy: redeployResult,
       ...(test_result && { test_result }),
+      ...(github_result && !github_result.error && !github_result.skipped && { github: github_result }),
+      _status: '✅ Patched + redeployed + pushed to dev branch.',
+      _next: 'To promote to production (main branch): ateam_github_promote(solution_id)',
     };
   },
 
