@@ -124,14 +124,18 @@ export const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID. Use this INSTEAD of passing the full solution object — the solution definition is auto-pulled from GitHub. Required if solution object is omitted.",
+        },
         solution: {
           type: "object",
-          description: "Solution architecture — identity, grants, handoffs, routing",
+          description: "Full solution definition. Required on first deploy. After first deploy, just pass solution_id instead — everything is auto-pulled from GitHub.",
         },
         skills: {
           type: "array",
           items: { type: "object" },
-          description: "Array of full skill definitions",
+          description: "Optional after first deploy: skill definitions. If omitted, auto-pulled from GitHub repo (skills/{id}/skill.json).",
         },
         connectors: {
           type: "array",
@@ -155,7 +159,7 @@ export const tools = [
           description: "Optional: which skill to test (defaults to the first skill).",
         },
       },
-      required: ["solution", "skills"],
+      required: [],
     },
   },
   {
@@ -1291,7 +1295,13 @@ const handlers = {
   // Validates → Deploys → Health-checks → Optionally tests
   // One call replaces: validate_solution + deploy_solution + get_solution(health)
 
-  ateam_build_and_run: async ({ solution, skills, connectors, mcp_store, github, test_message, test_skill_id }, sid) => {
+  ateam_build_and_run: async ({ solution_id: solIdArg, solution: solutionArg, skills, connectors, mcp_store, github, test_message, test_skill_id }, sid) => {
+    let solution = solutionArg;
+    // If only solution_id passed (no full solution), we'll pull from GitHub
+    const solutionId = solution?.id || solIdArg;
+    if (!solutionId) {
+      return { ok: false, phase: "pre_check", error: "Provide either solution (object) or solution_id (string)." };
+    }
     const phases = [];
 
     // Guard: reject large mcp_store — agent should use github_patch instead
@@ -1314,13 +1324,13 @@ const handlers = {
       }
     }
 
-    // Phase 0: Auto-detect GitHub repo — if no mcp_store passed and repo exists, pull from GitHub automatically
+    // Phase 0: Auto-detect GitHub repo — if no mcp_store passed and repo exists, pull bundle from GitHub
     let effectiveMcpStore = mcp_store;
+    let effectiveSkills = skills;
     if (!mcp_store) {
       try {
-        const ghStatus = await get(`/deploy/solutions/${solution.id}/github/status`, sid);
+        const ghStatus = await get(`/deploy/solutions/${solutionId}/github/status`, sid);
         if (ghStatus?.repo_url) {
-          // Repo exists — auto-pull from GitHub
           github = true;
         }
       } catch { /* no repo — first deploy, mcp_store expected */ }
@@ -1328,24 +1338,33 @@ const handlers = {
     if (github && !mcp_store) {
       try {
         const pullResult = await post(
-          `/deploy/solutions/${solution.id}/github/pull-connectors`,
+          `/deploy/solutions/${solutionId}/github/pull-bundle`,
           {},
           sid,
-          { timeoutMs: 30_000 },
+          { timeoutMs: 60_000 },
         );
         if (!pullResult.ok) {
           return {
             ok: false,
             phase: "github_pull",
-            error: pullResult.error || "Failed to pull connectors from GitHub",
+            error: pullResult.error || "Failed to pull bundle from GitHub",
             hint: pullResult.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
-            message: "Cannot pull connector code from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+            message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
           };
         }
-        effectiveMcpStore = pullResult.mcp_store;
+        effectiveMcpStore = pullResult.mcp_store || {};
+        // Use solution from GitHub if not passed inline
+        if (!solution && pullResult.solution) {
+          solution = pullResult.solution;
+        }
+        // Use skills from GitHub if not passed inline
+        if (!effectiveSkills?.length && pullResult.skills?.length) {
+          effectiveSkills = pullResult.skills;
+        }
         phases.push({
           phase: "github_pull",
           status: "done",
+          skills_found: pullResult.skills_found || 0,
           connectors_found: pullResult.connectors_found || 0,
           files_loaded: pullResult.files_loaded || 0,
         });
@@ -1354,15 +1373,35 @@ const handlers = {
           ok: false,
           phase: "github_pull",
           error: err.message,
-          message: "Failed to pull connector code from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+          message: "Failed to pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
         };
       }
+    }
+
+    // Guard: solution required (either inline or from GitHub)
+    if (!solution) {
+      return {
+        ok: false,
+        phase: "pre_check",
+        error: "No solution provided and none found in GitHub repo.",
+        message: "Pass solution inline or ensure solution.json exists in the GitHub repo.",
+      };
+    }
+
+    // Guard: skills required (either inline or from GitHub)
+    if (!effectiveSkills?.length) {
+      return {
+        ok: false,
+        phase: "pre_check",
+        error: "No skills provided and none found in GitHub repo.",
+        message: "Pass skills inline or ensure they exist in the GitHub repo (skills/{id}/skill.json).",
+      };
     }
 
     // Phase 1: Validate
     let validation;
     try {
-      validation = await post("/validate/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000 });
+      validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
       return {
@@ -1388,7 +1427,7 @@ const handlers = {
     // Phase 2: Deploy
     let deploy;
     try {
-      deploy = await post("/deploy/solution", { solution, skills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 300_000, retries: 2 });
+      deploy = await post("/deploy/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 300_000, retries: 2 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       return {
@@ -1426,7 +1465,7 @@ const handlers = {
     // Phase 4: Warm test (optional)
     let test_result;
     if (test_message) {
-      const skillId = test_skill_id || skills?.[0]?.id;
+      const skillId = test_skill_id || effectiveSkills?.[0]?.id;
       if (skillId) {
         try {
           test_result = await post(
