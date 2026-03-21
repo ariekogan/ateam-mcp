@@ -120,7 +120,7 @@ export const tools = [
     name: "ateam_build_and_run",
     core: true,
     description:
-      "Build and deploy a governed AI Team solution in one step. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to A-Team Core (regenerates MCP servers) → health-checks → optionally runs a warm test → auto-pushes to GitHub. Use this instead of calling validate, deploy, and health separately. For small changes to an already-deployed solution, prefer ateam_patch (faster, incremental). Requires authentication.",
+      "Build and deploy a governed AI Team solution in one step. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to A-Team Core (regenerates MCP servers) → health-checks → optionally runs a warm test → auto-pushes to GitHub. AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from GitHub automatically. First deploy requires mcp_store. After that, write files via ateam_github_write, then just call build_and_run without mcp_store. For small changes to an already-deployed solution, prefer ateam_patch (faster, incremental). Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -144,7 +144,7 @@ export const tools = [
         },
         github: {
           type: "boolean",
-          description: "Optional: if true, pull connector source code from the solution's GitHub repo instead of requiring mcp_store. Use this after the first deploy (which creates the repo). Cannot be used on first deploy.",
+          description: "Optional: if true, pull connector source code from the solution's GitHub repo. AUTO-DETECTED: if you omit both mcp_store and github, the system checks if a repo exists and pulls from it automatically. You rarely need to set this explicitly.",
         },
         test_message: {
           type: "string",
@@ -851,6 +851,36 @@ export const tools = [
     },
   },
   {
+    name: "ateam_github_write",
+    core: true,
+    description:
+      "Write a file to the solution's GitHub repo. Use this to create new connector files or replace existing ones — one file per call. " +
+      "This is the PRIMARY way to write connector code after first deploy. " +
+      "Write each file individually (server.js, package.json, UI assets), then call ateam_build_and_run() to deploy.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        path: {
+          type: "string",
+          description: "File path to write (e.g. 'connectors/my-mcp/server.js', 'connectors/my-mcp/package.json')",
+        },
+        content: {
+          type: "string",
+          description: "The full file content",
+        },
+        message: {
+          type: "string",
+          description: "Optional commit message (default: 'Write <path>')",
+        },
+      },
+      required: ["solution_id", "path", "content"],
+    },
+  },
+  {
     name: "ateam_github_log",
     core: true,
     description:
@@ -1084,7 +1114,7 @@ const handlers = {
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Version", description: "Every deploy auto-pushes to main on GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
-        { step: 4, action: "Iterate", description: "Edit connector code via ateam_github_patch (commits to main), then redeploy with ateam_build_and_run(github:true). For skill definition changes, use ateam_patch (also pushes to main).", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
+        { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch, then redeploy with ateam_build_and_run (auto-pulls from GitHub). NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
         { step: 5, action: "Test & Debug", description: "Test the decision pipeline or full execution, then diagnose with logs and metrics. For voice-enabled solutions, use ateam_test_voice to simulate phone conversations.", tools: ["ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
       ],
@@ -1114,16 +1144,18 @@ const handlers = {
       branch: "main — the only branch. All changes land here directly.",
       checkpoints: "safe-YYYY-MM-DD-NNN tags mark safe rollback points. Create with ateam_github_promote().",
       iteration_workflow: {
-        code_changes: "ateam_github_patch (commits to main) → ateam_build_and_run(github:true) (pulls from main, redeploys)",
+        code_changes: "ateam_github_patch (one file at a time, commits to main) → ateam_build_and_run() (auto-pulls from GitHub, redeploys)",
         definition_changes: "ateam_patch (updates + redeploys + auto-pushes to main)",
         first_deploy: "Must include mcp_store — this creates the GitHub repo",
+        after_first_deploy: "NEVER pass mcp_store again. Write files via ateam_github_patch, then ateam_build_and_run() auto-detects the repo.",
         checkpoint: "ateam_github_promote(solution_id) — tag current state as a safe rollback point",
       },
       when_to_use_what: {
-        ateam_github_patch: "Edit connector source code on main (server.js, utils, package.json, UI assets)",
+        ateam_github_write: "Write/create connector files on main — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy.",
+        ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
         ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to main",
-        "ateam_build_and_run(github:true)": "Redeploy solution pulling latest connector code from main",
-        "ateam_build_and_run(mcp_store)": "First deploy or when you want to pass connector code inline",
+        "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
+        "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
         ateam_github_promote: "Create a checkpoint (safe-* tag) — use before risky changes",
         ateam_github_rollback: "Revert main to a previous checkpoint",
       },
@@ -1179,6 +1211,8 @@ const handlers = {
         "Dump raw spec unless requested",
         "Write connector code that starts a web server — connectors MUST use stdio transport",
         "Mention dev branch — there is no dev branch, everything is on main",
+        "Pass large connector code via mcp_store after the first deploy — use ateam_github_write/ateam_github_patch one file at a time instead",
+        "Try to pass ALL connector files at once in a single tool call — write them individually to GitHub",
       ],
     },
   }),
@@ -1260,8 +1294,37 @@ const handlers = {
   ateam_build_and_run: async ({ solution, skills, connectors, mcp_store, github, test_message, test_skill_id }, sid) => {
     const phases = [];
 
-    // Phase 0: GitHub pull (if github:true — pull connector source from repo)
+    // Guard: reject large mcp_store — agent should use github_patch instead
+    if (mcp_store) {
+      const totalSize = Object.values(mcp_store).reduce((sum, files) => {
+        return sum + (Array.isArray(files) ? files.reduce((s, f) => s + (f.content?.length || 0), 0) : 0);
+      }, 0);
+      if (totalSize > 200_000) {
+        return {
+          ok: false,
+          phase: "pre_check",
+          error: `mcp_store is too large (${Math.round(totalSize / 1024)}KB). Max ~200KB inline.`,
+          message: "Connector code is too large to pass inline. Write files individually to GitHub, then deploy from there.",
+          _fix: [
+            "1. Write each file: ateam_github_patch(solution_id, path: 'connectors/<id>/server.js', content: '...')",
+            "2. Repeat for package.json, UI assets, etc.",
+            "3. Deploy: ateam_build_and_run(solution, skills) — will auto-pull from GitHub",
+          ],
+        };
+      }
+    }
+
+    // Phase 0: Auto-detect GitHub repo — if no mcp_store passed and repo exists, pull from GitHub automatically
     let effectiveMcpStore = mcp_store;
+    if (!mcp_store) {
+      try {
+        const ghStatus = await get(`/deploy/solutions/${solution.id}/github/status`, sid);
+        if (ghStatus?.repo_url) {
+          // Repo exists — auto-pull from GitHub
+          github = true;
+        }
+      } catch { /* no repo — first deploy, mcp_store expected */ }
+    }
     if (github && !mcp_store) {
       try {
         const pullResult = await post(
@@ -1647,6 +1710,9 @@ const handlers = {
 
   ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message }, sid),
+
+  ateam_github_write: async ({ solution_id, path: filePath, content, message }, sid) =>
+    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message }, sid),
 
   ateam_github_log: async ({ solution_id, limit }, sid) => {
     const qs = limit ? `?limit=${limit}` : "";
