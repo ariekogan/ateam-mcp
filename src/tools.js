@@ -1451,11 +1451,35 @@ const handlers = {
       };
     }
 
+    // Phase 2.5: Restart connectors that have source code (upload triggers stop+start)
+    if (effectiveMcpStore && Object.keys(effectiveMcpStore).length > 0) {
+      const connectorResults = [];
+      for (const [connId, files] of Object.entries(effectiveMcpStore)) {
+        if (!Array.isArray(files) || files.length === 0) continue;
+        try {
+          const uploadResult = await post(
+            `/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
+            { files },
+            sid,
+            { timeoutMs: 120_000 },
+          );
+          connectorResults.push({ id: connId, ok: true, tools: uploadResult.tools || 0 });
+        } catch (err) {
+          connectorResults.push({ id: connId, ok: false, error: err.message });
+        }
+      }
+      phases.push({
+        phase: "connector_restart",
+        status: connectorResults.every(r => r.ok) ? "done" : "partial",
+        connectors: connectorResults,
+      });
+    }
+
     // Phase 3: Health check (with brief wait for propagation)
     let health;
     try {
       await sleep(2000);
-      health = await get(`/deploy/solutions/${solution.id}/health`, sid);
+      health = await get(`/deploy/solutions/${solutionId}/health`, sid);
       phases.push({ phase: "health", status: "done" });
     } catch (err) {
       health = { error: err.message };
@@ -1469,7 +1493,7 @@ const handlers = {
       if (skillId) {
         try {
           test_result = await post(
-            `/deploy/solutions/${solution.id}/skills/${skillId}/test`,
+            `/deploy/solutions/${solutionId}/skills/${skillId}/test`,
             { message: test_message },
             sid,
             { timeoutMs: 90_000 },
@@ -1482,28 +1506,34 @@ const handlers = {
       }
     }
 
-    // Phase 5: GitHub push (auto — non-blocking, failures don't fail the deploy)
+    // Phase 5: GitHub push (skip if we just pulled from GitHub — don't overwrite source of truth)
     let github_result;
-    try {
-      github_result = await post(
-        `/deploy/solutions/${solution.id}/github/push`,
-        { message: `Deploy: ${solution.name || solution.id}` },
-        sid,
-        { timeoutMs: 60_000 },
-      );
-      phases.push({
-        phase: "github",
-        status: github_result.skipped ? "skipped" : "done",
-        ...(github_result.repo_url && { repo_url: github_result.repo_url }),
-      });
-    } catch (err) {
-      github_result = { error: err.message };
-      phases.push({ phase: "github", status: "error", error: err.message });
+    if (github) {
+      // We pulled from GitHub → GitHub IS the source of truth. Don't push stale Core state back.
+      github_result = { skipped: true, reason: 'Deployed from GitHub — skipping push-back to avoid overwriting source of truth.' };
+      phases.push({ phase: "github", status: "skipped", reason: "pulled_from_github" });
+    } else {
+      try {
+        github_result = await post(
+          `/deploy/solutions/${solutionId}/github/push`,
+          { message: `Deploy: ${solution.name || solutionId}` },
+          sid,
+          { timeoutMs: 60_000 },
+        );
+        phases.push({
+          phase: "github",
+          status: github_result.skipped ? "skipped" : "done",
+          ...(github_result.repo_url && { repo_url: github_result.repo_url }),
+        });
+      } catch (err) {
+        github_result = { error: err.message };
+        phases.push({ phase: "github", status: "error", error: err.message });
+      }
     }
 
     return {
       ok: true,
-      solution_id: solution.id,
+      solution_id: solutionId,
       branch: 'main',
       phases,
       deploy: {
