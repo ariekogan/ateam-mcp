@@ -11,7 +11,7 @@
  */
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
-const CORE_URL = process.env.ADAS_CORE_URL || "";  // Direct Core access (for tenant list, etc.)
+// CORE_URL removed — all requests now route through BASE_URL (skill-validator)
 const ENV_TENANT = process.env.ADAS_TENANT || "";
 const ENV_API_KEY = process.env.ADAS_API_KEY || "";
 
@@ -441,20 +441,20 @@ export async function del(path, sessionId, opts) {
 }
 
 /**
- * List all active tenants from Core API (requires master key).
- * Calls Core directly (not through Builder) using shared secret auth.
+ * List all active tenants (requires master key).
+ * Routes through the skill-validator's /deploy/tenants endpoint,
+ * which proxies to Core. This works with any BASE_URL (including
+ * public domains without explicit ports).
  */
 export async function listTenants(sessionId) {
   const session = sessionId ? sessions.get(sessionId) : null;
   if (!session?.masterKey) throw new Error("listTenants requires master key auth");
 
-  // Resolve Core URL: env var > derive from Builder URL > fallback
-  const coreUrl = CORE_URL || BASE_URL.replace(/:\d+$/, ":4000");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const res = await fetch(`${coreUrl}/api/tenants/list`, {
+    const res = await fetch(`${BASE_URL}/deploy/tenants`, {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
@@ -464,7 +464,7 @@ export async function listTenants(sessionId) {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Core API error: GET /api/tenants/list returned ${res.status} — ${text}`);
+      throw new Error(`Tenant list error: GET /deploy/tenants returned ${res.status} — ${text}`);
     }
     const data = await res.json();
     return data.tenants || [];
