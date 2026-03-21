@@ -675,6 +675,34 @@ export const tools = [
     },
   },
   {
+    name: "ateam_test_connector",
+    core: true,
+    description:
+      "Call a tool on a running connector and get the result. Use this to test individual connector tools (e.g., triggers.list, entities.list, google.command) without deploying to a client. The connector must be connected and running.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        connector_id: {
+          type: "string",
+          description: "The connector ID (e.g., 'home-assistant-mcp', 'google-home-mcp')",
+        },
+        tool: {
+          type: "string",
+          description: "The tool name to call (e.g., 'triggers.list', 'entities.list', 'google.devices')",
+        },
+        args: {
+          type: "object",
+          description: "Optional: arguments to pass to the tool",
+        },
+      },
+      required: ["solution_id", "connector_id", "tool"],
+    },
+  },
+  {
     name: "ateam_get_connector_source",
     core: true,
     description:
@@ -1708,6 +1736,9 @@ const handlers = {
 
   ateam_solution_chat: async ({ solution_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/chat`, { message }, sid),
+
+  ateam_test_connector: async ({ solution_id, connector_id, tool, args }, sid) =>
+    post(`/deploy/solutions/${solution_id}/connectors/${connector_id}/call`, { tool, args }, sid, { timeoutMs: 30_000 }),
 
   // ─── Developer Tools ────────────────────────────────────────────
 
