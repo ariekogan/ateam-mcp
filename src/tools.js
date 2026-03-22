@@ -1455,24 +1455,51 @@ const handlers = {
     // Phase 2: Deploy
     let deploy;
     try {
+      // Try sync first (fast for small solutions)
       deploy = await post("/deploy/solution", {
         solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
         ...(github && { skip_github_push: true }),
-      }, sid, { timeoutMs: 300_000, retries: 2 });
+      }, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(err.message);
-      return {
-        ok: false,
-        phase: "deployment",
-        phases,
-        error: err.message,
-        validation_warnings: validation.warnings || [],
-        message: "Deployment failed. See error details above.",
-        ...(isTimeout && {
-          hint: "Deploy timed out — this solution is too large for a full build_and_run. Use incremental tools instead: ateam_patch(solution_id, target, updates) for skill changes, ateam_upload_connector(solution_id, connector_id, github: true) for connector code changes. Never use build_and_run on large solutions.",
-        }),
-      };
+      if (!isTimeout) {
+        return { ok: false, phase: "deployment", phases, error: err.message, validation_warnings: validation.warnings || [] };
+      }
+
+      // Timeout → retry with async mode + polling
+      phases.push({ phase: "deploy", status: "async_retry" });
+      try {
+        const asyncResult = await post("/deploy/solution", {
+          solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
+          ...(github && { skip_github_push: true }),
+          async: true,
+        }, sid, { timeoutMs: 15_000 });
+
+        if (asyncResult.job_id) {
+          // Poll for completion (up to 10 min)
+          const jobId = asyncResult.job_id;
+          const maxWait = 600_000;
+          const pollInterval = 5_000;
+          const start = Date.now();
+          while (Date.now() - start < maxWait) {
+            await new Promise(r => setTimeout(r, pollInterval));
+            try {
+              const job = await get(`/deploy/jobs/${jobId}`, sid);
+              if (job.status === 'done' || job.status === 'failed') {
+                deploy = job;
+                phases.push({ phase: "deploy", status: job.status });
+                break;
+              }
+            } catch { /* keep polling */ }
+          }
+          if (!deploy) {
+            return { ok: false, phase: "deployment", phases, error: "Async deploy timed out after 10 minutes", validation_warnings: validation.warnings || [] };
+          }
+        }
+      } catch (asyncErr) {
+        return { ok: false, phase: "deployment", phases, error: `Sync timed out, async fallback failed: ${asyncErr.message}`, validation_warnings: validation.warnings || [] };
+      }
     }
 
     if (!deploy.ok) {
