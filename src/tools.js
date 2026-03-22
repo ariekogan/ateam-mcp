@@ -1856,7 +1856,23 @@ const handlers = {
     const endpoint = skill_id
       ? `/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
       : `/deploy/solutions/${solution_id}/redeploy`;
-    const result = await post(endpoint, {}, sid, { timeoutMs: 300_000, retries: 2 });
+    let result;
+    try {
+      result = await post(endpoint, {}, sid, { timeoutMs: 300_000, retries: 2 });
+    } catch (err) {
+      const notFound = /not found|404|ENOENT/i.test(err.message);
+      const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(err.message);
+      return {
+        ok: false,
+        error: err.message,
+        ...(notFound && {
+          hint: "Skill not found in Builder storage. Edit the skill on GitHub with ateam_github_patch(solution_id, path: 'skills/<skill-id>/skill.json', search: '...', replace: '...'), then use ateam_build_and_run(solution_id, github: true) or ask the platform operator to deploy the single skill.",
+        }),
+        ...(isTimeout && {
+          hint: "Redeploy timed out. For large solutions, redeploy one skill at a time: ateam_redeploy(solution_id, skill_id: '<specific-skill>').",
+        }),
+      };
+    }
     return {
       ok: result.ok,
       solution_id,
