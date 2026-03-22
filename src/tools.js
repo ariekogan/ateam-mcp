@@ -1494,11 +1494,13 @@ const handlers = {
             } catch { /* keep polling */ }
           }
           if (!deploy) {
-            return { ok: false, phase: "deployment", phases, error: "Async deploy timed out after 10 minutes", validation_warnings: validation.warnings || [] };
+            return { ok: false, phase: "deployment", phases, error: "Async deploy timed out after 10 minutes", validation_warnings: validation.warnings || [],
+              hint: "Deploy is too large even for async mode. Use incremental tools instead: ateam_patch(solution_id, target:'skill', skill_id, updates) for skill changes, ateam_upload_connector(solution_id, connector_id, github:true) for connector code changes." };
           }
         }
       } catch (asyncErr) {
-        return { ok: false, phase: "deployment", phases, error: `Sync timed out, async fallback failed: ${asyncErr.message}`, validation_warnings: validation.warnings || [] };
+        return { ok: false, phase: "deployment", phases, error: `Sync timed out, async fallback failed: ${asyncErr.message}`, validation_warnings: validation.warnings || [],
+          hint: "Deploy timed out. Use incremental tools: ateam_patch for skill changes, ateam_upload_connector for connector changes. These deploy one component at a time and never timeout." };
       }
     }
 
