@@ -1602,11 +1602,15 @@ const handlers = {
       }
       phases.push({ phase: "update", status: "done" });
     } catch (err) {
+      const notFound = /not found|404|ENOENT/i.test(err.message);
       return {
         ok: false,
         phase: "update",
         error: err.message,
         message: "Patch failed. Check your updates payload format.",
+        ...(notFound && {
+          hint: "Skill not found in Builder storage. Use ateam_github_patch to edit the skill JSON directly on GitHub (path: skills/<skill-id>/skill.json), then ateam_redeploy(solution_id, skill_id) to deploy the updated skill.",
+        }),
       };
     }
 
