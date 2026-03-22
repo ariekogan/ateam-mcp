@@ -1537,17 +1537,16 @@ const handlers = {
       }
     }
 
-    // Phase 5: GitHub push (skip if we just pulled from GitHub — don't overwrite source of truth)
+    // Phase 5: GitHub push — only when NOT deployed from GitHub
     let github_result;
     if (github) {
-      // We pulled from GitHub → GitHub IS the source of truth. Don't push stale Core state back.
-      github_result = { skipped: true, reason: 'Deployed from GitHub — skipping push-back to avoid overwriting source of truth.' };
+      github_result = { skipped: true, reason: 'Deployed from GitHub — push-back skipped.' };
       phases.push({ phase: "github", status: "skipped", reason: "pulled_from_github" });
     } else {
       try {
         github_result = await post(
           `/deploy/solutions/${solutionId}/github/push`,
-          { message: `Deploy: ${solution.name || solutionId}` },
+          { push_to_github: true, message: `Deploy: ${solution.name || solutionId}` },
           sid,
           { timeoutMs: 60_000 },
         );
@@ -1650,7 +1649,7 @@ const handlers = {
     try {
       github_result = await post(
         `/deploy/solutions/${solution_id}/github/push`,
-        { message: `Patch: ${target}${skill_id ? ` ${skill_id}` : ''} — ${Object.keys(updates || {}).join(', ')}` },
+        { push_to_github: true, message: `Patch: ${target}${skill_id ? ` ${skill_id}` : ''} — ${Object.keys(updates || {}).join(', ')}` },
         sid,
         { timeoutMs: 60_000 },
       );
@@ -1800,7 +1799,7 @@ const handlers = {
   // ─── GitHub tools ──────────────────────────────────────────────────
 
   ateam_github_push: async ({ solution_id, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/push`, { message }, sid, { timeoutMs: 60_000 }),
+    post(`/deploy/solutions/${solution_id}/github/push`, { push_to_github: true, message }, sid, { timeoutMs: 60_000 }),
 
   ateam_github_pull: async ({ solution_id }, sid) =>
     post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000, retries: 2 }),
@@ -1917,7 +1916,7 @@ const handlers = {
           // Push: Builder FS → GitHub
           if (!pull_only) {
             try {
-              const pushResult = await post(`/deploy/solutions/${sol.id}/github/push`, {}, sid);
+              const pushResult = await post(`/deploy/solutions/${sol.id}/github/push`, { push_to_github: true }, sid);
               entry.push = { ok: true, commit: pushResult.commitSha?.slice(0, 8), files: pushResult.filesCommitted };
             } catch (err) {
               entry.push = { ok: false, error: err.message.slice(0, 100) };
