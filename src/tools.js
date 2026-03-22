@@ -1461,6 +1461,7 @@ const handlers = {
       }, sid, { timeoutMs: 300_000, retries: 2 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
+      const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(err.message);
       return {
         ok: false,
         phase: "deployment",
@@ -1468,6 +1469,9 @@ const handlers = {
         error: err.message,
         validation_warnings: validation.warnings || [],
         message: "Deployment failed. See error details above.",
+        ...(isTimeout && {
+          hint: "Deploy timed out — this solution is too large for a full build_and_run. Use incremental tools instead: ateam_patch(solution_id, target, updates) for skill changes, ateam_upload_connector(solution_id, connector_id, github: true) for connector code changes. Never use build_and_run on large solutions.",
+        }),
       };
     }
 
