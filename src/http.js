@@ -60,21 +60,28 @@ export function startHttpServer(port = 3100) {
   app.use(express.json());
 
   // ─── Fix Accept header for MCP endpoints ──────────────────────────
-  // Claude.ai may not send the required Accept header with text/event-stream.
-  // The MCP SDK requires it per spec, so we inject it if missing.
+  // The MCP SDK requires Accept to include BOTH application/json and
+  // text/event-stream. Different clients send different combinations:
+  //   - Claude.ai web: may omit text/event-stream
+  //   - Claude.ai mobile: may send only text/event-stream
+  //   - ChatGPT: may send only application/json
+  // We normalize to always include both to satisfy the SDK.
   // Must patch both parsed headers AND rawHeaders since @hono/node-server
   // reads from rawHeaders when converting to Web Standard Request.
   for (const path of MCP_PATHS) {
     app.use(path, (req, _res, next) => {
-      const accept = req.headers.accept || "";
-      if (req.method === "POST" && !accept.includes("text/event-stream")) {
-        const fixed = "application/json, text/event-stream";
-        req.headers.accept = fixed;
-        const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "accept");
-        if (idx !== -1) {
-          req.rawHeaders[idx + 1] = fixed;
-        } else {
-          req.rawHeaders.push("Accept", fixed);
+      if (req.method === "POST") {
+        const accept = req.headers.accept || "";
+        const needsFix = !accept.includes("text/event-stream") || !accept.includes("application/json");
+        if (needsFix) {
+          const fixed = "application/json, text/event-stream";
+          req.headers.accept = fixed;
+          const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "accept");
+          if (idx !== -1) {
+            req.rawHeaders[idx + 1] = fixed;
+          } else {
+            req.rawHeaders.push("Accept", fixed);
+          }
         }
       }
       next();
