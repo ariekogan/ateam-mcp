@@ -662,7 +662,7 @@ export const tools = [
     name: "ateam_test_status",
     core: false,
     description:
-      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status, pending questions, and result when done. (Advanced — use ateam_test_skill with wait=true for synchronous testing.)",
+      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status (running/completed/failed), and result when done. (Advanced — use ateam_test_skill with wait=true for synchronous testing.)",
     inputSchema: {
       type: "object",
       properties: {
