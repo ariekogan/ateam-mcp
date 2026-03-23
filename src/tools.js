@@ -192,6 +192,38 @@ export const tools = [
     },
   },
   {
+    name: "ateam_conversation",
+    core: true,
+    description:
+      "Send a message to a deployed solution and get the result. No skill_id needed — the system auto-routes to the right skill. Supports multi-turn conversations: pass the actor_id from a previous response to continue the thread (e.g., reply to a confirmation prompt). Each call creates a new job but the same actor_id maintains conversation context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        message: {
+          type: "string",
+          description: "The message to send (e.g., 'send email to X' or 'I confirm')",
+        },
+        actor_id: {
+          type: "string",
+          description: "Optional: actor ID from a previous response to continue the conversation. Omit for a new conversation.",
+        },
+        wait: {
+          type: "boolean",
+          description: "If true (default), wait for completion. If false, return job_id immediately for polling.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Optional: max wait time in ms (default: 60000, max: 300000).",
+        },
+      },
+      required: ["solution_id", "message"],
+    },
+  },
+  {
     name: "ateam_test_pipeline",
     core: true,
     description:
@@ -1095,6 +1127,7 @@ const TENANT_TOOLS = new Set([
   "ateam_list_solutions",
   "ateam_get_solution",
   "ateam_get_execution_logs",
+  "ateam_conversation",
   "ateam_test_skill",
   "ateam_test_pipeline",
   "ateam_test_voice",
@@ -1147,7 +1180,7 @@ const handlers = {
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Version", description: "Every deploy auto-pushes to main on GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
         { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch, then redeploy with ateam_build_and_run (auto-pulls from GitHub). NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
-        { step: 5, action: "Test & Debug", description: "Test the decision pipeline or full execution, then diagnose with logs and metrics. For voice-enabled solutions, use ateam_test_voice to simulate phone conversations.", tools: ["ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: "Test with ateam_conversation (auto-routes, supports multi-turn with actor_id for confirmations). Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. Diagnose with logs and metrics.", tools: ["ateam_conversation", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
       ],
     },
@@ -1788,6 +1821,18 @@ const handlers = {
     if (limit) qs.set("limit", String(limit));
     const qsStr = qs.toString() ? `?${qs}` : "";
     return get(`/deploy/solutions/${solution_id}/logs${qsStr}`, sid);
+  },
+
+  ateam_conversation: async ({ solution_id, message, actor_id, wait, timeout_ms }, sid) => {
+    const asyncMode = wait === false;
+    const body = {
+      message,
+      ...(actor_id ? { actor_id } : {}),
+      ...(asyncMode ? { async: true } : {}),
+      ...(timeout_ms ? { timeout_ms } : {}),
+    };
+    const timeoutMs = asyncMode ? 15_000 : Math.min((timeout_ms || 60_000) + 30_000, 330_000);
+    return post(`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs });
   },
 
   ateam_test_skill: async ({ solution_id, skill_id, message, wait }, sid) => {
