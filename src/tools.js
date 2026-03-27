@@ -665,7 +665,7 @@ export const tools = [
   },
   {
     name: "ateam_test_status",
-    core: false,
+    core: true,
     description:
       "Poll the progress of an async skill test. Returns iteration count, tool call steps, status (running/completed/failed), and result when done. (Advanced — use ateam_test_skill with wait=true for synchronous testing.)",
     inputSchema: {
@@ -689,7 +689,7 @@ export const tools = [
   },
   {
     name: "ateam_test_abort",
-    core: false,
+    core: true,
     description:
       "Abort a running skill test. Stops the job execution at the next iteration boundary. (Advanced.)",
     inputSchema: {
