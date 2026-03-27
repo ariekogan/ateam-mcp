@@ -187,6 +187,11 @@ export const tools = [
           description:
             "If true (default), wait for completion. If false, return job_id immediately for polling via ateam_test_status.",
         },
+        actor_id: {
+          type: "string",
+          description:
+            "Optional actor ID for conversation continuity. Pass the actor_id from a previous test response to continue the conversation. Omit to auto-generate a test actor (test_<timestamp>_<random>, auto-expires in 24h).",
+        },
       },
       required: ["solution_id", "skill_id", "message"],
     },
@@ -1835,9 +1840,9 @@ const handlers = {
     return post(`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs });
   },
 
-  ateam_test_skill: async ({ solution_id, skill_id, message, wait }, sid) => {
+  ateam_test_skill: async ({ solution_id, skill_id, message, wait, actor_id }, sid) => {
     const asyncMode = wait === false;
-    const body = { message, ...(asyncMode ? { async: true } : {}) };
+    const body = { message, ...(asyncMode ? { async: true } : {}), ...(actor_id ? { actor_id } : {}) };
     const timeoutMs = asyncMode ? 15_000 : 90_000;
     return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs });
   },
