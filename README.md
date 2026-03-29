@@ -121,6 +121,10 @@ Developers find ateam-mcp through:
 | `adas_redeploy` | Push changes live — regenerates MCP servers, deploys to ADAS Core |
 | `adas_solution_chat` | Talk to the Solution Bot for guided modifications |
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/ariekogan-ateam-mcp).
+
 ## Setup
 
 ```bash
