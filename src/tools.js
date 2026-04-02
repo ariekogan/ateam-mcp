@@ -436,7 +436,7 @@ export const tools = [
           items: {
             type: "object",
             properties: {
-              path: { type: "string", description: "Relative file path (e.g. 'server.js', 'ui-dist/panel/1.0.0/index.html')" },
+              path: { type: "string", description: "Relative file path (e.g. 'server.js', 'ui-dist/panel/index.html')" },
               content: { type: "string", description: "File content" },
             },
             required: ["path", "content"],
