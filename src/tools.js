@@ -1659,29 +1659,77 @@ const handlers = {
   ateam_patch: async ({ solution_id, target, skill_id, updates, test_message }, sid) => {
     const phases = [];
 
-    // Phase 1: Apply PATCH
-    let patchResult;
+    // GitHub-first patch: read from GitHub → apply patch → write back → redeploy
+    // This ensures GitHub stays the single source of truth.
+
+    // Phase 1: Read current state from GitHub
+    let current;
+    const filePath = target === "skill" && skill_id
+      ? `skills/${skill_id}/skill.json`
+      : `solution.json`;
     try {
-      if (target === "skill") {
-        patchResult = await patch(`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates }, sid);
-      } else {
-        patchResult = await patch(`/deploy/solutions/${solution_id}`, { state_update: updates }, sid);
-      }
-      phases.push({ phase: "update", status: "done" });
+      const readResult = await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid);
+      current = JSON.parse(readResult.content);
     } catch (err) {
-      const notFound = /not found|404|ENOENT/i.test(err.message);
-      return {
-        ok: false,
-        phase: "update",
-        error: err.message,
-        message: "Patch failed. Check your updates payload format.",
-        ...(notFound && {
-          hint: "Skill not found in Builder storage. Use ateam_github_patch to edit the skill JSON directly on GitHub (path: skills/<skill-id>/skill.json), then ateam_redeploy(solution_id, skill_id) to deploy the updated skill.",
-        }),
-      };
+      return { ok: false, phase: "read", error: `Failed to read ${filePath} from GitHub: ${err.message}` };
     }
 
-    // Phase 2: Redeploy
+    // Phase 2: Apply patch in memory
+    let patched = { ...current };
+    try {
+      for (const [key, value] of Object.entries(updates || {})) {
+        if (key.endsWith("_push") && Array.isArray(value)) {
+          // Array push: tools_push, intents_push, etc.
+          const field = key.replace(/_push$/, "");
+          patched[field] = [...(patched[field] || []), ...value];
+        } else if (key.endsWith("_delete") && Array.isArray(value)) {
+          // Array delete by name
+          const field = key.replace(/_delete$/, "");
+          patched[field] = (patched[field] || []).filter(item => !value.includes(item.name || item.id || item));
+        } else if (key.endsWith("_update") && Array.isArray(value)) {
+          // Array update by name/id
+          const field = key.replace(/_update$/, "");
+          const arr = patched[field] || [];
+          for (const upd of value) {
+            const idx = arr.findIndex(item => (item.name || item.id) === (upd.name || upd.id));
+            if (idx >= 0) arr[idx] = { ...arr[idx], ...upd };
+            else arr.push(upd);
+          }
+          patched[field] = arr;
+        } else if (key.includes(".")) {
+          // Dot notation: "role.persona", "intents.thresholds.accept"
+          const parts = key.split(".");
+          let obj = patched;
+          for (let i = 0; i < parts.length - 1; i++) {
+            if (!obj[parts[i]] || typeof obj[parts[i]] !== "object") obj[parts[i]] = {};
+            obj = obj[parts[i]];
+          }
+          obj[parts[parts.length - 1]] = value;
+        } else {
+          // Direct field replacement
+          patched[key] = value;
+        }
+      }
+      phases.push({ phase: "patch", status: "done" });
+    } catch (err) {
+      return { ok: false, phase: "patch", error: `Failed to apply patch: ${err.message}` };
+    }
+
+    // Phase 3: Write patched version back to GitHub
+    try {
+      const patchKeys = Object.keys(updates || {});
+      const message = `Patch: ${target}${skill_id ? ` ${skill_id}` : ""} — ${patchKeys.join(", ")}`;
+      await post(`/deploy/solutions/${solution_id}/github/patch`, {
+        path: filePath,
+        content: JSON.stringify(patched, null, 2),
+        message,
+      }, sid, { timeoutMs: 30_000 });
+      phases.push({ phase: "github_write", status: "done" });
+    } catch (err) {
+      return { ok: false, phase: "github_write", error: `Patch applied but failed to write to GitHub: ${err.message}`, phases };
+    }
+
+    // Phase 4: Redeploy from GitHub
     let redeployResult;
     try {
       if (target === "skill" && skill_id) {
@@ -1695,9 +1743,8 @@ const handlers = {
         ok: false,
         phase: "redeploy",
         phases,
-        patch: patchResult,
         error: err.message,
-        message: "Update succeeded but redeploy failed. Try ateam_redeploy manually.",
+        message: "Patch saved to GitHub but redeploy failed. Try ateam_redeploy manually.",
       };
     }
 
