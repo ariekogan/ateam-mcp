@@ -205,11 +205,16 @@ export function startHttpServer(port = 3100) {
         // Reuse existing session — seed credentials if Bearer token present
         transport = transports[sessionId];
         seedCredentials(req, sessionId);
-      } else if (isInitializeRequest(req.body)) {
-        // New session (or stale session after server restart) — create fresh session.
-        // Accept initialize requests even if they carry a stale mcp-session-id.
-        if (sessionId) {
-          console.log(`[HTTP] Stale session ${sessionId} — creating new session (server was restarted)`);
+      } else if (isInitializeRequest(req.body) || (sessionId && !transports[sessionId])) {
+        // New session, OR stale session with any request type (server restart recovery).
+        // Many MCP clients (Claude mobile, Claude Code) cache the session ID and fail to
+        // re-initialize on 400. To survive container restarts transparently, we synthesize
+        // a fresh initialize under the hood whenever we see a stale session.
+        const isStaleRecovery = sessionId && !transports[sessionId] && !isInitializeRequest(req.body);
+        if (sessionId && isInitializeRequest(req.body)) {
+          console.log(`[HTTP] Stale session ${sessionId} — client re-initialized`);
+        } else if (isStaleRecovery) {
+          console.log(`[HTTP] Stale session ${sessionId} — auto-reinitializing transparently (${req.body?.method || "unknown"})`);
         }
 
         const newSessionId = randomUUID();
@@ -235,17 +240,58 @@ export function startHttpServer(port = 3100) {
 
         const server = createServer(newSessionId);
         await server.connect(transport);
+
+        if (isStaleRecovery) {
+          // Synthesize an initialize handshake so the SDK transport is in "ready" state
+          // before we dispatch the real request. We call handleRequest twice: once with a
+          // fake initialize (response is discarded), then with the real payload.
+          const fakeInit = {
+            jsonrpc: "2.0",
+            id: `__auto_init_${newSessionId}`,
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-03-26",
+              capabilities: {},
+              clientInfo: { name: "auto-reinit", version: "1.0" },
+            },
+          };
+          // Mock response object that swallows the init response
+          const mockRes = {
+            _h: {},
+            statusCode: 200,
+            headersSent: false,
+            setHeader(k, v) { this._h[k.toLowerCase()] = v; },
+            getHeader(k) { return this._h[k.toLowerCase()]; },
+            removeHeader(k) { delete this._h[k.toLowerCase()]; },
+            writeHead() { return this; },
+            write() { return true; },
+            end() { this.headersSent = true; return this; },
+            json() { return this; },
+            status() { return this; },
+            on() {},
+            once() {},
+            emit() {},
+          };
+          // Strip the stale session-id header so the SDK treats this as a new init
+          const initReq = { ...req, headers: { ...req.headers } };
+          delete initReq.headers["mcp-session-id"];
+          try {
+            await transport.handleRequest(initReq, mockRes, fakeInit);
+          } catch (e) {
+            console.error("[HTTP] Auto-reinit synthetic initialize failed:", e.message);
+          }
+          // Ensure the transport is registered under the new id and update the real request
+          transports[newSessionId] = transport;
+          // Overwrite the client-supplied (stale) session-id with the new one so the SDK
+          // routes the real request to the freshly-initialized transport.
+          req.headers["mcp-session-id"] = newSessionId;
+          // Tell the client about the new session id so future requests use it.
+          res.setHeader("mcp-session-id", newSessionId);
+          await transport.handleRequest(req, res, req.body);
+          return;
+        }
+
         await transport.handleRequest(req, res, req.body);
-        return;
-      } else if (sessionId && !transports[sessionId]) {
-        // Stale session (non-initialize request) — tell client to re-initialize.
-        // This happens after server restarts when the client still has the old session ID.
-        console.log(`[HTTP] Stale session ${sessionId} — returning 400 to trigger re-init`);
-        res.status(400).json({
-          jsonrpc: "2.0",
-          error: { code: -32600, message: "Session expired. Please re-initialize." },
-          id: req.body?.id || null,
-        });
         return;
       } else {
         res.status(400).json({
