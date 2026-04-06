@@ -246,16 +246,18 @@ export function startHttpServer(port = 3100) {
           // requiring a real initialize handshake. This bypasses the SDK's built-in check
           // (`Bad Request: Server not initialized`) so the non-initialize request dispatches.
           const inner = transport._webStandardTransport;
-          console.log(`[HTTP] auto-reinit debug: inner=${!!inner} initBefore=${inner?._initialized} sidBefore=${inner?.sessionId}`);
           if (inner) {
             inner.sessionId = newSessionId;
             inner._initialized = true;
-            console.log(`[HTTP] auto-reinit debug: initAfter=${inner._initialized} sidAfter=${inner.sessionId}`);
-          } else {
-            console.log(`[HTTP] auto-reinit debug: transport keys = ${Object.keys(transport)}`);
+            // Neutralize session-id validation for this transport — the client's header
+            // still carries the stale id and the SDK would otherwise 404. We trust that
+            // we already looked up the transport ourselves.
+            inner.validateSession = () => undefined;
+            // Also accept any protocol version the client sends.
+            inner.validateProtocolVersion = () => undefined;
           }
           transports[newSessionId] = transport;
-          // Rewrite the request's session-id header so SDK session validation passes.
+          // Rewrite the request's session-id header so downstream code also sees the new id.
           req.headers["mcp-session-id"] = newSessionId;
           // Tell the client about the new session id so future requests use it.
           res.setHeader("mcp-session-id", newSessionId);
