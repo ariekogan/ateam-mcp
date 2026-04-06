@@ -1767,30 +1767,15 @@ const handlers = {
     }
 
     // Phase 4: Auto-push to main branch (non-blocking)
-    let github_result;
-    try {
-      github_result = await post(
-        `/deploy/solutions/${solution_id}/github/push`,
-        { push_to_github: true, message: `Patch: ${target}${skill_id ? ` ${skill_id}` : ''} — ${Object.keys(updates || {}).join(', ')}` },
-        sid,
-        { timeoutMs: 60_000 },
-      );
-      phases.push({ phase: 'github', status: github_result.skipped ? 'skipped' : 'done' });
-    } catch (err) {
-      github_result = { error: err.message };
-      phases.push({ phase: 'github', status: 'error', error: err.message });
-    }
-
     return {
       ok: true,
       solution_id,
       branch: 'main',
       phases,
-      patch: patchResult,
+      patched: patched,
       redeploy: redeployResult,
       ...(test_result && { test_result }),
-      ...(github_result && !github_result.error && !github_result.skipped && { github: github_result }),
-      _status: '✅ Patched + redeployed + pushed to main.',
+      _status: '✅ Patched on GitHub + redeployed.',
       _next: 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
     };
   },
