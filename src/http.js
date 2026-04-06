@@ -242,48 +242,16 @@ export function startHttpServer(port = 3100) {
         await server.connect(transport);
 
         if (isStaleRecovery) {
-          // Synthesize an initialize handshake so the SDK transport is in "ready" state
-          // before we dispatch the real request. We call handleRequest twice: once with a
-          // fake initialize (response is discarded), then with the real payload.
-          const fakeInit = {
-            jsonrpc: "2.0",
-            id: `__auto_init_${newSessionId}`,
-            method: "initialize",
-            params: {
-              protocolVersion: "2025-03-26",
-              capabilities: {},
-              clientInfo: { name: "auto-reinit", version: "1.0" },
-            },
-          };
-          // Mock response object that swallows the init response
-          const mockRes = {
-            _h: {},
-            statusCode: 200,
-            headersSent: false,
-            setHeader(k, v) { this._h[k.toLowerCase()] = v; },
-            getHeader(k) { return this._h[k.toLowerCase()]; },
-            removeHeader(k) { delete this._h[k.toLowerCase()]; },
-            writeHead() { return this; },
-            write() { return true; },
-            end() { this.headersSent = true; return this; },
-            json() { return this; },
-            status() { return this; },
-            on() {},
-            once() {},
-            emit() {},
-          };
-          // Strip the stale session-id header so the SDK treats this as a new init
-          const initReq = { ...req, headers: { ...req.headers } };
-          delete initReq.headers["mcp-session-id"];
-          try {
-            await transport.handleRequest(initReq, mockRes, fakeInit);
-          } catch (e) {
-            console.error("[HTTP] Auto-reinit synthetic initialize failed:", e.message);
+          // Force the underlying web-standard transport into "initialized" state without
+          // requiring a real initialize handshake. This bypasses the SDK's built-in check
+          // (`Bad Request: Server not initialized`) so the non-initialize request dispatches.
+          const inner = transport._webStandardTransport;
+          if (inner) {
+            inner.sessionId = newSessionId;
+            inner._initialized = true;
           }
-          // Ensure the transport is registered under the new id and update the real request
           transports[newSessionId] = transport;
-          // Overwrite the client-supplied (stale) session-id with the new one so the SDK
-          // routes the real request to the freshly-initialized transport.
+          // Rewrite the request's session-id header so SDK session validation passes.
           req.headers["mcp-session-id"] = newSessionId;
           // Tell the client about the new session id so future requests use it.
           res.setHeader("mcp-session-id", newSessionId);
