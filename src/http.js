@@ -246,9 +246,13 @@ export function startHttpServer(port = 3100) {
           // requiring a real initialize handshake. This bypasses the SDK's built-in check
           // (`Bad Request: Server not initialized`) so the non-initialize request dispatches.
           const inner = transport._webStandardTransport;
+          console.log(`[HTTP] auto-reinit debug: inner=${!!inner} initBefore=${inner?._initialized} sidBefore=${inner?.sessionId}`);
           if (inner) {
             inner.sessionId = newSessionId;
             inner._initialized = true;
+            console.log(`[HTTP] auto-reinit debug: initAfter=${inner._initialized} sidAfter=${inner.sessionId}`);
+          } else {
+            console.log(`[HTTP] auto-reinit debug: transport keys = ${Object.keys(transport)}`);
           }
           transports[newSessionId] = transport;
           // Rewrite the request's session-id header so SDK session validation passes.
