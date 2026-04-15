@@ -108,9 +108,9 @@ export const tools = [
       properties: {
         type: {
           type: "string",
-          enum: ["skill", "connector", "connector-ui", "solution", "index"],
+          enum: ["skill", "connector", "connector-ui", "solution", "script-cache-skill", "index"],
           description:
-            "Example type: 'skill' = Order Support Agent, 'connector' = stdio MCP connector, 'connector-ui' = UI-capable connector, 'solution' = full 3-skill e-commerce solution, 'index' = list all available examples",
+            "Example type: 'skill' = Order Support Agent, 'connector' = stdio MCP connector, 'connector-ui' = UI-capable connector, 'solution' = full 3-skill e-commerce solution, 'script-cache-skill' = fat-tool skill with script_cache opt-in (reference implementation of script-level JIT shortcuts — study this before building any browser-automation skill), 'index' = list all available examples",
         },
       },
       required: ["type"],
@@ -1108,6 +1108,7 @@ const EXAMPLE_PATHS = {
   connector: "/spec/examples/connector",
   "connector-ui": "/spec/examples/connector-ui",
   solution: "/spec/examples/solution",
+  "script-cache-skill": "/spec/examples/script-cache-skill",
 };
 
 // Tools that are tenant-aware — require EXPLICIT ateam_auth (env vars alone not enough).
