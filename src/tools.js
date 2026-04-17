@@ -303,7 +303,9 @@ export const tools = [
       "- Update problem: updates: { \"problem.statement\": \"...\", \"problem.goals\": [\"goal1\"] }\n" +
       "- Add a tool: updates: { \"tools_push\": [{ name: \"conn.tool\", description: \"...\", inputs: [...], output: {...} }] }\n" +
       "- Change intent: updates: { \"intents.supported_update\": [{ id: \"i1\", description: \"new desc\" }] }\n" +
-      "- Force redeploy: updates: { \"_force_redeploy\": true }\n\n" +
+      "- Force redeploy: updates: { \"_force_redeploy\": true }\n" +
+      "- CREATE a new skill: target='skill', skill_id='my-new-skill', updates: { \"problem.statement\": \"...\", \"role.persona\": \"...\" }\n" +
+      "  If the skill doesn't exist yet, a default scaffold is created and the updates are applied on top. The skill is automatically added to the solution topology.\n\n" +
       "Use target='skill' + skill_id for skill fields. Use target='solution' for solution-level fields (linked_skills, platform_connectors, ui_plugins).",
     inputSchema: {
       type: "object",
@@ -1659,11 +1661,12 @@ const handlers = {
 
   ateam_patch: async ({ solution_id, target, skill_id, updates, test_message }, sid) => {
     const phases = [];
+    let isNewSkill = false;
 
     // GitHub-first patch: read from GitHub → apply patch → write back → redeploy
     // This ensures GitHub stays the single source of truth.
 
-    // Phase 1: Read current state from GitHub
+    // Phase 1: Read current state from GitHub (or create scaffold if new skill)
     let current;
     const filePath = target === "skill" && skill_id
       ? `skills/${skill_id}/skill.json`
@@ -1672,7 +1675,38 @@ const handlers = {
       const readResult = await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid);
       current = JSON.parse(readResult.content);
     } catch (err) {
-      return { ok: false, phase: "read", error: `Failed to read ${filePath} from GitHub: ${err.message}` };
+      // If it's a skill that doesn't exist yet, create a default scaffold.
+      // This lets agents use ateam_patch to both CREATE and UPDATE skills —
+      // no separate "create" step needed.
+      if (target === "skill" && skill_id) {
+        console.log(`[ateam_patch] Skill "${skill_id}" not found on GitHub — creating new skill scaffold`);
+        isNewSkill = true;
+        current = {
+          id: skill_id,
+          name: skill_id.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
+          description: "",
+          version: "0.1.0",
+          phase: "PROBLEM_DISCOVERY",
+          connectors: [],
+          problem: { statement: "", context: "", goals: [] },
+          scenarios: [],
+          role: { name: "", persona: "", goals: [], limitations: [], communication_style: { tone: "professional", verbosity: "concise" } },
+          intents: { supported: [], thresholds: { accept: 0.8, clarify: 0.5, reject: 0.5 }, out_of_domain: { action: "redirect", message: "" } },
+          tools: [],
+          policy: { guardrails: { never: [], always: [] }, approvals: [], workflows: [], escalation: { enabled: false, conditions: [], target: "" } },
+          engine: { rv2: { max_iterations: 10, iteration_timeout_ms: 120000, allow_parallel_tools: false, on_max_iterations: "ask_user" }, hlr: { enabled: true, critic: { enabled: true, check_interval: 3, strictness: "medium" }, reflection: { enabled: true, depth: "shallow" }, replanning: { enabled: true, max_replans: 3 } }, autonomy: { level: "supervised" }, finalization_gate: { enabled: true, max_retries: 2 } },
+          access_policy: { rules: [{ tools: ["*"], effect: "allow" }] },
+          grant_mappings: [],
+          channels: [],
+          conversation: [],
+          triggers: [],
+          meta_tools: [],
+          glossary: {},
+        };
+        phases.push({ phase: "read", status: "created_scaffold", skill_id });
+      } else {
+        return { ok: false, phase: "read", error: `Failed to read ${filePath} from GitHub: ${err.message}` };
+      }
     }
 
     // Phase 2: Apply patch in memory
@@ -1728,6 +1762,35 @@ const handlers = {
       phases.push({ phase: "github_write", status: "done" });
     } catch (err) {
       return { ok: false, phase: "github_write", error: `Patch applied but failed to write to GitHub: ${err.message}`, phases };
+    }
+
+    // Phase 3b: If new skill, add it to solution.json topology (skills[], linked_skills)
+    if (isNewSkill && skill_id) {
+      try {
+        const solRead = await get(`/deploy/solutions/${solution_id}/github/read?path=solution.json`, sid);
+        const sol = JSON.parse(solRead.content);
+        const skillEntry = { id: skill_id, name: patched.name || skill_id, role: "worker", description: patched.description || "", connectors: patched.connectors || [] };
+        // Add to skills[] if not already present
+        if (!sol.skills) sol.skills = [];
+        if (!sol.skills.find(s => s.id === skill_id)) {
+          sol.skills.push(skillEntry);
+        }
+        // Add to linked_skills if not already present
+        if (!sol.linked_skills) sol.linked_skills = [];
+        if (!sol.linked_skills.includes(skill_id)) {
+          sol.linked_skills.push(skill_id);
+        }
+        await post(`/deploy/solutions/${solution_id}/github/patch`, {
+          path: "solution.json",
+          content: JSON.stringify(sol, null, 2),
+          message: `Add skill "${skill_id}" to solution topology`,
+        }, sid, { timeoutMs: 30_000 });
+        phases.push({ phase: "solution_topology", status: "done", added: skill_id });
+      } catch (err) {
+        // Non-fatal: skill.json was written, topology can be fixed manually
+        phases.push({ phase: "solution_topology", status: "warning", error: err.message });
+        console.warn(`[ateam_patch] Failed to add ${skill_id} to solution topology: ${err.message}`);
+      }
     }
 
     // Phase 4: Redeploy from GitHub
