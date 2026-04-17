@@ -1793,23 +1793,23 @@ const handlers = {
       }
     }
 
-    // Phase 4: Redeploy from GitHub
+    // Phase 4: Redeploy from GitHub (extended timeout — deploys can take 60-120s)
+    // IMPORTANT: if redeploy times out or fails, we return ok:true with a warning
+    // because the patch IS saved to GitHub — it's not lost. The agent can retry
+    // the redeploy with ateam_redeploy(solution_id, skill_id).
     let redeployResult;
     try {
       if (target === "skill" && skill_id) {
-        redeployResult = await post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {}, sid);
+        redeployResult = await post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {}, sid, { timeoutMs: 180_000 });
       } else {
-        redeployResult = await post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid);
+        redeployResult = await post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid, { timeoutMs: 180_000 });
       }
       phases.push({ phase: "redeploy", status: "done" });
     } catch (err) {
-      return {
-        ok: false,
-        phase: "redeploy",
-        phases,
-        error: err.message,
-        message: "Patch saved to GitHub but redeploy failed. Try ateam_redeploy manually.",
-      };
+      // Partial success: patch is saved to GitHub, only redeploy failed.
+      // Return ok:true so the agent doesn't think the patch was lost.
+      phases.push({ phase: "redeploy", status: "timeout_or_error", error: err.message });
+      console.warn(`[ateam_patch] Redeploy failed after successful patch: ${err.message}`);
     }
 
     // Phase 3: Optional re-test
@@ -1830,16 +1830,19 @@ const handlers = {
       }
     }
 
-    // Phase 4: Auto-push to main branch (non-blocking)
+    const redeployOk = phases.some(p => p.phase === "redeploy" && p.status === "done");
     return {
       ok: true,
       solution_id,
       branch: 'main',
       phases,
       patched: patched,
-      redeploy: redeployResult,
+      ...(isNewSkill && { created_skill: skill_id }),
+      ...(redeployResult && { redeploy: redeployResult }),
       ...(test_result && { test_result }),
-      _status: '✅ Patched on GitHub + redeployed.',
+      _status: redeployOk
+        ? '✅ Patched on GitHub + redeployed.'
+        : '⚠️ Patched on GitHub ✅ but redeploy timed out. Run: ateam_redeploy(solution_id' + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')',
       _next: 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
     };
   },
