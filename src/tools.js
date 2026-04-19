@@ -1246,6 +1246,56 @@ const handlers = {
       security: "https://ateam-ai.com/#security",
       engine: "https://ateam-ai.com/#engine",
     },
+    platform_connectors: {
+      _note: "Shared infrastructure MCPs available to all solutions. Reference by id in your solution's `platform_connectors` array; tools are automatically merged into every skill's tool catalog (no bridge needed). Do NOT bundle their source in mcp_store — they run as fixed Docker services on ADAS Core.",
+      available: [
+        {
+          id: "memory-mcp",
+          name: "Memory Engine",
+          purpose: "Long-term memory + ephemeral context, per-tenant per-actor",
+          tool_prefixes: ["memory.", "context."],
+          typical_use: "Store user preferences/facts, recall rules, persist working context across conversations",
+        },
+        {
+          id: "docs-index-mcp",
+          name: "Docs Index",
+          purpose: "Source-agnostic document corpus retrieval (chunking, embeddings, cosine search)",
+          tool_prefixes: ["docs.corpus.", "docs.ingest.", "docs.search", "docs.file.", "docs.sync.", "docs.stats"],
+          typical_use: "Index documents from any source (Dropbox, Gmail attachments, uploaded files), answer questions with retrieved chunks + citations. Fed by source connectors (e.g. dropbox-mcp) that call docs.ingest.file.",
+        },
+        {
+          id: "handoff-controller-mcp",
+          name: "Handoff Controller",
+          purpose: "Live conversation handoffs between skills in a multi-skill solution",
+          tool_prefixes: ["handoff."],
+          typical_use: "Pass a live conversation from one skill to another (e.g. identity-assurance → order-support), carrying grants",
+        },
+        {
+          id: "internal-comm-mcp",
+          name: "Internal Communication",
+          purpose: "Skill-to-skill messaging and voice replies",
+          tool_prefixes: ["comm."],
+          typical_use: "Async message between skills, or send a voice reply back through the Twilio channel",
+        },
+        {
+          id: "browser-mcp",
+          name: "Browser",
+          purpose: "Headless Chromium automation (Playwright)",
+          tool_prefixes: ["web."],
+          typical_use: "Navigate, read, click, type, screenshot any public web page; scrape data for enrichment",
+        },
+      ],
+      how_to_use: {
+        step_1: "Declare in solution: platform_connectors: [{ id: 'memory-mcp', required: true }]",
+        step_2: "Tools become available in the skill's tool catalog automatically — no code to write, no bridge needed",
+        step_3: "Reference tools in skill.tools[] with source.type='mcp_bridge', connection_id matching the connector id",
+      },
+      do_not: [
+        "Do NOT include platform connector source code in mcp_store — they're managed by the platform, not by your solution",
+        "Do NOT try to deploy a duplicate platform connector as a solution connector — use the platform one directly",
+        "Do NOT build stdio bridge connectors for platform services — the platform auto-merges their tools",
+      ],
+    },
     critical_connector_rules: {
       _note: "CRITICAL: Read this before writing ANY connector code. Violations are caught at deploy time and BLOCKED.",
       transport: "A-Team connectors use STDIO transport — child processes communicating via stdin/stdout JSON-RPC.",
