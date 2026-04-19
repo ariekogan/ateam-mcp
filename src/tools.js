@@ -1480,12 +1480,24 @@ const handlers = {
         if (!effectiveSkills?.length && pullResult.skills?.length) {
           effectiveSkills = pullResult.skills;
         }
+        // Synthesize connectors[] metadata from mcp_store keys if not passed inline.
+        // The pull-bundle endpoint returns mcp_store (files) and solution.platform_connectors
+        // (declarations) but not a top-level connectors[] array. The validator/deploy
+        // pipeline expects one, so build it from the mcp_store we just pulled.
+        if (!connectors?.length && Object.keys(effectiveMcpStore).length > 0) {
+          connectors = Object.keys(effectiveMcpStore).map((id) => ({
+            id,
+            name: id,
+            transport: "stdio",
+          }));
+        }
         phases.push({
           phase: "github_pull",
           status: "done",
           skills_found: pullResult.skills_found || 0,
           connectors_found: pullResult.connectors_found || 0,
           files_loaded: pullResult.files_loaded || 0,
+          connectors_synthesized: connectors?.length || 0,
         });
       } catch (err) {
         return {
