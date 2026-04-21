@@ -156,20 +156,28 @@ ${AGENT_DOC_SENTINEL}
  * Merge the newly-rendered header with an existing CLAUDE.md, preserving
  * anything below the sentinel (solution-specific notes).
  *
+ * Output is deterministic so consecutive merges on the same inputs produce
+ * byte-identical output (required for the idempotent-write path in
+ * ateam_write_agent_doc).
+ *
  * @param {string} freshHeader   - Output of renderAgentDocHeader
  * @param {string|null} existing - Current CLAUDE.md contents (or null if new file)
  * @returns {string} merged markdown
  */
 export function mergeAgentDoc(freshHeader, existing) {
-  if (!existing) return freshHeader;
-  const idx = existing.indexOf(AGENT_DOC_SENTINEL);
-  if (idx === -1) {
-    // Existing file has no sentinel — treat the whole file as manual notes,
-    // prepend the auto-generated header, separate by sentinel.
-    return freshHeader + "\n" + existing.trimStart();
-  }
-  const tail = existing.slice(idx + AGENT_DOC_SENTINEL.length);
-  return freshHeader + tail;
+  // Normalize freshHeader: strip trailing whitespace, end with exactly "\n".
+  // This prevents newline accumulation when the output is read back and merged again.
+  const headerNormalized = freshHeader.replace(/\s+$/, "") + "\n";
+
+  const extractNotes = (src) => {
+    if (!src) return "";
+    const idx = src.indexOf(AGENT_DOC_SENTINEL);
+    const afterSentinel = idx === -1 ? src : src.slice(idx + AGENT_DOC_SENTINEL.length);
+    return afterSentinel.trim();
+  };
+
+  const notes = extractNotes(existing);
+  return notes ? `${headerNormalized}\n${notes}\n` : headerNormalized;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
