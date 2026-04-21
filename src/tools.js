@@ -299,7 +299,8 @@ export const tools = [
       "5. Array update: { \"tools_update\": [{ name: \"existing_tool\", description: \"updated\" }] }\n" +
       "6. Replace whole section: { \"role\": { persona: \"...\", goals: [...] } }\n\n" +
       "EXAMPLES:\n" +
-      "- Change persona: updates: { \"role.persona\": \"You are a friendly assistant\" }\n" +
+      "- Change persona (full replace): updates: { \"role.persona\": \"You are a friendly assistant\" }\n" +
+      "- Append to persona (don't replace): updates: { \"persona_append\": \"\\n\\nALWAYS respond in 2 sentences.\" }\n" +
       "- Add a guardrail: updates: { \"policy.guardrails.never_push\": [\"Never share passwords\"] }\n" +
       "- Update problem: updates: { \"problem.statement\": \"...\", \"problem.goals\": [\"goal1\"] }\n" +
       "- Add a tool: updates: { \"tools_push\": [{ name: \"conn.tool\", description: \"...\", inputs: [...], output: {...} }] }\n" +
@@ -1813,7 +1814,17 @@ const handlers = {
     let patched = { ...current };
     try {
       for (const [key, value] of Object.entries(updates || {})) {
-        if (key.endsWith("_push") && Array.isArray(value)) {
+        if (key === "persona_append" && typeof value === "string") {
+          // persona_append: shorthand for appending text to role.persona without
+          // rewriting the whole string. Historically agents set this expecting
+          // it to work; the planner only reads role.persona, so this shorthand
+          // now merges into the correct field. A trailing separator is inserted
+          // if the existing persona doesn't already end with whitespace.
+          if (!patched.role || typeof patched.role !== "object") patched.role = {};
+          const existing = typeof patched.role.persona === "string" ? patched.role.persona : "";
+          const sep = (!existing || /\s$/.test(existing)) ? "" : "\n\n";
+          patched.role.persona = existing + sep + value;
+        } else if (key.endsWith("_push") && Array.isArray(value)) {
           // Array push: tools_push, intents_push, etc.
           const field = key.replace(/_push$/, "");
           patched[field] = [...(patched[field] || []), ...value];
