@@ -1947,7 +1947,39 @@ const handlers = {
     return post(`/deploy/mcp-store/${connector_id}`, { files: resolved }, sid);
   },
 
-  ateam_list_solutions: async (_args, sid) => get("/deploy/solutions", sid),
+  ateam_list_solutions: async (_args, sid) => {
+    const raw = await get("/deploy/solutions", sid);
+    // Enrich each solution with GitHub metadata (repo_url, branch, CLAUDE.md)
+    // so an agent sees everything it needs to clone + onboard in one call.
+    // Fetches run in parallel; failures are non-fatal (fall back to the raw row).
+    const solutions = Array.isArray(raw?.solutions) ? raw.solutions : Array.isArray(raw) ? raw : [];
+    const enriched = await Promise.all(solutions.map(async (s) => {
+      const out = { ...s };
+      try {
+        const gh = await get(`/deploy/solutions/${s.id}/github/status`, sid);
+        if (gh?.exists && gh.repo_url) {
+          out.repo_url = gh.repo_url;
+          out.github_full_name = gh.full_name || null;
+          out.default_branch = gh.default_branch || "main";
+          out.latest_commit_sha = gh.latest_commit?.sha || null;
+          // Probe for agent-onboarding doc; swallow 404 etc.
+          try {
+            const probe = await get(`/deploy/solutions/${s.id}/github/read?path=CLAUDE.md`, sid);
+            out.has_claude_md = Boolean(probe?.content);
+          } catch { out.has_claude_md = false; }
+          out.local_dev_quickstart = {
+            _note: "Share these 3 lines with a developer (or their agent). They will clone the repo and, if CLAUDE.md is present, their agent sees the full onboarding on session start.",
+            clone: `git clone ${gh.repo_url}`,
+            cd: `cd ${(gh.full_name || "").split("/").pop() || s.id}`,
+            auth_in_new_session: `ateam_auth(api_key: "adas_<tenant>_<hex>")`,
+            needs_github_collaborator_access: !gh.repo_url.includes("public") ? true : false,
+          };
+        }
+      } catch { /* non-fatal — leave the row as-is */ }
+      return out;
+    }));
+    return { ...raw, solutions: enriched };
+  },
 
   ateam_get_solution: async ({ solution_id, view, skill_id }, sid) => {
     const base = `/deploy/solutions/${solution_id}`;
@@ -2335,6 +2367,30 @@ export async function handleToolCall(name, args, sessionId) {
           last_tool_used: ctx.lastToolName || null,
         };
       }
+      // If authenticated, attach a tenant onboarding block so the agent can
+      // discover existing solutions + their repo URLs without extra round-trips.
+      // This is what lets a fresh agent clone the right repo on first greet.
+      try {
+        const creds = getCredentials(sessionId);
+        if (creds?.apiKey || creds?.masterKey) {
+          const listed = await handlers.ateam_list_solutions({}, sessionId);
+          const solutions = Array.isArray(listed?.solutions) ? listed.solutions : [];
+          if (solutions.length > 0) {
+            result.tenant_onboarding = {
+              _note: "The authed key can see these solutions. For LOCAL development: clone the repo_url and open any Claude-Code-compatible agent in that directory — it will auto-load CLAUDE.md on session start. For REMOTE-only work: call ateam_github_read(solution_id, 'CLAUDE.md') to fetch the onboarding doc. If `git clone` returns 403, ask the solution owner to add your GitHub account as a collaborator on the repo (GitHub access is separate from the A-Team API key).",
+              tenant: creds.tenant || null,
+              solutions: solutions.map((s) => ({
+                id: s.id,
+                name: s.name,
+                repo_url: s.repo_url || null,
+                default_branch: s.default_branch || "main",
+                has_claude_md: s.has_claude_md ?? null,
+                clone_command: s.repo_url ? `git clone ${s.repo_url}` : null,
+              })),
+            };
+          }
+        }
+      } catch { /* non-fatal — unauthed sessions or API blips shouldn't break bootstrap */ }
     }
 
     return {
