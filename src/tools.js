@@ -1717,22 +1717,21 @@ const handlers = {
     }
 
     // Auto-seed / refresh the agent onboarding doc. Non-fatal — any failure
-    // here must not break a successful deploy. The doc renders from the
-    // deployed definition, so only attempt after the repo is present.
+    // here is swallowed so it can't break a successful deploy. The tool is
+    // idempotent: if the rendered doc is byte-identical to what's in the
+    // repo, it returns unchanged:true and writes no commit.
     let agent_doc_result = null;
-    if (github_result && !github_result.error) {
-      try {
-        agent_doc_result = await handlers.ateam_write_agent_doc({ solution_id: solutionId }, sid);
-        phases.push({
-          phase: "agent_doc",
-          status: "done",
-          created: agent_doc_result?.created || false,
-          preserved_notes: agent_doc_result?.preserved_notes || false,
-        });
-      } catch (err) {
-        agent_doc_result = { error: err.message };
-        phases.push({ phase: "agent_doc", status: "error", error: err.message });
-      }
+    try {
+      agent_doc_result = await handlers.ateam_write_agent_doc({ solution_id: solutionId }, sid);
+      phases.push({
+        phase: "agent_doc",
+        status: agent_doc_result?.unchanged ? "unchanged" : "done",
+        created: agent_doc_result?.created || false,
+        preserved_notes: agent_doc_result?.preserved_notes || false,
+      });
+    } catch (err) {
+      agent_doc_result = { error: err.message };
+      phases.push({ phase: "agent_doc", status: "skipped", reason: err.message });
     }
 
     return {
@@ -2120,16 +2119,28 @@ const handlers = {
 
     const freshHeader = renderAgentDocHeader({ solution, skills, connectors });
     let existing = null;
-    if (!overwrite) {
-      try {
-        const r = await get(
-          `/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent("CLAUDE.md")}`,
-          sid,
-        );
-        existing = r?.content || null;
-      } catch { /* file doesn't exist yet — treat as fresh create */ }
-    }
+    try {
+      const r = await get(
+        `/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent("CLAUDE.md")}`,
+        sid,
+      );
+      existing = r?.content || null;
+    } catch { /* file doesn't exist yet — treat as fresh create */ }
     const merged = overwrite ? freshHeader : mergeAgentDoc(freshHeader, existing);
+
+    // Idempotent write: if the merged content is byte-identical to what's
+    // already committed, skip the patch entirely. Prevents a noise commit on
+    // every build_and_run when nothing meaningful changed.
+    if (existing && existing === merged) {
+      return {
+        ok: true,
+        solution_id,
+        unchanged: true,
+        created: false,
+        preserved_notes: existing.includes(AGENT_DOC_SENTINEL),
+        bytes: merged.length,
+      };
+    }
 
     const res = await post(
       `/deploy/solutions/${solution_id}/github/patch`,
@@ -2143,6 +2154,7 @@ const handlers = {
     return {
       ok: Boolean(res?.ok ?? true),
       solution_id,
+      unchanged: false,
       created: !existing,
       preserved_notes: Boolean(existing && existing.includes(AGENT_DOC_SENTINEL)),
       bytes: merged.length,
