@@ -1,7 +1,18 @@
 # WIP — Auto-generate `CLAUDE.md` on solution repo creation
 
-**Status:** proposed
+**Status:** partially shipped in v0.3.25 (discoverability track), template auto-gen still proposed
 **Date:** 2026-04-21
+
+## Shipped in v0.3.25 (2026-04-21)
+
+✅ `ateam_list_solutions` now parallel-fetches GitHub status for every solution and returns `repo_url`, `github_full_name`, `default_branch`, `latest_commit_sha`, `has_claude_md`, plus a `local_dev_quickstart` block with ready-to-share clone/cd/auth commands.
+
+✅ `ateam_bootstrap`, when authenticated, appends a `tenant_onboarding` block listing every accessible solution with its `repo_url`, `clone_command`, and `has_claude_md` flag. Includes a note instructing the agent to clone + auto-load CLAUDE.md locally (or call `ateam_github_read` for remote-only sessions), and flags the manual GitHub-collaborator requirement.
+
+✅ `docs-retrieval` solution now has a hand-written `CLAUDE.md` at repo root (`ariekogan/dark-data--docs-retrieval@2b7180d`) — serves as the reference implementation for the template below.
+
+## Still proposed (not shipped)
+
 **Motivation:** make it possible for a developer given only an A-Team API key + GitHub access to their solution repo to clone it and have their agent immediately be productive, without needing tribal knowledge from the original builder.
 
 ## Problem
