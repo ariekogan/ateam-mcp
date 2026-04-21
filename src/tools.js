@@ -14,6 +14,7 @@ import {
   getCredentials, parseApiKey, touchSession, getSessionContext,
   setAuthOverride, switchTenant, isMasterMode, listTenants,
 } from "./api.js";
+import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 
 // ─── Tool definitions ───────────────────────────────────────────────
 
@@ -922,6 +923,24 @@ export const tools = [
     },
   },
   {
+    name: "ateam_write_agent_doc",
+    core: false,
+    description:
+      "Render + write (or refresh) CLAUDE.md in the solution's GitHub repo. Auto-generates the onboarding header from the deployed solution/skill/connector definitions and preserves any solution-specific notes below the sentinel line. " +
+      "Normally called automatically on every ateam_build_and_run so CLAUDE.md stays in sync — use this tool directly to backfill existing solutions or to force a refresh.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        overwrite: {
+          type: "boolean",
+          description: "If true, rewrite the whole file (discards any solution-specific notes below the sentinel). Default false — preserves notes.",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
     name: "ateam_github_write",
     core: true,
     description:
@@ -1697,6 +1716,25 @@ const handlers = {
       }
     }
 
+    // Auto-seed / refresh the agent onboarding doc. Non-fatal — any failure
+    // here must not break a successful deploy. The doc renders from the
+    // deployed definition, so only attempt after the repo is present.
+    let agent_doc_result = null;
+    if (github_result && !github_result.error) {
+      try {
+        agent_doc_result = await handlers.ateam_write_agent_doc({ solution_id: solutionId }, sid);
+        phases.push({
+          phase: "agent_doc",
+          status: "done",
+          created: agent_doc_result?.created || false,
+          preserved_notes: agent_doc_result?.preserved_notes || false,
+        });
+      } catch (err) {
+        agent_doc_result = { error: err.message };
+        phases.push({ phase: "agent_doc", status: "error", error: err.message });
+      }
+    }
+
     return {
       ok: true,
       solution_id: solutionId,
@@ -1711,6 +1749,7 @@ const handlers = {
       health,
       ...(test_result && { test_result }),
       ...(github_result && !github_result.error && !github_result.skipped && { github: github_result }),
+      ...(agent_doc_result && !agent_doc_result.error && { agent_doc: agent_doc_result }),
       ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
       _status: '✅ Deployed to Core + pushed to main.',
       _next: 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
@@ -2062,6 +2101,55 @@ const handlers = {
 
   ateam_get_connector_source: async ({ solution_id, connector_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid),
+
+  // Render + write CLAUDE.md into the solution's GitHub repo.
+  // Preserves content below the sentinel unless overwrite=true.
+  // Swallows errors internally when invoked non-interactively (see _writeAgentDocSafe).
+  ateam_write_agent_doc: async ({ solution_id, overwrite = false }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    // Gather source material: the deployed solution definition + skills list.
+    // These come straight from Core, so the doc always reflects what's running.
+    const def = await get(`/deploy/solutions/${solution_id}/definition`, sid);
+    const solution = def?.solution || def;
+    let skills = [];
+    try {
+      const skillsRes = await get(`/deploy/solutions/${solution_id}/skills`, sid);
+      skills = Array.isArray(skillsRes?.skills) ? skillsRes.skills : Array.isArray(skillsRes) ? skillsRes : [];
+    } catch { /* no skills yet — render anyway */ }
+    const connectors = Array.isArray(solution?.connectors) ? solution.connectors : [];
+
+    const freshHeader = renderAgentDocHeader({ solution, skills, connectors });
+    let existing = null;
+    if (!overwrite) {
+      try {
+        const r = await get(
+          `/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent("CLAUDE.md")}`,
+          sid,
+        );
+        existing = r?.content || null;
+      } catch { /* file doesn't exist yet — treat as fresh create */ }
+    }
+    const merged = overwrite ? freshHeader : mergeAgentDoc(freshHeader, existing);
+
+    const res = await post(
+      `/deploy/solutions/${solution_id}/github/patch`,
+      {
+        path: "CLAUDE.md",
+        content: merged,
+        message: existing ? "CLAUDE.md: refresh auto-generated header" : "CLAUDE.md: seed agent onboarding doc",
+      },
+      sid,
+    );
+    return {
+      ok: Boolean(res?.ok ?? true),
+      solution_id,
+      created: !existing,
+      preserved_notes: Boolean(existing && existing.includes(AGENT_DOC_SENTINEL)),
+      bytes: merged.length,
+      commit_url: res?.commit_url || null,
+      commit_sha: res?.commit_sha || null,
+    };
+  },
 
   ateam_get_metrics: async ({ solution_id, job_id, skill_id }, sid) => {
     const qs = new URLSearchParams();
