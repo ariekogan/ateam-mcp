@@ -392,6 +392,26 @@ export const tools = [
     },
   },
   {
+    name: "ateam_delete_skill",
+    core: true,
+    description:
+      "Delete a single skill from a deployed solution. Removes the skill from A-Team Core (kills the running MCP process, unregisters from skill registry, deletes from Mongo), removes the skill from solution.skills[] and solution.linked_skills, and deletes the skill's files from Builder FS. Use this to drop a skill without tearing down the whole solution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID (e.g. 'personal-adas')",
+        },
+        skill_id: {
+          type: "string",
+          description: "The skill ID to remove (e.g. 'linkedin-agent')",
+        },
+      },
+      required: ["solution_id", "skill_id"],
+    },
+  },
+  {
     name: "ateam_delete_connector",
     core: true,
     description:
@@ -1148,6 +1168,7 @@ const TENANT_TOOLS = new Set([
   "ateam_update",
   "ateam_redeploy",
   "ateam_delete_solution",
+  "ateam_delete_skill",
   "ateam_delete_connector",
   "ateam_upload_connector",
   "ateam_solution_chat",
@@ -2223,6 +2244,9 @@ const handlers = {
 
   ateam_delete_solution: async ({ solution_id }, sid) =>
     del(`/deploy/solutions/${solution_id}`, sid),
+
+  ateam_delete_skill: async ({ solution_id, skill_id }, sid) =>
+    del(`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid),
 
   ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
