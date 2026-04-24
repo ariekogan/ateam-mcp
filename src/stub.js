@@ -68,7 +68,7 @@ class StubOAuthProvider {
   async challengeForAuthorizationCode(_client, code) {
     const entry = this.codes.get(code);
     console.log(
-      `[Stub] challengeForAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} codes=${this.codes.size}`
+      `[Stub] challengeForAuthorizationCode: found=${!!entry} codes=${this.codes.size}`
     );
     if (!entry) throw new Error("Invalid code");
     return entry.params.codeChallenge;
@@ -77,7 +77,7 @@ class StubOAuthProvider {
   async exchangeAuthorizationCode(client, code) {
     const entry = this.codes.get(code);
     console.log(
-      `[Stub] exchangeAuthorizationCode: code=${code?.substring(0, 8)}... found=${!!entry} client=${client?.client_id?.substring(0, 8)}...`
+      `[Stub] exchangeAuthorizationCode: found=${!!entry} clientId=${client?.client_id ? "[present]" : "[absent]"}`
     );
     if (!entry) throw new Error("Invalid code");
     this.codes.delete(code);
@@ -85,7 +85,7 @@ class StubOAuthProvider {
     const token = entry.token;
     this.tokens.set(token, { clientId: client.client_id });
 
-    console.log(`[Stub] Exchanged code for token: ${token.substring(0, 30)}...`);
+    console.log(`[Stub] Exchanged code for token: [redacted]`);
     return {
       access_token: token,
       refresh_token: `rt_${token}`,
@@ -127,7 +127,7 @@ app.set("trust proxy", 1);
 app.use((req, res, next) => {
   const url = req.originalUrl || req.url;
   const auth = req.headers.authorization;
-  console.log(`[Stub] >>> ${req.method} ${url}${auth ? ` Auth: ${auth.substring(0, 30)}...` : ""}`);
+  console.log(`[Stub] >>> ${req.method} ${url}${auth ? " Auth: [Bearer ...]" : ""}`);
   res.on("finish", () => {
     console.log(`[Stub] <<< ${req.method} ${url} → ${res.statusCode}`);
   });
@@ -147,7 +147,7 @@ function getNewestToken() {
   for (const [key, entry] of recentTokens) {
     const ageMs = now - entry.createdAt;
     if (ageMs > TOKEN_TTL) {
-      console.log(`[Stub] Token ${key.substring(0, 20)}... expired (age: ${Math.round(ageMs / 1000)}s)`);
+      console.log(`[Stub] A token expired (age: ${Math.round(ageMs / 1000)}s)`);
       continue;
     }
     if (!newest || entry.createdAt > newest.createdAt) newest = entry;
@@ -175,7 +175,7 @@ app.use("/token", (req, res, next) => {
         token: data.access_token,
         createdAt: Date.now(),
       });
-      console.log(`[Stub] ✅ Cached token from /token response (${recentTokens.size} active): ${data.access_token.substring(0, 25)}...`);
+      console.log(`[Stub] ✅ Cached token from /token response (${recentTokens.size} active)`);
       // Clean up old tokens
       for (const [k, v] of recentTokens) {
         if (Date.now() - v.createdAt > TOKEN_TTL) recentTokens.delete(k);
@@ -195,7 +195,7 @@ app.use("/token", (req, res, next) => {
             token: data.access_token,
             createdAt: Date.now(),
           });
-          console.log(`[Stub] ✅ Cached token from /token send (${recentTokens.size} active): ${data.access_token.substring(0, 25)}...`);
+          console.log(`[Stub] ✅ Cached token from /token send (${recentTokens.size} active)`);
         }
       } catch (_) {}
     }

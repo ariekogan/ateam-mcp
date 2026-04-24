@@ -36,10 +36,19 @@ const transports = {};
 // MCP paths — Claude.ai uses "/" (connector URL), others may use "/mcp"
 const MCP_PATHS = ["/", "/mcp"];
 
-// Recently exchanged tokens — for auto-injection into MCP requests.
-// Key: token string, Value: { token, createdAt }
-const recentTokens = new Map();
-const TOKEN_TTL = 60 * 60 * 1000; // 60 minutes
+// Recently exchanged OAuth tokens — for auto-injection into MCP requests that
+// follow the /token exchange within the same user's OAuth→MCP handshake window.
+//
+// ⚠️ SECURITY: This cache is scoped by CLIENT IP. A previous version keyed by
+// token value and used `getNewestToken()` for injection — in multi-user HTTP
+// mode (e.g., mcp.ateam-ai.com), that caused cross-user auth bypass: if User A
+// completed OAuth and then User B sent an unauth'd MCP request, User B was
+// injected with User A's token. IP-scoping prevents that: injection only
+// happens for the same client IP that completed the token exchange.
+//
+// Key: client IP string, Value: { token, createdAt }
+const recentTokensByIp = new Map();
+const TOKEN_TTL = 5 * 60 * 1000; // 5 minutes — OAuth→MCP handshake window only
 
 export function startHttpServer(port = 3100) {
   const app = express();
@@ -50,7 +59,7 @@ export function startHttpServer(port = 3100) {
     const url = req.originalUrl || req.url;
     const start = Date.now();
     const auth = req.headers.authorization;
-    console.log(`[HTTP] >>> ${req.method} ${url}${auth ? ` Auth: ${auth.substring(0, 30)}...` : ""}${MCP_PATHS.includes(url.split("?")[0]) ? ` Accept: ${req.headers.accept || "(none)"}` : ""}`);
+    console.log(`[HTTP] >>> ${req.method} ${url}${auth ? " Auth: [Bearer ...]" : ""}${MCP_PATHS.includes(url.split("?")[0]) ? ` Accept: ${req.headers.accept || "(none)"}` : ""}`);
     res.on("finish", () => {
       console.log(`[HTTP] <<< ${req.method} ${url} → ${res.statusCode} (${Date.now() - start}ms)`);
     });
@@ -103,14 +112,17 @@ export function startHttpServer(port = 3100) {
       const origJson = res.json.bind(res);
       res.json = (data) => {
         if (data && data.access_token && res.statusCode >= 200 && res.statusCode < 300) {
-          recentTokens.set(data.access_token, {
+          // IP-scoped cache: only the same client IP can consume this token
+          // via auto-injection. Prevents cross-user token leakage in shared HTTP mode.
+          const ip = req.ip || "unknown";
+          recentTokensByIp.set(ip, {
             token: data.access_token,
             createdAt: Date.now(),
           });
-          console.log(`[Auth] Cached token from /token response (${recentTokens.size} active)`);
+          console.log(`[Auth] Cached OAuth token for ip=${ip} (${recentTokensByIp.size} active IPs)`);
           // Prune expired
-          for (const [k, v] of recentTokens) {
-            if (Date.now() - v.createdAt > TOKEN_TTL) recentTokens.delete(k);
+          for (const [k, v] of recentTokensByIp) {
+            if (Date.now() - v.createdAt > TOKEN_TTL) recentTokensByIp.delete(k);
           }
         }
         return origJson(data);
@@ -127,21 +139,27 @@ export function startHttpServer(port = 3100) {
   }
 
   // ─── Token auto-injection middleware ────────────────────────────
-  // If a request has no Authorization header but we have a recently
-  // exchanged token, inject it. Simple cache lookup — never blocks.
+  // If a request has no Authorization header, check if THIS CLIENT IP recently
+  // completed /token exchange. If so, inject that IP's cached token. Prevents
+  // cross-user token leakage (fix for mcp-audit finding #1, round 009).
   const autoInjectToken = (req, _res, next) => {
     if (req.headers.authorization) return next();
-    const token = getNewestToken();
-    if (token) {
-      req.headers.authorization = `Bearer ${token}`;
-      const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "authorization");
-      if (idx !== -1) {
-        req.rawHeaders[idx + 1] = `Bearer ${token}`;
-      } else {
-        req.rawHeaders.push("Authorization", `Bearer ${token}`);
-      }
-      console.log(`[Auth] Auto-injected token into ${req.method} ${req.originalUrl || req.url}`);
+    const ip = req.ip || "unknown";
+    const entry = recentTokensByIp.get(ip);
+    if (!entry) return next();
+    if (Date.now() - entry.createdAt > TOKEN_TTL) {
+      recentTokensByIp.delete(ip);
+      return next();
     }
+    const token = entry.token;
+    req.headers.authorization = `Bearer ${token}`;
+    const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "authorization");
+    if (idx !== -1) {
+      req.rawHeaders[idx + 1] = `Bearer ${token}`;
+    } else {
+      req.rawHeaders.push("Authorization", `Bearer ${token}`);
+    }
+    console.log(`[Auth] Auto-injected IP-scoped token for ip=${ip} into ${req.method} ${req.originalUrl || req.url}`);
     next();
   };
 
@@ -358,15 +376,10 @@ export function startHttpServer(port = 3100) {
   });
 }
 
-/** Returns the most recently issued non-expired token, or null. */
-function getNewestToken() {
-  let newest = null;
-  for (const [, entry] of recentTokens) {
-    if (Date.now() - entry.createdAt > TOKEN_TTL) continue;
-    if (!newest || entry.createdAt > newest.createdAt) newest = entry;
-  }
-  return newest?.token || null;
-}
+// getNewestToken() removed — replaced by IP-scoped lookup in autoInjectToken.
+// Global "newest token" injection caused cross-user auth bypass in multi-user
+// HTTP deployments. IP scoping restores the intended semantics (same browser
+// that completed OAuth gets its token injected on the follow-up MCP request).
 
 /**
  * Seed session credentials from the OAuth bearer token.

@@ -1408,11 +1408,19 @@ const handlers = {
     if (!api_key) {
       return { ok: false, message: "Provide either api_key or master_key." };
     }
-    // Auto-extract tenant from key if not provided
+    // Auto-extract tenant from key if not provided.
+    // Fail loudly if neither the explicit tenant arg nor a parseable apiKey
+    // yields a tenant — previously fell back to "main" silently.
     let resolvedTenant = tenant;
     if (!resolvedTenant) {
       const parsed = parseApiKey(api_key);
-      resolvedTenant = parsed.tenant || "main";
+      resolvedTenant = parsed.tenant;
+    }
+    if (!resolvedTenant) {
+      return {
+        ok: false,
+        message: `Could not resolve tenant from api_key (expected format: adas_<tenant>_<32hex>). Pass the "tenant" arg explicitly, or check that your API key is well-formed.`,
+      };
     }
     // Normalize URL: strip trailing slash
     const apiUrl = url ? url.replace(/\/+$/, "") : undefined;

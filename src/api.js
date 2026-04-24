@@ -65,9 +65,20 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     const parsed = parseApiKey(apiKey);
     if (parsed.tenant) resolvedTenant = parsed.tenant;
   }
+  // Fail loudly — silent fallback to "main" previously let malformed API keys
+  // or missing tenant args silently pivot all operations onto the wrong tenant.
+  // Matches the pattern we killed in ADAS connectors (memory-mcp, docs-index-mcp,
+  // nutrition-mcp) — `|| "default"` was the #1 source of cross-tenant leaks.
+  if (!resolvedTenant) {
+    throw new Error(
+      `setSessionCredentials: tenant could not be resolved for session ${sessionId} ` +
+      `(tenant arg ${tenant ? "present" : "missing"}, apiKey ${apiKey ? "present but malformed (expected adas_<tenant>_<hex>)" : "absent"}). ` +
+      `Refusing to fall back to a default tenant.`
+    );
+  }
   const existing = sessions.get(sessionId);
   sessions.set(sessionId, {
-    tenant: resolvedTenant || "main",
+    tenant: resolvedTenant,
     apiKey,
     apiUrl: apiUrl || existing?.apiUrl || null,
     authExplicit: explicit || existing?.authExplicit || false,
@@ -77,7 +88,7 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
   });
   const urlNote = apiUrl ? `, url: ${apiUrl}` : "";
   const masterNote = masterKey ? ", MASTER MODE" : "";
-  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "main"}${explicit ? ", explicit" : ""}${urlNote}${masterNote})`);
+  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant}${explicit ? ", explicit" : ""}${urlNote}${masterNote})`);
 }
 
 /**
@@ -121,7 +132,18 @@ export function getCredentials(sessionId) {
     const parsed = parseApiKey(apiKey);
     if (parsed.tenant) tenant = parsed.tenant;
   }
-  return { tenant: tenant || "main", apiKey };
+  // If apiKey is present but tenant couldn't be derived, the key is malformed.
+  // Previously fell back to "main" — this silently routed credentials to the
+  // wrong tenant. Now we fail loudly.
+  if (apiKey && !tenant) {
+    throw new Error(
+      `getCredentials: apiKey is present (env ADAS_API_KEY) but tenant could not be resolved ` +
+      `(missing ADAS_TENANT env and apiKey is malformed — expected format adas_<tenant>_<hex>). ` +
+      `Refusing to fall back to a default tenant.`
+    );
+  }
+  // No apiKey at all = unauthenticated; return nulls (callers check apiKey.length).
+  return { tenant: tenant || null, apiKey };
 }
 
 /**
@@ -186,7 +208,7 @@ export function clearSession(sessionId) {
 /** Bind a session to its OAuth bearer token. Called from seedCredentials. */
 export function bindSessionBearer(sessionId, bearerToken) {
   sessionBearers.set(sessionId, bearerToken);
-  console.log(`[Auth] Bearer bound for session ${sessionId} (bearer: ${bearerToken.substring(0, 25)}...)`);
+  console.log(`[Auth] Bearer bound for session ${sessionId}`);
 }
 
 /** Store ateam_auth override for this user (by bearer). Called from tools.js. */
@@ -300,11 +322,20 @@ export function getSessionStats() {
 function headers(sessionId) {
   const session = sessionId ? sessions.get(sessionId) : null;
 
-  // Master mode: use shared secret auth (x-adas-token) instead of API key
+  // Master mode: use shared secret auth (x-adas-token) instead of API key.
+  // A master-mode session MUST have an active tenant (set via ateam_auth or
+  // switchTenant). Silent fallback to "main" previously masked configuration
+  // bugs and could pivot a master-key caller onto the wrong tenant.
   if (session?.masterKey) {
+    if (!session.tenant) {
+      throw new Error(
+        `headers: master-mode session ${sessionId} has no active tenant — ` +
+        `caller must select a tenant via ateam_auth or switchTenant before making requests.`
+      );
+    }
     const h = { "Content-Type": "application/json" };
     h["x-adas-token"] = session.masterKey;
-    h["X-ADAS-TENANT"] = session.tenant || "main";
+    h["X-ADAS-TENANT"] = session.tenant;
     return h;
   }
 
