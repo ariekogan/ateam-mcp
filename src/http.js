@@ -182,9 +182,24 @@ export function startHttpServer(port = 3100) {
   const mcpAuthOptional = [autoInjectToken, optionalBearerAuth];
 
   // ─── CORS — required for browser-based MCP clients ──────────────
+  // Origin allowlist (round 014 security hardening).
+  // ATEAM_CORS_ALLOWED_ORIGINS env = comma-separated list, or "*" / unset for
+  // wildcard (default — preserves compat with third-party MCP clients).
+  // When set, Origin must match exactly; otherwise no ACAO header is sent.
+  const CORS_ALLOWED_LIST = String(process.env.ATEAM_CORS_ALLOWED_ORIGINS || "*")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  const CORS_ALLOW_ANY = CORS_ALLOWED_LIST.includes("*");
+  function resolveOrigin(req) {
+    const o = req.headers?.origin;
+    if (CORS_ALLOW_ANY) return o || "*";
+    if (o && CORS_ALLOWED_LIST.includes(o)) return o;
+    return null;
+  }
   for (const path of MCP_PATHS) {
     app.use(path, (req, res, next) => {
-      res.setHeader("Access-Control-Allow-Origin", "*");
+      const origin = resolveOrigin(req);
+      if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+      if (!CORS_ALLOW_ANY) res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id, authorization");
       res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
