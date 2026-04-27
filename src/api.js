@@ -384,7 +384,13 @@ function formatError(method, path, status, body) {
  */
 async function request(method, path, body, sessionId, opts = {}) {
   const timeoutMs = opts.timeoutMs || REQUEST_TIMEOUT_MS;
-  const maxRetries = opts.retries ?? 0;
+  // Default to 2 retries on transient proxy errors (502/504). Existing
+  // gate further down only retries on those status codes — real errors
+  // (4xx, 5xx other than 502/504) still fail fast on attempt 0. Bumping
+  // the default from 0 → 2 protects every wrapper call against a
+  // skill-builder mid-restart 502 (bug #6 in parallel-agent feedback)
+  // without callers having to remember to pass retries everywhere.
+  const maxRetries = opts.retries ?? 2;
   const baseUrl = getBaseUrl(sessionId);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
