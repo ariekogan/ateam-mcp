@@ -16,6 +16,44 @@ import {
 } from "./api.js";
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 
+// ─── Async deploy helper ────────────────────────────────────────────
+//
+// All long-running deploy endpoints (build_and_run, redeploy, github_pull)
+// support async mode: POST returns {job_id, poll_url} in <1s, the work runs
+// in the background, and the client polls /deploy/jobs/:jobId until status
+// is "done" or "failed". This bypasses the upstream Cloudflare 100s timeout
+// that used to kill bulk redeploys with 524.
+//
+// pollDeployJob is the client side of that contract: it polls the job and
+// returns the final job entry (which is the same shape as the original
+// sync response would have been, plus job metadata). MCP tool wrappers use
+// this so the agent gets a normal response from a long-running tool call —
+// no async API leaks out to agent prompts.
+async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000, intervalMs = 2000 } = {}) {
+  const start = Date.now();
+  let lastStatus = null;
+  while (Date.now() - start < maxMs) {
+    await new Promise(r => setTimeout(r, intervalMs));
+    try {
+      const job = await get(`/deploy/jobs/${jobId}`, sid);
+      lastStatus = job?.status;
+      if (job?.status === 'done' || job?.status === 'failed') {
+        return job; // job entry has the full result merged in
+      }
+    } catch (err) {
+      // Transient — keep polling. Log at debug level if requested.
+      if (process.env.MCP_DEBUG_POLLS) console.warn(`[pollDeployJob:${label}] poll error (will retry): ${err.message}`);
+    }
+  }
+  return {
+    ok: false,
+    error: `${label} polling timed out after ${Math.round(maxMs / 60_000)}min`,
+    last_status: lastStatus,
+    job_id: jobId,
+    hint: 'The job may still be running on the server. Call get(`/deploy/jobs/<job_id>`) directly to check.',
+  };
+}
+
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -2227,8 +2265,20 @@ const handlers = {
   ateam_github_push: async ({ solution_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/github/push`, { push_to_github: true, message }, sid, { timeoutMs: 60_000 }),
 
-  ateam_github_pull: async ({ solution_id }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000, retries: 2 }),
+  ateam_github_pull: async ({ solution_id }, sid) => {
+    // Async-first: github_pull is the #1 Cloudflare-524 culprit on large
+    // solutions. Kick the job off, then poll. Falls back to sync if the
+    // backend doesn't support async (older deployments).
+    let kicked;
+    try {
+      kicked = await post(`/deploy/solutions/${solution_id}/github/pull`, { async: true }, sid, { timeoutMs: 30_000 });
+    } catch (err) {
+      // Sync fallback (older backend without async support)
+      return await post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000, retries: 2 });
+    }
+    if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async — return as-is
+    return await pollDeployJob(kicked.job_id, sid, { label: 'github-pull', maxMs: 15 * 60_000, intervalMs: 2000 });
+  },
 
   ateam_github_status: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/github/status`, sid),
@@ -2277,23 +2327,51 @@ const handlers = {
     const endpoint = skill_id
       ? `/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
       : `/deploy/solutions/${solution_id}/redeploy`;
+
+    // Async-first: bulk redeploys used to 524 on >5-skill solutions because
+    // the upstream Cloudflare timeout is ~100s. Kick the job and poll. If
+    // the backend doesn't support async (older deployment), fall back to
+    // the legacy sync path with longer retry. If both fail, surface a
+    // useful error/hint to the agent.
     let result;
+    let lastErr = null;
     try {
-      result = await post(endpoint, {}, sid, { timeoutMs: 300_000, retries: 2 });
+      const kicked = await post(endpoint, { async: true }, sid, { timeoutMs: 30_000 });
+      if (kicked?.async && kicked.job_id) {
+        result = await pollDeployJob(kicked.job_id, sid, {
+          label: skill_id ? `redeploy-skill ${skill_id}` : 'redeploy-bulk',
+          maxMs: 15 * 60_000,
+          intervalMs: 2000,
+        });
+      } else {
+        result = kicked; // backend didn't honor async — already-finished sync result
+      }
     } catch (err) {
-      const notFound = /not found|404|ENOENT/i.test(err.message);
-      const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(err.message);
+      lastErr = err;
+      // Sync fallback for backends without async support
+      try {
+        result = await post(endpoint, {}, sid, { timeoutMs: 300_000, retries: 2 });
+        lastErr = null;
+      } catch (syncErr) {
+        lastErr = syncErr;
+      }
+    }
+
+    if (!result && lastErr) {
+      const notFound = /not found|404|ENOENT/i.test(lastErr.message);
+      const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(lastErr.message);
       return {
         ok: false,
-        error: err.message,
+        error: lastErr.message,
         ...(notFound && {
           hint: "Skill not found in Builder storage. Edit the skill on GitHub with ateam_github_patch(solution_id, path: 'skills/<skill-id>/skill.json', search: '...', replace: '...'), then use ateam_build_and_run(solution_id, github: true) or ask the platform operator to deploy the single skill.",
         }),
         ...(isTimeout && {
-          hint: "Redeploy timed out. For large solutions, redeploy one skill at a time: ateam_redeploy(solution_id, skill_id: '<specific-skill>').",
+          hint: "Redeploy timed out even after async polling (15min). Use ateam_redeploy(solution_id, skill_id: '<specific-skill>') to redeploy one skill at a time.",
         }),
       };
     }
+    if (!result) result = { ok: false, error: 'Redeploy returned no result' };
     // Pull through the underlying error/message instead of fabricating "0/0/0
     // success-shaped" output. Old wrapper hid backend errors (e.g. validator
     // failures from sentinel files in user repos) and reported `total: 0` with
