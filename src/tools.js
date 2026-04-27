@@ -1643,7 +1643,13 @@ const handlers = {
                 phases.push({ phase: "deploy", status: job.status });
                 break;
               }
-            } catch { /* keep polling */ }
+            } catch (err) {
+              // #4 Silent-catch audit: poll errors are usually transient
+              // (network blip, restart). Logging at debug level so they
+              // don't drown the console but ARE visible if you bump the
+              // log level after a stuck deploy.
+              if (process.env.MCP_DEBUG_POLLS) console.warn(`[ateam_build_and_run] poll ${jobId} error (will retry): ${err.message}`);
+            }
           }
           if (!deploy) {
             return { ok: false, phase: "deployment", phases, error: "Async deploy timed out after 10 minutes", validation_warnings: validation.warnings || [],
