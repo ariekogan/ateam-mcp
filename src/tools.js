@@ -32,10 +32,17 @@ import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agent
 async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000, intervalMs = 2000 } = {}) {
   const start = Date.now();
   let lastStatus = null;
+  // URL-encode jobId — older skill-validators returned composite job IDs
+  // with literal `/` (e.g. `redeploy-skill-personal-adas/pa-orchestrator-...`)
+  // which broke the Express route /deploy/jobs/:jobId. Polling silently
+  // 404'd every iteration until the MCP host's stdio idle timeout fired
+  // (~30s) and dropped the connection. Encoding here is defense-in-depth
+  // even after the server-side fix that replaced `/` with `--`.
+  const encodedJobId = encodeURIComponent(jobId);
   while (Date.now() - start < maxMs) {
     await new Promise(r => setTimeout(r, intervalMs));
     try {
-      const job = await get(`/deploy/jobs/${jobId}`, sid);
+      const job = await get(`/deploy/jobs/${encodedJobId}`, sid);
       lastStatus = job?.status;
       if (job?.status === 'done' || job?.status === 'failed') {
         return job; // job entry has the full result merged in
