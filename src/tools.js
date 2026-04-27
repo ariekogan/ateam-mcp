@@ -2288,19 +2288,38 @@ const handlers = {
         }),
       };
     }
+    // Pull through the underlying error/message instead of fabricating "0/0/0
+    // success-shaped" output. Old wrapper hid backend errors (e.g. validator
+    // failures from sentinel files in user repos) and reported `total: 0` with
+    // no clue why — the agent was left thinking redeploy was a no-op when in
+    // fact it was a hard failure.
+    const failedCount = !result.ok
+      ? (result.failed ?? (result.skills?.length ? result.skills.filter(s => s.ok === false).length : 1))
+      : (result.failed || 0);
+    const deployedCount = result.deployed ?? (result.ok ? (skill_id ? 1 : (result.skills?.filter(s => s.ok !== false).length || 0)) : 0);
+    const totalCount = result.total ?? (deployedCount + failedCount);
+
     return {
       ok: result.ok,
       solution_id,
       ...(skill_id && { skill_id }),
-      deployed: result.deployed || (result.ok ? 1 : 0),
-      failed: result.failed || 0,
-      total: result.total || (result.ok ? 1 : 0),
+      deployed: deployedCount,
+      failed: failedCount,
+      total: totalCount,
       skills: result.skills || [],
+      // Surface the underlying error when the request failed — the most
+      // common cause is a validator failure (e.g. broken connector source
+      // in the GitHub repo), and hiding it makes diagnosis impossible.
+      ...(!result.ok && result.error && { error: result.error }),
+      ...(!result.ok && result.details && { details: result.details }),
+      ...(!result.ok && result.hint && { hint: result.hint }),
       message: result.ok
         ? skill_id
           ? `Re-deployed skill "${skill_id}" successfully.`
-          : `Re-deployed ${result.deployed || 0} skill(s) successfully.`
-        : `Re-deploy had ${result.failed || 0} failure(s). Check skills array for details.`,
+          : `Re-deployed ${deployedCount} skill(s) successfully.`
+        : (result.error
+            ? `Re-deploy failed: ${result.error}${result.hint ? ` — ${result.hint}` : ''}`
+            : `Re-deploy had ${failedCount} failure(s). Check skills array or call the underlying endpoint with verbose:true.`),
     };
   },
 
