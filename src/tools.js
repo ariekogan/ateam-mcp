@@ -54,6 +54,28 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   };
 }
 
+// ─── Dotted-field resolver ─────────────────────────────────────────
+//
+// Given an object and a dotted field name, walk down the path creating
+// missing intermediate objects, and return { parent, leaf } so the caller
+// can mutate parent[leaf] directly. Used by ateam_patch's _push / _delete /
+// _update mutators so they correctly traverse "intents.supported" instead
+// of creating a top-level key with a literal dot in its name. (That bug
+// silently corrupted skill.json with three different copies of the same
+// field — see the bug report from the parallel agent.)
+function _resolveDottedField(obj, dottedPath) {
+  const parts = dottedPath.split('.');
+  let parent = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const k = parts[i];
+    if (!parent[k] || typeof parent[k] !== 'object' || Array.isArray(parent[k])) {
+      parent[k] = {};
+    }
+    parent = parent[k];
+  }
+  return { parent, leaf: parts[parts.length - 1] };
+}
+
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -1897,24 +1919,40 @@ const handlers = {
           const existing = typeof patched.role.persona === "string" ? patched.role.persona : "";
           const sep = (!existing || /\s$/.test(existing)) ? "" : "\n\n";
           patched.role.persona = existing + sep + value;
-        } else if (key.endsWith("_push") && Array.isArray(value)) {
-          // Array push: tools_push, intents_push, etc.
+        } else if (key.endsWith("_push")) {
+          // Array push: tools_push, intents.supported_push, etc.
+          // BUG FIX: previously did `patched[field] = ...` which created a
+          // top-level key with a literal dot (e.g. patched["intents.supported"])
+          // instead of pushing into patched.intents.supported. Traverse the
+          // dotted path correctly. Also enforce array-only values — was silently
+          // falling through to the dot-notation branch when given a single
+          // object, leaving a stray "<field>_push" sibling key behind.
+          if (!Array.isArray(value)) {
+            return { ok: false, phase: "patch", error: `${key} requires an array value (got ${typeof value}). Wrap the item in [] — e.g. {"${key}": [{...}]}.` };
+          }
           const field = key.replace(/_push$/, "");
-          patched[field] = [...(patched[field] || []), ...value];
-        } else if (key.endsWith("_delete") && Array.isArray(value)) {
-          // Array delete by name
+          const { parent, leaf } = _resolveDottedField(patched, field);
+          parent[leaf] = [...(Array.isArray(parent[leaf]) ? parent[leaf] : []), ...value];
+        } else if (key.endsWith("_delete")) {
+          if (!Array.isArray(value)) {
+            return { ok: false, phase: "patch", error: `${key} requires an array of names/ids (got ${typeof value}). Pass {"${key}": ["name1", "name2"]}.` };
+          }
           const field = key.replace(/_delete$/, "");
-          patched[field] = (patched[field] || []).filter(item => !value.includes(item.name || item.id || item));
-        } else if (key.endsWith("_update") && Array.isArray(value)) {
-          // Array update by name/id
+          const { parent, leaf } = _resolveDottedField(patched, field);
+          parent[leaf] = (Array.isArray(parent[leaf]) ? parent[leaf] : []).filter(item => !value.includes(item?.name || item?.id || item));
+        } else if (key.endsWith("_update")) {
+          if (!Array.isArray(value)) {
+            return { ok: false, phase: "patch", error: `${key} requires an array of update objects (got ${typeof value}). Pass {"${key}": [{name: "x", description: "..."}]}.` };
+          }
           const field = key.replace(/_update$/, "");
-          const arr = patched[field] || [];
+          const { parent, leaf } = _resolveDottedField(patched, field);
+          const arr = Array.isArray(parent[leaf]) ? parent[leaf] : [];
           for (const upd of value) {
             const idx = arr.findIndex(item => (item.name || item.id) === (upd.name || upd.id));
             if (idx >= 0) arr[idx] = { ...arr[idx], ...upd };
             else arr.push(upd);
           }
-          patched[field] = arr;
+          parent[leaf] = arr;
         } else if (key.includes(".")) {
           // Dot notation: "role.persona", "intents.thresholds.accept"
           const parts = key.split(".");
