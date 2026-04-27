@@ -1939,7 +1939,25 @@ const handlers = {
           }
           const field = key.replace(/_delete$/, "");
           const { parent, leaf } = _resolveDottedField(patched, field);
-          parent[leaf] = (Array.isArray(parent[leaf]) ? parent[leaf] : []).filter(item => !value.includes(item?.name || item?.id || item));
+          const arr = Array.isArray(parent[leaf]) ? parent[leaf] : [];
+          // Match by EITHER id OR name OR primitive value. Old logic short-
+          // circuited on item.name first ("name || id || self"), which silently
+          // failed when an item had both name and id and the caller passed the
+          // id. Now we check both keys + the primitive case.
+          const matchValues = new Set(value.map(v => (v && typeof v === 'object') ? (v.id ?? v.name) : v));
+          const before = arr.length;
+          parent[leaf] = arr.filter(item => {
+            if (item == null) return true;
+            if (typeof item !== 'object') return !matchValues.has(item);
+            if (item.id !== undefined && matchValues.has(item.id)) return false;
+            if (item.name !== undefined && matchValues.has(item.name)) return false;
+            return true;
+          });
+          if (parent[leaf].length === before && value.length > 0) {
+            // Surface a "not found" hint instead of silent ok:true. Helps
+            // agents catch typos and the "wrong key" class of bugs.
+            phases.push({ phase: 'patch', warning: `${key}: nothing matched [${value.join(', ')}] — array unchanged` });
+          }
         } else if (key.endsWith("_update")) {
           if (!Array.isArray(value)) {
             return { ok: false, phase: "patch", error: `${key} requires an array of update objects (got ${typeof value}). Pass {"${key}": [{name: "x", description: "..."}]}.` };
@@ -1947,8 +1965,13 @@ const handlers = {
           const field = key.replace(/_update$/, "");
           const { parent, leaf } = _resolveDottedField(patched, field);
           const arr = Array.isArray(parent[leaf]) ? parent[leaf] : [];
+          // Same fix as _delete — match upd → existing by EITHER id OR name.
           for (const upd of value) {
-            const idx = arr.findIndex(item => (item.name || item.id) === (upd.name || upd.id));
+            const updKey = (upd && typeof upd === 'object') ? (upd.id ?? upd.name) : upd;
+            const idx = arr.findIndex(item => {
+              if (!item || typeof item !== 'object') return item === updKey;
+              return item.id === updKey || item.name === updKey;
+            });
             if (idx >= 0) arr[idx] = { ...arr[idx], ...upd };
             else arr.push(upd);
           }
