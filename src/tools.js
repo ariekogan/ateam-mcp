@@ -894,6 +894,19 @@ export const tools = [
       required: ["solution_id"],
     },
   },
+  {
+    name: "ateam_verify_consistency",
+    core: false,
+    description:
+      "Read-only: do Builder FS and the GitHub repo agree for this solution? Returns { consistent: bool, drifts: [{path, kind}] } where kind ∈ fs_missing | content_differs | gh_missing | gh_read_error | repo_unreachable. Comparison strips ephemeral fields (timestamps, runtime/deploy-state, resolved-on-load flags) so only REAL content drift surfaces. Use this any time you're unsure whether a recent change landed on GitHub or whether your local view of the solution matches what's deployed — much faster than scrolling ateam_github_log manually. No deploy is triggered.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+      },
+      required: ["solution_id"],
+    },
+  },
 
   // ═══════════════════════════════════════════════════════════════════
   // GITHUB TOOLS — version control for solutions
@@ -1252,6 +1265,7 @@ const TENANT_TOOLS = new Set([
   "ateam_get_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
+  "ateam_verify_consistency",
   // GitHub operations
   "ateam_github_push",
   "ateam_github_pull",
@@ -2322,6 +2336,9 @@ const handlers = {
     const qsStr = qs.toString() ? `?${qs}` : "";
     return get(`/deploy/solutions/${solution_id}/metrics${qsStr}`, sid);
   },
+
+  ateam_verify_consistency: async ({ solution_id }, sid) =>
+    get(`/deploy/solutions/${solution_id}/verify`, sid),
 
   ateam_diff: async ({ solution_id, skill_id }, sid) => {
     const qs = skill_id ? `?skill_id=${encodeURIComponent(skill_id)}` : "";
