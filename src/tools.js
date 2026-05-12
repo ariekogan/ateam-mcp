@@ -1774,20 +1774,6 @@ const handlers = {
           typical_use: "Index documents from any source (Dropbox, Gmail attachments, uploaded files), answer questions with retrieved chunks + citations. Fed by source connectors (e.g. dropbox-mcp) that call docs.ingest.file.",
         },
         {
-          id: "handoff-controller-mcp",
-          name: "Handoff Controller",
-          purpose: "Live conversation handoffs between skills in a multi-skill solution",
-          tool_prefixes: ["handoff."],
-          typical_use: "Pass a live conversation from one skill to another (e.g. identity-assurance → order-support), carrying grants",
-        },
-        {
-          id: "internal-comm-mcp",
-          name: "Internal Communication",
-          purpose: "Skill-to-skill messaging and voice replies",
-          tool_prefixes: ["comm."],
-          typical_use: "Async message between skills, or send a voice reply back through the Twilio channel",
-        },
-        {
           id: "browser-mcp",
           name: "Browser",
           purpose: "Headless Chromium automation (Playwright) + Auth WebView for OAuth/cookie capture",
