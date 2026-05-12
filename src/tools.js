@@ -500,6 +500,42 @@ export const tools = [
   },
 
   {
+    name: "ateam_show_skill_minimal",
+    core: true,
+    description:
+      "Show the minimal authoring view of a skill — persona + connectors + " +
+      "handoff_when + style + policy guardrails only. ~10× smaller than " +
+      "ateam_get_solution(view:'skills') for the same skill. Use this when " +
+      "you only need the irreducible author content (Phase 9 of the strip).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        skill_id: { type: "string", description: "The skill ID" },
+      },
+      required: ["solution_id", "skill_id"],
+    },
+  },
+
+  {
+    name: "ateam_show_solution_minimal",
+    core: true,
+    description:
+      "Show the minimal authoring view of a solution — name + description + " +
+      "style + routing_mode + identity_mode + skill ids + connector ids only. " +
+      "Skips deployed metadata, handoffs (auto-generated), grants, ui_plugins, " +
+      "validation results. Use this for fast inspection without the verbose " +
+      "fields (Phase 9 of the strip).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+      },
+      required: ["solution_id"],
+    },
+  },
+
+  {
     name: "ateam_create_connector",
     core: true,
     description:
@@ -2729,6 +2765,62 @@ const handlers = {
       sid,
       { timeoutMs: 300_000, retries: 1 },
     ),
+
+  // ── Phase 9 strip: focused minimal responses ────────────────────────
+  ateam_show_skill_minimal: async ({ solution_id, skill_id }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    if (!skill_id) throw new Error("skill_id required");
+    const full = await get(`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
+    const skill = full?.skill || full;
+    if (!skill) return { ok: false, error: "skill not found" };
+    return {
+      ok: true,
+      id: skill.id,
+      name: skill.name || skill.id,
+      description: skill.description || "",
+      role: { persona: skill.role?.persona || "" },
+      connectors: skill.connectors || [],
+      handoff_when: skill.handoff_when || null,
+      style: skill.style || null,
+      excluded_tools: skill.excluded_tools || [],
+      policy_guardrails: {
+        never: skill.policy?.guardrails?.never || [],
+        always: skill.policy?.guardrails?.always || [],
+      },
+      engine: typeof skill.engine === "string" ? skill.engine : (skill.engine ? "<explicit-object>" : null),
+      _hint: "This is the MINIMAL view (Phase 9 strip). Use ateam_get_solution(view:'skills', skill_id) for the full schema.",
+    };
+  },
+
+  ateam_show_solution_minimal: async ({ solution_id }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    const full = await get(`/deploy/solutions/${solution_id}/definition`, sid);
+    const sol = full?.solution || full;
+    if (!sol) return { ok: false, error: "solution not found" };
+    return {
+      ok: true,
+      id: sol.id,
+      name: sol.name || sol.id,
+      description: sol.description || "",
+      version: sol.version || "1.0.0",
+      style: sol.style || null,
+      routing_mode: sol.routing_mode || "manual",
+      identity_mode: sol.identity_mode || null,
+      identity: sol.identity ? {
+        default_actor_type: sol.identity.default_actor_type,
+        actor_types_count: (sol.identity.actor_types || []).length,
+      } : null,
+      skills: (sol.skills || []).map(s => ({
+        id: s.id,
+        name: s.name || s.id,
+        role: s.role || "worker",
+      })),
+      connectors_count: (sol.platform_connectors || []).length,
+      ui_plugins_count: (sol.ui_plugins || []).length,
+      handoffs_count: (sol.handoffs || []).length,
+      _hint: "This is the MINIMAL view (Phase 9 strip). Use ateam_get_solution(view:'definition') for the full schema.",
+    };
+  },
 
   // ── Phase 7 strip: scaffold helpers ─────────────────────────────────
   ateam_create_connector: async ({ solution_id, connector_id, name, ui_capable }, sid) => {
