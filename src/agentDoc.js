@@ -40,10 +40,27 @@ export function renderAgentDocHeader({ solution, skills = [], connectors = [] })
     return `- **${s.id}** _(${role})_ — ${oneLine(desc)}`;
   }).join("\n") || "_(no skills defined)_";
 
-  const platformConnectorIds = (solution?.platform_connectors || []).map((c) => c.id);
+  // Classify connectors by the `source` field on solution.platform_connectors[].
+  // Default "platform" for back-compat with older solutions that don't set it.
+  // Solution-owned connectors (source:"solution") have source code in
+  // connectors/<id>/ inside the repo. See skill-validator schema for the
+  // platform_connectors[i].source field. The previous classifier put EVERY
+  // platform_connectors entry into the "platform" bucket regardless of
+  // ownership, which misclassified solution-owned connectors and bit ada
+  // on 2026-05-15.
+  const pcs = solution?.platform_connectors || [];
+  const platformConnectorIds = pcs
+    .filter((c) => (c.source || "platform") === "platform")
+    .map((c) => c.id);
   const solutionConnectorIds = [
-    ...new Set(connectors.map((c) => c.id).filter(Boolean)),
-  ];
+    ...new Set([
+      // Anything explicitly marked source:"solution"
+      ...pcs.filter((c) => c.source === "solution").map((c) => c.id),
+      // Plus anything in the separately-passed connectors list (live runtime
+      // discovery) that isn't already accounted for as platform.
+      ...connectors.map((c) => c.id).filter(Boolean),
+    ]),
+  ].filter((id) => !platformConnectorIds.includes(id));
   const connectorTable = buildConnectorTable({
     platform: platformConnectorIds,
     solution: solutionConnectorIds,
