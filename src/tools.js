@@ -188,22 +188,29 @@ export const tools = [
     name: "ateam_build_and_run",
     core: true,
     description:
-      "Build and deploy a governed AI Team solution in one step. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to A-Team Core (regenerates MCP servers) → health-checks → optionally runs a warm test → auto-pushes to GitHub. AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from GitHub automatically. First deploy requires mcp_store. After that, write files via ateam_github_write, then just call build_and_run without mcp_store. For small changes to an already-deployed solution, prefer ateam_patch (faster, incremental). Requires authentication.",
+      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → auto-pushes to GitHub.\n\n" +
+      "🌳 DEV/PROD WORKFLOW:\n" +
+      "  1. Edit files → ateam_github_patch (writes to `dev` branch by default)\n" +
+      "  2. (Optional) Preview what's about to ship → ateam_github_diff\n" +
+      "  3. Ship dev → main → ateam_github_promote (merges + auto-tags `prod-YYYY-MM-DD-NNN`)\n" +
+      "  4. Deploy main to Core → ateam_build_and_run\n\n" +
+      "This tool ALWAYS deploys the `main` branch — there is no `ref` parameter. To deploy in-progress dev work, first promote it.\n\n" +
+      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: {
           type: "string",
-          description: "The solution ID. Use this INSTEAD of passing the full solution object — the solution definition is auto-pulled from GitHub. Required if solution object is omitted.",
+          description: "The solution ID. Use this INSTEAD of passing the full solution object — the solution definition is auto-pulled from main. Required if solution object is omitted.",
         },
         solution: {
           type: "object",
-          description: "Full solution definition. Required on first deploy. After first deploy, just pass solution_id instead — everything is auto-pulled from GitHub.",
+          description: "Full solution definition. Required on first deploy. After first deploy, just pass solution_id instead — everything is auto-pulled from GitHub main.",
         },
         skills: {
           type: "array",
           items: { type: "object" },
-          description: "Optional after first deploy: skill definitions. If omitted, auto-pulled from GitHub repo (skills/{id}/skill.json).",
+          description: "Optional after first deploy: skill definitions. If omitted, auto-pulled from main (skills/{id}/skill.json).",
         },
         connectors: {
           type: "array",
@@ -216,7 +223,7 @@ export const tools = [
         },
         github: {
           type: "boolean",
-          description: "Optional: if true, pull connector source code from the solution's GitHub repo. AUTO-DETECTED: if you omit both mcp_store and github, the system checks if a repo exists and pulls from it automatically. You rarely need to set this explicitly.",
+          description: "Optional: if true, pull connector source code from main. AUTO-DETECTED: if you omit both mcp_store and github, the system checks if a repo exists and pulls from main automatically.",
         },
         test_message: {
           type: "string",
@@ -1219,14 +1226,35 @@ export const tools = [
     name: "ateam_github_diff",
     core: true,
     description:
-      "Compare two branches. Default base=main, head=dev — shows what's about to ship if you call ateam_github_promote(). " +
-      "Returns the list of commits and files that would land on main.",
+      "PRE-FLIGHT BEFORE PROMOTE. Compares `dev` (head) vs `main` (base) by default — shows exactly which commits and files are about to ship if you call ateam_github_promote() next.\n\n" +
+      "Use this when you want to:\n" +
+      "  • Review changes before promoting to prod\n" +
+      "  • See if dev is ahead of main at all (returns ahead_by: 0 if nothing to promote)\n" +
+      "  • Inspect arbitrary branch/tag/commit comparisons (override base/head)",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: { type: "string", description: "The solution ID" },
-        base: { type: "string", description: "Base branch (the target). Default: 'main'.", default: "main" },
-        head: { type: "string", description: "Head branch (the source). Default: 'dev'.", default: "dev" },
+        base: { type: "string", description: "Base branch/tag/sha (the target — what you're comparing TO). Default: 'main'.", default: "main" },
+        head: { type: "string", description: "Head branch/tag/sha (the source — what you're comparing FROM). Default: 'dev'.", default: "dev" },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_verify_consistency",
+    core: true,
+    description:
+      "Check that the Builder filesystem state and GitHub state are in sync for a solution. Read-only probe — does NOT trigger a deploy.\n\n" +
+      "Returns:\n" +
+      "  • ok: true + drifts: [] if everything matches\n" +
+      "  • ok: false + drifts: [{path, kind}] listing files that differ (kinds: fs_missing, gh_missing, content_differs)\n\n" +
+      "Drift can creep in when GitHub writes happen but Builder FS doesn't get the mirror update (network blip, container restart mid-write). Boot sync heals most of it on next backend restart; this tool surfaces drift earlier.\n\n" +
+      "Run after a series of ateam_github_patch calls to confirm the Builder backend is consistent with GitHub before you ateam_build_and_run.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID to verify" },
       },
       required: ["solution_id"],
     },
@@ -2874,6 +2902,9 @@ const handlers = {
     const q = qs.toString();
     return get(`/deploy/solutions/${solution_id}/github/diff${q ? '?' + q : ''}`, sid);
   },
+
+  ateam_verify_consistency: async ({ solution_id }, sid) =>
+    get(`/deploy/solutions/${solution_id}/verify`, sid),
 
   ateam_github_promote: async ({ solution_id, label, dry_run, skip_tag }, sid) =>
     post(`/deploy/solutions/${solution_id}/promote`, { label, dry_run, skip_tag }, sid),
