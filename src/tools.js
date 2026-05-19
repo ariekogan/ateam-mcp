@@ -1068,7 +1068,8 @@ export const tools = [
     name: "ateam_github_read",
     core: true,
     description:
-      "Read any file from a solution's GitHub repo. Returns the file content. Use this to read connector source code, skill definitions, or any versioned file. Great for reviewing previous versions or understanding what's in the repo.",
+      "Read any file from a solution's GitHub repo. Returns the file content. Use this to read connector source code, skill definitions, or any versioned file. " +
+      "Default reads from `main` (deployed/prod state). Pass `ref: 'dev'` to read in-progress work.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1079,6 +1080,11 @@ export const tools = [
         path: {
           type: "string",
           description: "File path in the repo (e.g. 'connectors/home-assistant-mcp/server.js', 'solution.json', 'skills/order-support/skill.json')",
+        },
+        ref: {
+          type: "string",
+          description: "Branch, tag, or commit SHA to read from. Default: 'main' (prod). Use 'dev' to read in-progress work.",
+          default: "main",
         },
       },
       required: ["solution_id", "path"],
@@ -1091,7 +1097,8 @@ export const tools = [
       "Edit a file in the solution's GitHub repo and commit. Two modes:\n" +
       "1. FULL FILE: provide `content` — replaces entire file (good for new files or small files)\n" +
       "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
-      "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.",
+      "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
+      "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1118,6 +1125,11 @@ export const tools = [
         message: {
           type: "string",
           description: "Optional commit message (default: 'Update <path>')",
+        },
+        ref: {
+          type: "string",
+          description: "Target branch. Default: 'dev' (safe — won't touch prod). Use 'main' only for emergency hotfixes.",
+          default: "dev",
         },
       },
       required: ["solution_id", "path"],
@@ -1147,7 +1159,8 @@ export const tools = [
     description:
       "Write a file to the solution's GitHub repo. Use this to create new connector files or replace existing ones — one file per call. " +
       "This is the PRIMARY way to write connector code after first deploy. " +
-      "Write each file individually (server.js, package.json, UI assets), then call ateam_build_and_run() to deploy.",
+      "Write each file individually (server.js, package.json, UI assets), then call ateam_github_promote() to ship to prod (dev→main), then ateam_build_and_run() to deploy.\n\n" +
+      "DEFAULTS TO `dev` BRANCH.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1167,6 +1180,11 @@ export const tools = [
           type: "string",
           description: "Optional commit message (default: 'Write <path>')",
         },
+        ref: {
+          type: "string",
+          description: "Target branch. Default: 'dev'.",
+          default: "dev",
+        },
       },
       required: ["solution_id", "path", "content"],
     },
@@ -1175,7 +1193,8 @@ export const tools = [
     name: "ateam_github_log",
     core: true,
     description:
-      "View commit history for a solution's GitHub repo. Shows recent commits with messages, SHAs, timestamps, and links. Use this to see what changes have been made and when.",
+      "View commit history for a solution's GitHub repo. Shows recent commits with messages, SHAs, timestamps, and links. " +
+      "Default reads from `main` (prod). Pass `ref: 'dev'` to see in-progress work.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1187,6 +1206,27 @@ export const tools = [
           type: "number",
           description: "Max commits to return (default: 10)",
         },
+        ref: {
+          type: "string",
+          description: "Branch to read commits from. Default: 'main'.",
+          default: "main",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_github_diff",
+    core: true,
+    description:
+      "Compare two branches. Default base=main, head=dev — shows what's about to ship if you call ateam_github_promote(). " +
+      "Returns the list of commits and files that would land on main.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        base: { type: "string", description: "Base branch (the target). Default: 'main'.", default: "main" },
+        head: { type: "string", description: "Head branch (the source). Default: 'dev'.", default: "dev" },
       },
       required: ["solution_id"],
     },
@@ -1200,7 +1240,10 @@ export const tools = [
     name: "ateam_github_promote",
     core: true,
     description:
-      "Create a checkpoint (safe point) on the current main branch. Tags the current state with safe-YYYY-MM-DD-NNN so you can rollback to it later. Use this before risky changes or when the solution is in a known-good state.",
+      "SHIP DEV TO PROD. Merges the `dev` branch into `main` and auto-tags the new main HEAD as safe-YYYY-MM-DD-NNN. " +
+      "Use after testing your dev work, when you're ready to deploy changes to production.\n\n" +
+      "Workflow: 1) ateam_github_patch (writes to dev) → 2) ateam_github_promote (merges dev→main) → 3) ateam_build_and_run (deploys main).\n\n" +
+      "Pass dry_run:true to see what's about to ship without merging. On merge conflict the call returns 409 — resolve manually on GitHub (open a PR or use the web UI), then retry.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1210,7 +1253,15 @@ export const tools = [
         },
         label: {
           type: "string",
-          description: "Optional: human-readable label for this checkpoint (e.g., 'before refactor', 'v2 stable')",
+          description: "Optional: human-readable label for the auto-tag (e.g., 'v2 stable', 'before refactor')",
+        },
+        dry_run: {
+          type: "boolean",
+          description: "If true: show the diff (commits + files about to ship) without merging. Default: false.",
+        },
+        skip_tag: {
+          type: "boolean",
+          description: "If true: merge without creating an auto-tag. Default: false (auto-tag enabled).",
         },
       },
       required: ["solution_id"],
@@ -1220,7 +1271,9 @@ export const tools = [
     name: "ateam_github_rollback",
     core: true,
     description:
-      "Rollback main branch to a previous checkpoint (safe-* tag). Resets main to the specified checkpoint commit. ⚠️ DESTRUCTIVE — use with caution. Use ateam_github_list_versions to find available checkpoints first.",
+      "Roll prod (`main` branch) back to a previous state.\n\n" +
+      "ADDITIVE — does NOT destroy history. Creates a new commit on top of main whose tree matches the target's tree. The history of everything between target and current main is preserved (you can roll back the rollback).\n\n" +
+      "Workflow: 1) ateam_github_list_versions (find a safe-* tag) → 2) ateam_github_rollback(target: 'safe-...') → 3) ateam_build_and_run (deploys the reverted state).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1228,12 +1281,12 @@ export const tools = [
           type: "string",
           description: "The solution ID",
         },
-        tag: {
+        target: {
           type: "string",
-          description: "Required: checkpoint tag to rollback to (e.g., 'safe-2026-03-11-001')",
+          description: "Tag (e.g., 'safe-2026-05-19-001') or commit SHA to revert main to. Use ateam_github_list_versions to find safe-* tags.",
         },
       },
-      required: ["solution_id", "tag"],
+      required: ["solution_id", "target"],
     },
   },
   {
@@ -2794,25 +2847,40 @@ const handlers = {
   ateam_github_status: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/github/status`, sid),
 
-  ateam_github_read: async ({ solution_id, path: filePath }, sid) =>
-    get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid),
-
-  ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message }, sid),
-
-  ateam_github_write: async ({ solution_id, path: filePath, content, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message }, sid),
-
-  ateam_github_log: async ({ solution_id, limit }, sid) => {
-    const qs = limit ? `?limit=${limit}` : "";
-    return get(`/deploy/solutions/${solution_id}/github/log${qs}`, sid);
+  ateam_github_read: async ({ solution_id, path: filePath, ref }, sid) => {
+    const qs = new URLSearchParams({ path: filePath });
+    if (ref) qs.set('branch', ref);
+    return get(`/deploy/solutions/${solution_id}/github/read?${qs.toString()}`, sid);
   },
 
-  ateam_github_promote: async ({ solution_id, label }, sid) =>
-    post(`/deploy/solutions/${solution_id}/promote`, label ? { label } : {}, sid),
+  ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref }, sid) =>
+    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref }, sid),
 
-  ateam_github_rollback: async ({ solution_id, tag }, sid) =>
-    post(`/deploy/solutions/${solution_id}/rollback`, { tag }, sid),
+  ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) =>
+    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid),
+
+  ateam_github_log: async ({ solution_id, limit, ref }, sid) => {
+    const qs = new URLSearchParams();
+    if (limit) qs.set('limit', String(limit));
+    if (ref) qs.set('branch', ref);
+    const q = qs.toString();
+    return get(`/deploy/solutions/${solution_id}/github/log${q ? '?' + q : ''}`, sid);
+  },
+
+  ateam_github_diff: async ({ solution_id, base, head }, sid) => {
+    const qs = new URLSearchParams();
+    if (base) qs.set('base', base);
+    if (head) qs.set('head', head);
+    const q = qs.toString();
+    return get(`/deploy/solutions/${solution_id}/github/diff${q ? '?' + q : ''}`, sid);
+  },
+
+  ateam_github_promote: async ({ solution_id, label, dry_run, skip_tag }, sid) =>
+    post(`/deploy/solutions/${solution_id}/promote`, { label, dry_run, skip_tag }, sid),
+
+  ateam_github_rollback: async ({ solution_id, target, tag }, sid) =>
+    // Accept both `target` (new spec) and `tag` (legacy callers)
+    post(`/deploy/solutions/${solution_id}/rollback`, { target: target || tag }, sid),
 
   ateam_github_list_versions: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/versions/dev`, sid),
