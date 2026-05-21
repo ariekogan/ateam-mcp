@@ -275,18 +275,17 @@ export const tools = [
     name: "ateam_test_notification",
     core: true,
     description:
-      "Fire a REAL notification at an existing actor in a deployed solution — for end-to-end testing of the system-initiated notification path (telegram/push/app channels + reply routing + engagement-flip).\n\n" +
+      "Fire a REAL notification at an existing actor in a deployed solution — for end-to-end testing of the system-initiated notification path (telegram/push/app channels).\n\n" +
       "Unlike ateam_test_skill (synthetic test actor with no channels) and ateam_conversation (user-initiated thread), this calls the /api/internal/notify-user path that PCM and other sibling services use — so the actor's real enabled channels actually receive the message.\n\n" +
       "Use for:\n" +
-      "  • Routing-hook tests (does user's next reply route to the right skill given reply_handler?)\n" +
-      "  • Engagement-flip tests (does the receiver-skill's tool call flip engaged:true on the right notification?)\n" +
-      "  • Channel fan-out smoke (does telegram/push/app actually receive it?)\n\n" +
-      "⚠️ SAFETY:\n" +
+      "  • Channel fan-out smoke (does telegram/push/app actually receive it?)\n" +
+      "  • Delivery-result verification (per-channel ok/failed in the response).\n\n" +
+      "⚠️ SAFETY (v1):\n" +
       "  • The text is prefixed with [TEST] in the actual notification — visible to the user, anti-phishing.\n" +
       "  • Rate-limited: 10 calls/min per session.\n" +
       "  • Every call is audited (caller, tenant, actor, content hash) regardless of outcome.\n" +
       "  • actor_id is scoped to your tenant — cross-tenant targeting is rejected by Core.\n" +
-      "  • reply_handler is passed through unchanged (Core handles TTL). v2 will add a tenant allowlist + context schema validation; until then, only set reply_handler against skills you trust to receive arbitrary context.",
+      "  • reply_handler is INTENTIONALLY NOT SUPPORTED in v1. Routing the user's next reply to an arbitrary skill is a privilege-escalation surface (caller-supplied skill + context). v2 will add a tenant skill allowlist + context schema validation. Until then, use ateam_test_skill for routing/engagement tests.",
     inputSchema: {
       type: "object",
       properties: {
@@ -314,14 +313,6 @@ export const tools = [
         metadata: {
           type: "object",
           description: "Optional metadata merged into message.metadata. Useful for correlation IDs.",
-        },
-        reply_handler: {
-          type: "object",
-          description: "OPTIONAL — install a routing hook so the user's next reply goes to a specific skill with injected context. Shape: { skill: 'skill_id', context: { ...arbitrary } }. Common contexts: dialogueId, observationId, proposalId, candidateSpecs, patternId, mode.\n\n⚠️ This semantically hijacks the user's next reply. Only use against skills designed to receive notification replies (e.g. 'ui-companion', 'pcm-companion'). v2 will enforce a tenant allowlist.",
-          properties: {
-            skill: { type: "string", description: "Skill ID to route the next reply to." },
-            context: { type: "object", description: "Object injected into the receiving job's triggerContext." },
-          },
         },
       },
       required: ["solution_id", "actor_id", "content"],
@@ -2808,10 +2799,25 @@ const handlers = {
     return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs });
   },
 
-  ateam_test_notification: async ({ solution_id, actor_id, content, urgency, source, metadata, reply_handler }, sid) => {
+  ateam_test_notification: async ({ solution_id, actor_id, content, urgency, source, metadata, reply_handler, ...rest }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
     if (!actor_id) throw new Error("actor_id required");
     if (!content || typeof content !== "string") throw new Error("content required (string)");
+
+    // v1: reply_handler is intentionally NOT supported (privilege-escalation
+    // surface — caller could route user's next reply to any skill with
+    // arbitrary context). Reject the field rather than silently dropping it,
+    // so callers know to stop relying on it. v2 will add allowlist + schema.
+    if (reply_handler !== undefined) {
+      throw new Error("reply_handler is not supported in v1 of ateam_test_notification (security: caller-supplied skill + context = privilege escalation). v2 will add a tenant skill allowlist + context schema. For routing/engagement tests, use ateam_test_skill instead.");
+    }
+    // Defense-in-depth: also reject any unknown field that might smuggle a
+    // reply_handler via case variants or aliases.
+    for (const k of Object.keys(rest || {})) {
+      if (/reply/i.test(k) || /handler/i.test(k)) {
+        throw new Error(`Unsupported field "${k}" in ateam_test_notification (likely a reply_handler alias — see v1 safety note).`);
+      }
+    }
 
     // Rate limit: 10 calls / minute / session. In-memory; bounded leak fine
     // for a test tool. Survives until process restart, which is acceptable
@@ -2859,21 +2865,15 @@ const handlers = {
       caller_session: sid?.slice(0, 8),
       content_preview: content.slice(0, 60),
       content_hash: contentHash,
-      reply_handler_skill: reply_handler?.skill || null,
       urgency: urgency || "normal",
       at: new Date().toISOString(),
     }));
-
-    if (reply_handler) {
-      console.warn(`[ateam_test_notification] reply_handler set → next user reply will route to skill="${reply_handler.skill}" with caller-supplied context. v2 will enforce a tenant allowlist + context schema validation.`);
-    }
 
     const body = {
       actorId: actor_id,
       content: safeContent,
       urgency: urgency || "normal",
       metadata: { ...(metadata || {}), source: source || "ateam-test", _test: true },
-      ...(reply_handler ? { reply_handler } : {}),
     };
 
     const res = await fetch(`${coreUrl}/api/internal/notify-user`, {
@@ -2906,7 +2906,6 @@ const handlers = {
       notification_id: data.dispatchId || null, // alias matching the spec
       results: data.results || [],
       content_preview: safeContent.slice(0, 80),
-      ...(reply_handler && { reply_handler_armed: { skill: reply_handler.skill } }),
     };
   },
 
