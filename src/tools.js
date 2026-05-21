@@ -280,12 +280,13 @@ export const tools = [
       "Use for:\n" +
       "  • Channel fan-out smoke (does telegram/push/app actually receive it?)\n" +
       "  • Delivery-result verification (per-channel ok/failed in the response).\n\n" +
-      "⚠️ SAFETY (v1):\n" +
+      "Auth: forwards your authed api_key to Core (no master-secret involvement). Tenant is pinned by the key itself — cross-tenant targeting is structurally impossible.\n\n" +
+      "⚠️ SAFETY:\n" +
       "  • The text is prefixed with [TEST] in the actual notification — visible to the user, anti-phishing.\n" +
       "  • Rate-limited: 10 calls/min per session.\n" +
       "  • Every call is audited (caller, tenant, actor, content hash) regardless of outcome.\n" +
-      "  • actor_id is scoped to your tenant — cross-tenant targeting is rejected by Core.\n" +
-      "  • reply_handler is INTENTIONALLY NOT SUPPORTED in v1. Routing the user's next reply to an arbitrary skill is a privilege-escalation surface (caller-supplied skill + context). v2 will add a tenant skill allowlist + context schema validation. Until then, use ateam_test_skill for routing/engagement tests.",
+      "  • actor_id is scoped to your tenant — cross-tenant targeting is rejected by Core's per-tenant Mongo isolation.\n" +
+      "  • reply_handler is NOT supported via api-key auth (Core ignores it). Routing the user's next reply to an arbitrary skill is a privilege-escalation surface. For routing/engagement tests, use ateam_test_skill.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2836,18 +2837,19 @@ const handlers = {
     entry.times.push(now);
     bucket.set(sid, entry);
 
-    // Get the authed tenant — used for X-ADAS-TENANT header (Core scopes
-    // the actor lookup by tenant, so cross-tenant targeting is rejected at
-    // Core regardless of what we pass).
+    // Forward the caller's authed api_key to Core. Tenant scoping is
+    // enforced by the key itself (Core's attachActor parses the tenant out
+    // of adas_<tenant>_<hex> and pins req.tenant). This removes the need
+    // for the MCP server to hold CORE_MCP_SECRET for this tool — the
+    // caller's own credential is what authorizes the action.
     const creds = getCredentials(sid);
     const tenant = creds?.tenant;
-    if (!tenant) throw new Error("No tenant in session — call ateam_auth first.");
+    const apiKey = creds?.apiKey;
+    if (!tenant || !apiKey) {
+      throw new Error("No api_key in session — call ateam_auth(api_key: \"adas_<tenant>_<hex>\") first. ateam_test_notification requires a tenant API key (master_key auth is not supported for this tool).");
+    }
 
     const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
-    const coreSecret = process.env.CORE_MCP_SECRET;
-    if (!coreSecret) {
-      throw new Error("Server config error: CORE_MCP_SECRET not set. ateam_test_notification requires the platform shared secret (sibling-service auth). Contact platform admin.");
-    }
 
     // Force [TEST] prefix on the user-visible content. Anti-phishing rail:
     // even if a tenant admin api key were misused, the recipient sees
@@ -2880,8 +2882,8 @@ const handlers = {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-ADAS-TOKEN": coreSecret,
-        "X-ADAS-TENANT": tenant,
+        // api-key auth — tenant pinned by Core's attachActor from the key itself.
+        "x-api-key": apiKey,
         "X-ADAS-SERVICE": "ateam-mcp.test_notification",
       },
       body: JSON.stringify(body),
