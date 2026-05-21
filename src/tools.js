@@ -272,6 +272,62 @@ export const tools = [
     },
   },
   {
+    name: "ateam_test_notification",
+    core: true,
+    description:
+      "Fire a REAL notification at an existing actor in a deployed solution — for end-to-end testing of the system-initiated notification path (telegram/push/app channels + reply routing + engagement-flip).\n\n" +
+      "Unlike ateam_test_skill (synthetic test actor with no channels) and ateam_conversation (user-initiated thread), this calls the /api/internal/notify-user path that PCM and other sibling services use — so the actor's real enabled channels actually receive the message.\n\n" +
+      "Use for:\n" +
+      "  • Routing-hook tests (does user's next reply route to the right skill given reply_handler?)\n" +
+      "  • Engagement-flip tests (does the receiver-skill's tool call flip engaged:true on the right notification?)\n" +
+      "  • Channel fan-out smoke (does telegram/push/app actually receive it?)\n\n" +
+      "⚠️ SAFETY:\n" +
+      "  • The text is prefixed with [TEST] in the actual notification — visible to the user, anti-phishing.\n" +
+      "  • Rate-limited: 10 calls/min per session.\n" +
+      "  • Every call is audited (caller, tenant, actor, content hash) regardless of outcome.\n" +
+      "  • actor_id is scoped to your tenant — cross-tenant targeting is rejected by Core.\n" +
+      "  • reply_handler is passed through unchanged (Core handles TTL). v2 will add a tenant allowlist + context schema validation; until then, only set reply_handler against skills you trust to receive arbitrary context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID (required for tenant scoping + audit context).",
+        },
+        actor_id: {
+          type: "string",
+          description: "Target actor ID in your tenant (e.g. 'usr_arie_admin_0001'). Must exist; Core rejects if not found in your tenant.",
+        },
+        content: {
+          type: "string",
+          description: "Notification text. Will be sent to all of the actor's enabled channels, prefixed with [TEST] for the recipient.",
+        },
+        urgency: {
+          type: "string",
+          enum: ["low", "normal", "high"],
+          description: "Notification urgency. Default 'normal'.",
+        },
+        source: {
+          type: "string",
+          description: "Audit label for message.source. Default 'ateam-test'.",
+        },
+        metadata: {
+          type: "object",
+          description: "Optional metadata merged into message.metadata. Useful for correlation IDs.",
+        },
+        reply_handler: {
+          type: "object",
+          description: "OPTIONAL — install a routing hook so the user's next reply goes to a specific skill with injected context. Shape: { skill: 'skill_id', context: { ...arbitrary } }. Common contexts: dialogueId, observationId, proposalId, candidateSpecs, patternId, mode.\n\n⚠️ This semantically hijacks the user's next reply. Only use against skills designed to receive notification replies (e.g. 'ui-companion', 'pcm-companion'). v2 will enforce a tenant allowlist.",
+          properties: {
+            skill: { type: "string", description: "Skill ID to route the next reply to." },
+            context: { type: "object", description: "Object injected into the receiving job's triggerContext." },
+          },
+        },
+      },
+      required: ["solution_id", "actor_id", "content"],
+    },
+  },
+  {
     name: "ateam_conversation",
     core: true,
     description:
@@ -1439,6 +1495,7 @@ const TENANT_TOOLS = new Set([
   "ateam_get_execution_logs",
   "ateam_conversation",
   "ateam_test_skill",
+  "ateam_test_notification",
   "ateam_test_pipeline",
   "ateam_test_voice",
   "ateam_test_status",
@@ -2749,6 +2806,108 @@ const handlers = {
     const body = { message, ...(asyncMode ? { async: true } : {}), ...(actor_id ? { actor_id } : {}) };
     const timeoutMs = asyncMode ? 15_000 : 90_000;
     return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs });
+  },
+
+  ateam_test_notification: async ({ solution_id, actor_id, content, urgency, source, metadata, reply_handler }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    if (!actor_id) throw new Error("actor_id required");
+    if (!content || typeof content !== "string") throw new Error("content required (string)");
+
+    // Rate limit: 10 calls / minute / session. In-memory; bounded leak fine
+    // for a test tool. Survives until process restart, which is acceptable
+    // (the bound is per-session, not per-tenant).
+    const RATE_LIMIT = 10;
+    const RATE_WINDOW_MS = 60_000;
+    if (!globalThis.__notifyRateLimit) globalThis.__notifyRateLimit = new Map();
+    const bucket = globalThis.__notifyRateLimit;
+    const now = Date.now();
+    const entry = bucket.get(sid) || { times: [] };
+    entry.times = entry.times.filter(t => now - t < RATE_WINDOW_MS);
+    if (entry.times.length >= RATE_LIMIT) {
+      const waitMs = RATE_WINDOW_MS - (now - entry.times[0]);
+      throw new Error(`Rate limited: max ${RATE_LIMIT} ateam_test_notification calls per minute per session. Retry in ${Math.ceil(waitMs / 1000)}s.`);
+    }
+    entry.times.push(now);
+    bucket.set(sid, entry);
+
+    // Get the authed tenant — used for X-ADAS-TENANT header (Core scopes
+    // the actor lookup by tenant, so cross-tenant targeting is rejected at
+    // Core regardless of what we pass).
+    const creds = getCredentials(sid);
+    const tenant = creds?.tenant;
+    if (!tenant) throw new Error("No tenant in session — call ateam_auth first.");
+
+    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+    const coreSecret = process.env.CORE_MCP_SECRET;
+    if (!coreSecret) {
+      throw new Error("Server config error: CORE_MCP_SECRET not set. ateam_test_notification requires the platform shared secret (sibling-service auth). Contact platform admin.");
+    }
+
+    // Force [TEST] prefix on the user-visible content. Anti-phishing rail:
+    // even if a tenant admin api key were misused, the recipient sees
+    // [TEST] on the actual message — they can't be fooled into thinking
+    // it's a system-initiated production notification.
+    const safeContent = content.startsWith("[TEST]") ? content : `[TEST] ${content}`;
+
+    // Audit log (cheap — console). Replace with structured audit when one exists.
+    const contentHash = (await import("node:crypto")).createHash("sha256").update(content).digest("hex").slice(0, 12);
+    console.log(JSON.stringify({
+      audit: "ateam_test_notification",
+      tenant,
+      solution_id,
+      actor_id,
+      caller_session: sid?.slice(0, 8),
+      content_preview: content.slice(0, 60),
+      content_hash: contentHash,
+      reply_handler_skill: reply_handler?.skill || null,
+      urgency: urgency || "normal",
+      at: new Date().toISOString(),
+    }));
+
+    if (reply_handler) {
+      console.warn(`[ateam_test_notification] reply_handler set → next user reply will route to skill="${reply_handler.skill}" with caller-supplied context. v2 will enforce a tenant allowlist + context schema validation.`);
+    }
+
+    const body = {
+      actorId: actor_id,
+      content: safeContent,
+      urgency: urgency || "normal",
+      metadata: { ...(metadata || {}), source: source || "ateam-test", _test: true },
+      ...(reply_handler ? { reply_handler } : {}),
+    };
+
+    const res = await fetch(`${coreUrl}/api/internal/notify-user`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-ADAS-TOKEN": coreSecret,
+        "X-ADAS-TENANT": tenant,
+        "X-ADAS-SERVICE": "ateam-mcp.test_notification",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
+
+    if (!res.ok) {
+      // Surface Core's actual reason — "actor not found in tenant" is the
+      // most common (caller mistyped the actor_id), 502 = notif-router down.
+      throw new Error(`Core /api/internal/notify-user returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
+    }
+
+    return {
+      ok: true,
+      tenant,
+      actor_id,
+      dispatchId: data.dispatchId || null,
+      notification_id: data.dispatchId || null, // alias matching the spec
+      results: data.results || [],
+      content_preview: safeContent.slice(0, 80),
+      ...(reply_handler && { reply_handler_armed: { skill: reply_handler.skill } }),
+    };
   },
 
   ateam_test_pipeline: async ({ solution_id, skill_id, message }, sid) =>
