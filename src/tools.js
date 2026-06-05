@@ -241,7 +241,11 @@ export const tools = [
     name: "ateam_test_skill",
     core: true,
     description:
-      "Send a test message to a deployed skill and get the full execution result. By default waits for completion (up to 60s). Set wait=false for async mode — returns job_id immediately, then poll with ateam_test_status.",
+      "Send a test message to a deployed skill and get the execution result.\n\n" +
+      "Wait modes (wait_for):\n" +
+      "  • 'root' (default, back-compat) — wait until the message's root job completes, return single-job result. Fast, ignores any sub-skills the root delegated to via askAnySkill.\n" +
+      "  • 'chain' — wait until EVERY job in the chain (root + handoffs + askAnySkill subcalls, recursively) reaches a terminal state, then return the full chain tree. Use when testing multi-skill flows (orchestrator → workers, builders → sub-builders, etc.). The response.chain field carries chainJobs[] with parentJobId/relation/depth and executionSteps[] with tool-nesting (opId/parentOpId/_toolDepth).\n\n" +
+      "Legacy: wait:false is equivalent to wait_for:'never' — returns job_id immediately for polling via ateam_test_status. wait:true is the same as the default wait_for:'root'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -260,7 +264,18 @@ export const tools = [
         wait: {
           type: "boolean",
           description:
-            "If true (default), wait for completion. If false, return job_id immediately for polling via ateam_test_status.",
+            "Legacy: if false, return job_id immediately for polling. If true or omitted, behaves like wait_for:'root'. Prefer wait_for going forward.",
+        },
+        wait_for: {
+          type: "string",
+          enum: ["root", "chain", "never"],
+          description:
+            "What to wait for before returning. 'root' (default) = root job done; 'chain' = every chain job terminal (use for multi-skill flows); 'never' = return job_id immediately (poll via ateam_test_status). When 'chain', the response includes the chain tree under response.chain.",
+        },
+        chain_timeout_ms: {
+          type: "number",
+          description:
+            "Optional. Max total ms to wait when wait_for:'chain'. Default 300000 (5 min). Long-running chains (skill-factory, large bundle builds) may need higher. Clamped to [10000, 900000].",
         },
         actor_id: {
           type: "string",
@@ -913,7 +928,8 @@ export const tools = [
     name: "ateam_test_status",
     core: true,
     description:
-      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status (running/completed/failed), and result when done. (Advanced — use ateam_test_skill with wait=true for synchronous testing.)",
+      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status (running/completed/failed), and result when done.\n\n" +
+      "Set include_chain:true to ALSO include the full chain tree (every job in the chain, rooted at this job_id, with parent/child linkage). Use when this job dispatched askAnySkill subcalls and you want a single snapshot of the whole multi-skill state instead of polling each child job_id separately.",
     inputSchema: {
       type: "object",
       properties: {
@@ -929,8 +945,38 @@ export const tools = [
           type: "string",
           description: "The job ID returned by ateam_test_skill",
         },
+        include_chain: {
+          type: "boolean",
+          description:
+            "If true, includes response.chain — the full chain tree rooted at this job_id (chainJobs[] with parentJobId/relation/depth, executionSteps[] with tool-nesting). Costs one extra Core call. Default false (back-compat).",
+        },
       },
       required: ["solution_id", "skill_id", "job_id"],
+    },
+  },
+  {
+    name: "ateam_get_chain",
+    core: true,
+    description:
+      "Inspect the full chain tree for any job — rooted at the given job_id, walking down through every handoff and askAnySkill subcall.\n\n" +
+      "Use when a chain has already run and you want to analyze the structure: which skill called which, how deep the call tree went, which tool inside which job invoked which sub-tool. The two main shapes:\n" +
+      "  • response.chain.chainJobs[] — one entry per job in the chain. Fields: jobId, skill, status, iteration, depth (0 = root, +1 per askAnySkill subcall hop), relation ('root' | 'subcall' | 'handoff'), parentJobId, parentSkill, goal.\n" +
+      "  • response.chain.executionSteps[] — every tool call across all chain jobs, tagged with _skill, _jobId, _depth (= job depth), _relation, _parentSkill, _parentJobId, _toolDepth (tool-in-tool nesting via opId/parentOpId).\n\n" +
+      "Differs from ateam_test_status by purpose: status is for live polling of a job you just kicked off; get_chain is for post-hoc tree analysis (debugging multi-skill flows, regression testing, comparing two runs).\n\n" +
+      "Auth: forwards your authed api_key. Tenant scoped by the key itself. Actor scoping: you can only inspect chains rooted at jobs your actor has access to.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: {
+          type: "string",
+          description: "The root job ID of the chain to inspect (or any job inside the chain — Core walks up to the root).",
+        },
+        skill_slug: {
+          type: "string",
+          description: "Optional. The skill slug for the job — speeds up the lookup when the job isn't in memory and must be loaded from storage. Omit if you don't have it; lookup still works but does an extra round-trip.",
+        },
+      },
+      required: ["job_id"],
     },
   },
   {
@@ -1492,6 +1538,7 @@ const TENANT_TOOLS = new Set([
   "ateam_test_voice",
   "ateam_test_status",
   "ateam_test_abort",
+  "ateam_get_chain",
   "ateam_get_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
@@ -2793,11 +2840,77 @@ const handlers = {
     return post(`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs });
   },
 
-  ateam_test_skill: async ({ solution_id, skill_id, message, wait, actor_id }, sid) => {
-    const asyncMode = wait === false;
-    const body = { message, ...(asyncMode ? { async: true } : {}), ...(actor_id ? { actor_id } : {}) };
-    const timeoutMs = asyncMode ? 15_000 : 90_000;
-    return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs });
+  ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id }, sid) => {
+    // Resolve wait mode. Priority: wait_for (new explicit form) > wait (legacy).
+    // wait:false  → "never"   (return job_id, no polling)
+    // wait:true   → "root"    (poll root job to completion — current default)
+    // wait_for set → use as-is (may also be "chain")
+    let resolvedWait = wait_for || (wait === false ? "never" : "root");
+    if (!["root", "chain", "never"].includes(resolvedWait)) {
+      throw new Error(`Invalid wait_for: ${JSON.stringify(resolvedWait)}. Must be "root", "chain", or "never".`);
+    }
+
+    // Kick off the test (always async on the wire so the Builder doesn't time
+    // out on long-running chains). When wait_for:"root" we then poll the
+    // single-job status; when wait_for:"chain" we poll the chain tree until
+    // every job is terminal; when wait_for:"never" we return the job_id and
+    // caller polls themselves.
+    const isWireAsync = resolvedWait !== "root";
+    const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}) };
+    const kickoffTimeoutMs = isWireAsync ? 15_000 : 90_000;
+    const kickoff = await post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs: kickoffTimeoutMs });
+
+    if (resolvedWait === "never" || resolvedWait === "root") {
+      // Back-compat path: kickoff response is the same shape callers see today.
+      return kickoff;
+    }
+
+    // wait_for:"chain" — poll the chain tree until every job is terminal.
+    const rootJobId = kickoff?.job_id || kickoff?.jobId;
+    if (!rootJobId) {
+      // Builder returned no job_id — surface kickoff so caller can debug.
+      return { ok: false, error: "ateam_test_skill (wait_for:'chain'): kickoff response has no job_id", kickoff };
+    }
+
+    const POLL_MIN_MS = 10_000;
+    const POLL_MAX_MS = 900_000;
+    const totalTimeoutMs = Math.min(POLL_MAX_MS, Math.max(POLL_MIN_MS, Number(chain_timeout_ms) || 300_000));
+    const POLL_INTERVAL_MS = 2_000;
+    const startedAt = Date.now();
+
+    const creds = getCredentials(sid);
+    const apiKey = creds?.apiKey;
+    if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
+    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+
+    const isTerminal = (status) => status === "done" || status === "completed" || status === "error" || status === "failed" || status === "aborted";
+
+    let lastChain = null;
+    while (Date.now() - startedAt < totalTimeoutMs) {
+      const qs = new URLSearchParams();
+      qs.set("skillSlug", skill_id);
+      const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(rootJobId)}/chain?${qs}`, {
+        method: "GET",
+        headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.test_skill_chain" },
+        signal: AbortSignal.timeout(15_000),
+      }).catch(err => ({ ok: false, _err: err.message }));
+      const data = res.ok === false && res._err ? { ok: false, error: res._err } : await res.json().catch(() => ({ ok: false, error: "non-json chain response" }));
+      lastChain = data;
+      const jobs = Array.isArray(data?.chainJobsList) ? data.chainJobsList : Array.isArray(data?.chainJobs) ? data.chainJobs : null;
+      if (jobs && jobs.length > 0 && jobs.every(j => isTerminal(j.status))) {
+        return { ok: true, job_id: rootJobId, wait_for: "chain", chain: data, kickoff, elapsed_ms: Date.now() - startedAt };
+      }
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    }
+    return {
+      ok: false,
+      error: `Chain wait timed out after ${totalTimeoutMs}ms — some jobs are still running. Increase chain_timeout_ms or poll manually via ateam_test_status(include_chain:true).`,
+      job_id: rootJobId,
+      wait_for: "chain",
+      chain: lastChain,
+      kickoff,
+      elapsed_ms: Date.now() - startedAt,
+    };
   },
 
   ateam_test_notification: async ({ solution_id, actor_id, content, urgency, source, metadata, reply_handler, ...rest }, sid) => {
@@ -2925,8 +3038,49 @@ const handlers = {
     return post(`/deploy/voice-test`, body, sid, { timeoutMs: timeoutTotal });
   },
 
-  ateam_test_status: async ({ solution_id, skill_id, job_id }, sid) =>
-    get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
+  ateam_test_status: async ({ solution_id, skill_id, job_id, include_chain }, sid) => {
+    // Existing single-job snapshot via Builder (unchanged shape for back-compat).
+    const single = await get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
+    if (!include_chain) return single;
+
+    // Caller asked for the chain tree too. Fetch via Core's /api/job/:id/chain
+    // and merge under response.chain. Single-job fields stay at the top level.
+    const creds = getCredentials(sid);
+    const apiKey = creds?.apiKey;
+    if (!apiKey) return { ...single, chain: { ok: false, error: "include_chain requires api-key auth (call ateam_auth)" } };
+    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+    const qs = new URLSearchParams();
+    if (skill_id) qs.set("skillSlug", skill_id);
+    const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(job_id)}/chain?${qs}`, {
+      method: "GET",
+      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.test_status_chain" },
+      signal: AbortSignal.timeout(15_000),
+    }).catch(err => ({ ok: false, _err: err.message }));
+    const chain = res.ok === false && res._err ? { ok: false, error: res._err } : await res.json().catch(() => ({ ok: false, error: "non-json chain response" }));
+    return { ...single, chain };
+  },
+
+  ateam_get_chain: async ({ job_id, skill_slug }, sid) => {
+    if (!job_id) throw new Error("job_id required");
+    const creds = getCredentials(sid);
+    const apiKey = creds?.apiKey;
+    if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
+    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+    const qs = new URLSearchParams();
+    if (skill_slug) qs.set("skillSlug", skill_slug);
+    const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(job_id)}/chain?${qs}`, {
+      method: "GET",
+      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.get_chain" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
+    if (!res.ok) {
+      throw new Error(`Core /api/job/${job_id}/chain returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
+    }
+    return data;
+  },
 
   ateam_test_abort: async ({ solution_id, skill_id, job_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
