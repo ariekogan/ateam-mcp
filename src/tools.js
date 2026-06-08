@@ -676,7 +676,15 @@ export const tools = [
       "Upload connector code to Core and restart — WITHOUT redeploying skills. " +
       "Use this to update connector source code (server.js, UI assets, plugins) quickly. " +
       "Set github=true to pull files from the solution's GitHub repo, or pass files directly. " +
-      "Much faster than ateam_build_and_run for connector-only changes.",
+      "Much faster than ateam_build_and_run for connector-only changes.\n\n" +
+      "⚠️ REPLACE, NOT MERGE: this overwrites the ENTIRE connector directory. Any file you do not " +
+      "include is DELETED — omit ui-dist/ and the UI plugins 404 with {\"error\":\"Not found\"}; omit " +
+      "src/ and the connector won't start. When passing `files`, send the WHOLE connector (every " +
+      "source file AND every ui-dist asset), not just what you changed. (node_modules survives only " +
+      "because npm install re-runs on restart — that is NOT a merge.)\n" +
+      "⚠️ github=true reads the `main` branch, NOT `dev`. A change that's only on dev will deploy " +
+      "STALE. Either promote first (ateam_github_promote dev→main) then github=true, or pass `files` " +
+      "directly for a dev-only deploy.",
     inputSchema: {
       type: "object",
       properties: {
@@ -690,7 +698,7 @@ export const tools = [
         },
         github: {
           type: "boolean",
-          description: "If true, pull connector files from GitHub repo. Default: false.",
+          description: "If true, pull the FULL connector from GitHub and replace the deployed dir. Reads the `main` branch (NOT dev) — promote dev→main first or it deploys stale code. Default: false.",
         },
         files: {
           type: "array",
@@ -702,7 +710,7 @@ export const tools = [
             },
             required: ["path", "content"],
           },
-          description: "Files to upload. Alternative to github=true.",
+          description: "Files to upload. Alternative to github=true. REPLACES the whole connector dir — include EVERY file (all source + all ui-dist assets), not just the ones you changed; any file omitted here is deleted from the deployment.",
         },
       },
       required: ["solution_id", "connector_id"],
@@ -820,7 +828,8 @@ export const tools = [
     name: "ateam_upload_connector_files",
     core: false,
     description:
-      "Upload source files for a connector's MCP server. Use this INSTEAD of mcp_store in ateam_build_and_run when the source code is too large to inline. Upload files first, then build_and_run without mcp_store. (Advanced.)",
+      "Upload source files for a connector's MCP server. Use this INSTEAD of mcp_store in ateam_build_and_run when the source code is too large to inline. Upload files first, then build_and_run without mcp_store. (Advanced.)\n\n" +
+      "⚠️ STAGES ONLY — these files are saved for your NEXT solution deploy; they do NOT update the running connector (the response says \"staged for next deploy\"). To push connector code to the LIVE runtime and restart it immediately, use ateam_upload_connector (which replaces the whole connector dir).",
     inputSchema: {
       type: "object",
       properties: {
