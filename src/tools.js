@@ -673,10 +673,16 @@ export const tools = [
     name: "ateam_upload_connector",
     core: true,
     description:
-      "Upload connector code to Core and restart — WITHOUT redeploying skills. " +
-      "Use this to update connector source code (server.js, UI assets, plugins) quickly. " +
-      "Set github=true to pull files from the solution's GitHub repo, or pass files directly. " +
-      "Much faster than ateam_build_and_run for connector-only changes.",
+      "Upload connector code to Core and restart — WITHOUT redeploying skills.\n\n" +
+      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved from GitHub. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
+      "Modes:\n" +
+      "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
+      "  • github:true + files:[]        — GitHub state at `ref` as BASE, your files overlay on top (incoming wins).\n" +
+      "  • files:[] (no github)          — default MERGE with GitHub state at `ref`. Refuses if no GitHub base exists (no silent nuke).\n" +
+      "  • files:[] + replace:true       — full replace. Wipes connector dir + writes only the provided files. Use deliberately.\n\n" +
+      "Common traps this design prevents:\n" +
+      "  • Pre-fix bug (2026-06-06): sending just ui-dist HTML wiped server.js + node_modules — connector broke until a full re-upload. Now: those files merge with the GitHub base.\n" +
+      "  • Pre-fix bug: github:true silently read from `main` even when patches were on `dev`. Now: defaults to dev; pass ref:'main' to opt into the legacy path.",
     inputSchema: {
       type: "object",
       properties: {
@@ -690,7 +696,11 @@ export const tools = [
         },
         github: {
           type: "boolean",
-          description: "If true, pull connector files from GitHub repo. Default: false.",
+          description: "If true, pull connector files from GitHub repo at `ref`. Default: false. Combine with files:[] to use GitHub as the base and overlay your files.",
+        },
+        ref: {
+          type: "string",
+          description: "GitHub branch to read from for the BASE state. Default: 'dev' (matches ateam_github_patch). Pass 'main' to read from production. Pre-2026-06-05 callers that relied on the silent-main default must pass ref:'main' explicitly.",
         },
         files: {
           type: "array",
@@ -702,7 +712,11 @@ export const tools = [
             },
             required: ["path", "content"],
           },
-          description: "Files to upload. Alternative to github=true.",
+          description: "Files to upload. By default merges with the GitHub state at `ref`. Set replace:true to wipe the connector dir and write only these files.",
+        },
+        replace: {
+          type: "boolean",
+          description: "Opt into FULL REPLACE: wipe the connector dir and write only the provided `files`. Default: false (= merge with GitHub state at `ref`). Use with intent — sending an incomplete file set with replace:true will break the connector.",
         },
       },
       required: ["solution_id", "connector_id"],
@@ -3240,10 +3254,15 @@ const handlers = {
   ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
 
-  ateam_upload_connector: async ({ solution_id, connector_id, github, files }, sid) =>
+  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace }, sid) =>
     post(
       `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
-      { github, files },
+      {
+        github,
+        files,
+        ...(ref ? { ref } : {}),
+        ...(replace === true ? { replace: true } : {}),
+      },
       sid,
       { timeoutMs: 300_000, retries: 1 },
     ),
