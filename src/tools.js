@@ -673,18 +673,16 @@ export const tools = [
     name: "ateam_upload_connector",
     core: true,
     description:
-      "Upload connector code to Core and restart — WITHOUT redeploying skills. " +
-      "Use this to update connector source code (server.js, UI assets, plugins) quickly. " +
-      "Set github=true to pull files from the solution's GitHub repo, or pass files directly. " +
-      "Much faster than ateam_build_and_run for connector-only changes.\n\n" +
-      "⚠️ REPLACE, NOT MERGE: this overwrites the ENTIRE connector directory. Any file you do not " +
-      "include is DELETED — omit ui-dist/ and the UI plugins 404 with {\"error\":\"Not found\"}; omit " +
-      "src/ and the connector won't start. When passing `files`, send the WHOLE connector (every " +
-      "source file AND every ui-dist asset), not just what you changed. (node_modules survives only " +
-      "because npm install re-runs on restart — that is NOT a merge.)\n" +
-      "⚠️ github=true reads the `main` branch, NOT `dev`. A change that's only on dev will deploy " +
-      "STALE. Either promote first (ateam_github_promote dev→main) then github=true, or pass `files` " +
-      "directly for a dev-only deploy.",
+      "Upload connector code to Core and restart — WITHOUT redeploying skills.\n\n" +
+      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved from GitHub. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
+      "Modes:\n" +
+      "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
+      "  • github:true + files:[]        — GitHub state at `ref` as BASE, your files overlay on top (incoming wins).\n" +
+      "  • files:[] (no github)          — default MERGE with GitHub state at `ref`. Refuses if no GitHub base exists (no silent nuke).\n" +
+      "  • files:[] + replace:true       — full replace. Wipes connector dir + writes only the provided files. Use deliberately.\n\n" +
+      "Common traps this design prevents:\n" +
+      "  • Pre-fix bug (2026-06-06): sending just ui-dist HTML wiped server.js + node_modules — connector broke until a full re-upload. Now: those files merge with the GitHub base.\n" +
+      "  • Pre-fix bug: github:true silently read from `main` even when patches were on `dev`. Now: defaults to dev; pass ref:'main' to opt into the legacy path.",
     inputSchema: {
       type: "object",
       properties: {
@@ -698,7 +696,11 @@ export const tools = [
         },
         github: {
           type: "boolean",
-          description: "If true, pull the FULL connector from GitHub and replace the deployed dir. Reads the `main` branch (NOT dev) — promote dev→main first or it deploys stale code. Default: false.",
+          description: "If true, pull connector files from GitHub repo at `ref`. Default: false. Combine with files:[] to use GitHub as the base and overlay your files.",
+        },
+        ref: {
+          type: "string",
+          description: "GitHub branch to read from for the BASE state. Default: 'dev' (matches ateam_github_patch). Pass 'main' to read from production. Pre-2026-06-05 callers that relied on the silent-main default must pass ref:'main' explicitly.",
         },
         files: {
           type: "array",
@@ -710,7 +712,11 @@ export const tools = [
             },
             required: ["path", "content"],
           },
-          description: "Files to upload. Alternative to github=true. REPLACES the whole connector dir — include EVERY file (all source + all ui-dist assets), not just the ones you changed; any file omitted here is deleted from the deployment.",
+          description: "Files to upload. By default merges with the GitHub state at `ref`. Set replace:true to wipe the connector dir and write only these files.",
+        },
+        replace: {
+          type: "boolean",
+          description: "Opt into FULL REPLACE: wipe the connector dir and write only the provided `files`. Default: false (= merge with GitHub state at `ref`). Use with intent — sending an incomplete file set with replace:true will break the connector.",
         },
       },
       required: ["solution_id", "connector_id"],
@@ -828,8 +834,7 @@ export const tools = [
     name: "ateam_upload_connector_files",
     core: false,
     description:
-      "Upload source files for a connector's MCP server. Use this INSTEAD of mcp_store in ateam_build_and_run when the source code is too large to inline. Upload files first, then build_and_run without mcp_store. (Advanced.)\n\n" +
-      "⚠️ STAGES ONLY — these files are saved for your NEXT solution deploy; they do NOT update the running connector (the response says \"staged for next deploy\"). To push connector code to the LIVE runtime and restart it immediately, use ateam_upload_connector (which replaces the whole connector dir).",
+      "Upload source files for a connector's MCP server. Use this INSTEAD of mcp_store in ateam_build_and_run when the source code is too large to inline. Upload files first, then build_and_run without mcp_store. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -3249,10 +3254,15 @@ const handlers = {
   ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
 
-  ateam_upload_connector: async ({ solution_id, connector_id, github, files }, sid) =>
+  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace }, sid) =>
     post(
       `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
-      { github, files },
+      {
+        github,
+        files,
+        ...(ref ? { ref } : {}),
+        ...(replace === true ? { replace: true } : {}),
+      },
       sid,
       { timeoutMs: 300_000, retries: 1 },
     ),
