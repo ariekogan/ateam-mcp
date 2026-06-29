@@ -3138,19 +3138,16 @@ const handlers = {
     return data;
   },
 
-  ateam_get_widget_catalog: async ({ solution_id, origin, include_unused, format }, sid) => {
+  ateam_get_widget_catalog: async ({ origin, format }, sid) => {
+    // Wraps Core's existing GET /api/ui-plugins (merged tenant plugin list)
+    // and enriches each entry with the documentation/how-to-use layer.
+    // Filtering by origin and the summary/full format projection happen
+    // client-side here — Core just returns the raw merged plugins[].
     const creds = getCredentials(sid);
     const apiKey = creds?.apiKey;
     if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
     const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
-    const qs = new URLSearchParams();
-    if (solution_id) qs.set("solution_id", solution_id);
-    if (origin) qs.set("origin", origin);
-    if (include_unused === true) qs.set("include_unused", "true");
-    if (format) qs.set("format", format);
-    const qsStr = qs.toString();
-    const url = `${coreUrl}/api/platform/widget-catalog${qsStr ? `?${qsStr}` : ""}`;
-    const res = await fetch(url, {
+    const res = await fetch(`${coreUrl}/api/ui-plugins`, {
       method: "GET",
       headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.get_widget_catalog" },
       signal: AbortSignal.timeout(15_000),
@@ -3159,9 +3156,64 @@ const handlers = {
     let data;
     try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
     if (!res.ok) {
-      throw new Error(`Core /api/platform/widget-catalog returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
+      throw new Error(`Core /api/ui-plugins returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
     }
-    return data;
+
+    // Project each plugin into the catalog shape with how_to_use guidance.
+    const plugins = Array.isArray(data?.plugins) ? data.plugins : [];
+    const wantSummary = format === "summary";
+    const filterOrigin = origin && origin !== "all" ? origin : null;
+
+    const widgets = plugins.map((p) => {
+      const id = p?.id || "";
+      const shortId = id.split(":").pop() || id;
+      // origin classification: platform vs solution vs skill
+      const src = p?._source || "";
+      const inferredOrigin = src === "mcp_introspection" ? "platform"
+        : src === "skill_declared" ? "skill"
+        : "solution";
+      const opener = Array.isArray(p?.capabilities?.commands) && p.capabilities.commands.length > 0
+        ? `ui.${shortId}.${p.capabilities.commands[0].name || "open"}({ /* args per input_schema */ })`
+        : `sys.focusUiPlugin({ plugin_id: "${id}" })`;
+      const entry = {
+        id,
+        name: p?.name,
+        version: p?.version,
+        description: p?.description,
+        type: p?.type || "ui",
+        origin: inferredOrigin,
+        owned_by_connector: p?._connector_id,
+        render: p?.render,
+        surface: p?.surface,
+        capabilities: p?.capabilities,
+        channels: p?.channels,
+        commands: p?.capabilities?.commands || p?.commands || [],
+        uiActions: p?.uiActions,
+      };
+      if (!wantSummary) {
+        entry.how_to_use = {
+          solution_json_snippet: { id, name: p?.name, version: p?.version, render: p?.render },
+          opener_call: opener,
+          persona_phrasing: `When the user wants to view ${(p?.description || p?.name || shortId).toString().toLowerCase()}, call ${opener.split("(")[0]}.`,
+          binding_notes: {
+            commands_input_schemas: (p?.capabilities?.commands || []).map(c => ({ command: c.name, schema: c.input_schema })),
+            deeplink_template: p?.uiActions?.deeplink || null,
+            view_entity_kinds: p?.uiActions?.intents?.view_entity?.entity_kinds || null,
+            host_auto_routes_intents: Object.keys(p?.uiActions?.intents || {}),
+          },
+        };
+      }
+      return entry;
+    });
+
+    const filtered = filterOrigin ? widgets.filter(w => w.origin === filterOrigin) : widgets;
+    const counts = {
+      total: filtered.length,
+      platform: filtered.filter(w => w.origin === "platform").length,
+      solution: filtered.filter(w => w.origin === "solution").length,
+      skill: filtered.filter(w => w.origin === "skill").length,
+    };
+    return { ok: true, generated_at: new Date().toISOString(), counts, widgets: filtered };
   },
 
   ateam_test_abort: async ({ solution_id, skill_id, job_id }, sid) =>
