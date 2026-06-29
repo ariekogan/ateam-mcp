@@ -131,15 +131,15 @@ export const tools = [
     name: "ateam_get_spec",
     core: true,
     description:
-      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.",
+      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.\n\nWhen wiring widgets (UI plugins) into a solution, fetch topic='widgets' — that returns the widget spec (catalog model, how_to_use blocks, opener_call shape, persona phrasing rules, binding semantics) so you can declare `ui_plugins` correctly. For the live catalog of widgets actually available in a deployed tenant, use ateam_get_widget_catalog instead.",
     inputSchema: {
       type: "object",
       properties: {
         topic: {
           type: "string",
-          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers"],
+          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets"],
           description:
-            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler).",
+            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory.",
         },
         section: {
           type: "string",
@@ -994,6 +994,45 @@ export const tools = [
     },
   },
   {
+    name: "ateam_get_widget_catalog",
+    core: true,
+    description:
+      "Get the live catalog of widgets (UI plugins) available in this tenant's solution. Returns platform-bundled + solution-bundled + skill-declared widgets, each with a paste-ready how_to_use block (solution.json snippet + opener_call + persona_phrasing + binding_notes).\n\n" +
+      "Use this when wiring widgets into a skill or solution — the how_to_use block is designed to be copied verbatim into the solution.json ui_plugins[] entry and into the persona's opener phrasing, so you don't have to hand-roll either. The catalog reflects what is actually deployed in the tenant right now, not the abstract spec (for the spec itself, use ateam_get_spec topic='widgets').\n\n" +
+      "Origins:\n" +
+      "  • 'platform' = widgets bundled with the platform (always available).\n" +
+      "  • 'solution' = widgets bundled with this tenant's solution.\n" +
+      "  • 'skill' = widgets declared by a specific skill in the solution.\n\n" +
+      "Auth: forwards your authed api_key to Core (no master-secret involvement). Tenant scope is pinned by the key itself.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "Optional. The solution to query. Defaults to the tenant's current solution.",
+        },
+        origin: {
+          type: "string",
+          enum: ["all", "platform", "solution", "skill"],
+          description:
+            "Optional. Filter by widget origin. 'all' (default) returns everything. 'platform' = platform-bundled only. 'solution' = solution-bundled only. 'skill' = skill-declared only.",
+        },
+        include_unused: {
+          type: "boolean",
+          description:
+            "Optional. If true, includes widgets that are available but not currently referenced by any skill or ui_plugins entry. Default false (only widgets actually wired into the solution).",
+        },
+        format: {
+          type: "string",
+          enum: ["summary", "full"],
+          description:
+            "Optional. 'full' (default) returns each widget with its paste-ready how_to_use block (solution.json snippet, opener_call, persona_phrasing, binding_notes). 'summary' returns just id/name/origin/description for a quick overview.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "ateam_test_abort",
     core: true,
     description:
@@ -1512,6 +1551,7 @@ const SPEC_PATHS = {
   enums: "/spec/enums",
   "connector-multi-user": "/spec/multi-user-connector",
   python_helpers: "/spec/python_helpers",
+  widgets: "/spec/widgets",
 };
 
 const EXAMPLE_PATHS = {
@@ -1554,6 +1594,7 @@ const TENANT_TOOLS = new Set([
   "ateam_test_status",
   "ateam_test_abort",
   "ateam_get_chain",
+  "ateam_get_widget_catalog",
   "ateam_get_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
@@ -3095,6 +3136,84 @@ const handlers = {
       throw new Error(`Core /api/job/${job_id}/chain returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
     }
     return data;
+  },
+
+  ateam_get_widget_catalog: async ({ origin, format }, sid) => {
+    // Wraps Core's existing GET /api/ui-plugins (merged tenant plugin list)
+    // and enriches each entry with the documentation/how-to-use layer.
+    // Filtering by origin and the summary/full format projection happen
+    // client-side here — Core just returns the raw merged plugins[].
+    const creds = getCredentials(sid);
+    const apiKey = creds?.apiKey;
+    if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
+    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+    const res = await fetch(`${coreUrl}/api/ui-plugins`, {
+      method: "GET",
+      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.get_widget_catalog" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
+    if (!res.ok) {
+      throw new Error(`Core /api/ui-plugins returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
+    }
+
+    // Project each plugin into the catalog shape with how_to_use guidance.
+    const plugins = Array.isArray(data?.plugins) ? data.plugins : [];
+    const wantSummary = format === "summary";
+    const filterOrigin = origin && origin !== "all" ? origin : null;
+
+    const widgets = plugins.map((p) => {
+      const id = p?.id || "";
+      const shortId = id.split(":").pop() || id;
+      // origin classification: platform vs solution vs skill
+      const src = p?._source || "";
+      const inferredOrigin = src === "mcp_introspection" ? "platform"
+        : src === "skill_declared" ? "skill"
+        : "solution";
+      const opener = Array.isArray(p?.capabilities?.commands) && p.capabilities.commands.length > 0
+        ? `ui.${shortId}.${p.capabilities.commands[0].name || "open"}({ /* args per input_schema */ })`
+        : `sys.focusUiPlugin({ plugin_id: "${id}" })`;
+      const entry = {
+        id,
+        name: p?.name,
+        version: p?.version,
+        description: p?.description,
+        type: p?.type || "ui",
+        origin: inferredOrigin,
+        owned_by_connector: p?._connector_id,
+        render: p?.render,
+        surface: p?.surface,
+        capabilities: p?.capabilities,
+        channels: p?.channels,
+        commands: p?.capabilities?.commands || p?.commands || [],
+        uiActions: p?.uiActions,
+      };
+      if (!wantSummary) {
+        entry.how_to_use = {
+          solution_json_snippet: { id, name: p?.name, version: p?.version, render: p?.render },
+          opener_call: opener,
+          persona_phrasing: `When the user wants to view ${(p?.description || p?.name || shortId).toString().toLowerCase()}, call ${opener.split("(")[0]}.`,
+          binding_notes: {
+            commands_input_schemas: (p?.capabilities?.commands || []).map(c => ({ command: c.name, schema: c.input_schema })),
+            deeplink_template: p?.uiActions?.deeplink || null,
+            view_entity_kinds: p?.uiActions?.intents?.view_entity?.entity_kinds || null,
+            host_auto_routes_intents: Object.keys(p?.uiActions?.intents || {}),
+          },
+        };
+      }
+      return entry;
+    });
+
+    const filtered = filterOrigin ? widgets.filter(w => w.origin === filterOrigin) : widgets;
+    const counts = {
+      total: filtered.length,
+      platform: filtered.filter(w => w.origin === "platform").length,
+      solution: filtered.filter(w => w.origin === "solution").length,
+      skill: filtered.filter(w => w.origin === "skill").length,
+    };
+    return { ok: true, generated_at: new Date().toISOString(), counts, widgets: filtered };
   },
 
   ateam_test_abort: async ({ solution_id, skill_id, job_id }, sid) =>
