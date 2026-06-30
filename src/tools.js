@@ -2569,7 +2569,7 @@ const handlers = {
           role: { name: "", persona: "", goals: [], limitations: [], communication_style: { tone: "professional", verbosity: "concise" } },
           intents: { supported: [], thresholds: { accept: 0.8, clarify: 0.5, reject: 0.5 }, out_of_domain: { action: "redirect", message: "" } },
           tools: [],
-          policy: { guardrails: { never: [], always: [] }, approvals: [], workflows: [], escalation: { enabled: false, conditions: [], target: "" } },
+          policy: { access: { requires_roles: [] }, guardrails: { never: [], always: [] }, approvals: [], workflows: [], escalation: { enabled: false, conditions: [], target: "" } },
           engine: { rv2: { max_iterations: 10, iteration_timeout_ms: 120000, allow_parallel_tools: false, on_max_iterations: "ask_user" }, hlr: { enabled: true, critic: { enabled: true, check_interval: 3, strictness: "medium" }, reflection: { enabled: true, depth: "shallow" }, replanning: { enabled: true, max_replans: 3 } }, autonomy: { level: "supervised" }, finalization_gate: { enabled: true, max_retries: 2 } },
           access_policy: { rules: [{ tools: ["*"], effect: "allow" }] },
           grant_mappings: [],
