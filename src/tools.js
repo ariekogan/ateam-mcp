@@ -83,6 +83,89 @@ function _resolveDottedField(obj, dottedPath) {
   return { parent, leaf: parts[parts.length - 1] };
 }
 
+// ─── Protected array fields (v0.4.0 sibling-loss guard) ─────────────
+//
+// Historically, `ateam_patch(target:"solution", updates:{ linked_skills:["only-one"] })`
+// silently REPLACED the whole linked_skills array — wiping every other
+// skill wired into the solution. Same footgun on ui_plugins, handoffs,
+// grants, connectors, etc. The Solution Builder skill hit this in the
+// wild and wiped a tenant's whole solution.
+//
+// From v0.4.0, ateam_patch REFUSES a bare array-replace on any of these
+// fields unless the caller explicitly opts in via one of:
+//   updates: { _replace: true, linked_skills: [...] }        // object-level
+//   updates: { linked_skills: [...], linked_skills_replace: true } // field-level
+// To ADD or REMOVE without opt-in, use the _push / _delete / _update
+// suffix pattern that has always been the correct form.
+const SOLUTION_ARRAY_FIELDS = new Set([
+  'linked_skills',
+  'ui_plugins',
+  'platform_connectors',
+  'handoffs',
+  'grants',
+  'triggers',
+  'notification_routes',
+  'channels',
+  'actor_types',
+  'admin_roles',
+  'plugins',
+  'security_contracts',
+  'connectors',
+  'skills',
+]);
+
+const SKILL_ARRAY_FIELDS = new Set([
+  'tools',
+  'connectors',
+  'handoffs',
+  'scenarios',
+  'triggers',
+  'notification_routes',
+  'plugins',
+  'bootstrap_tools',
+]);
+
+// Returns { ok:false, ... } if the write would REPLACE a protected array
+// without an explicit opt-in; returns null if the write is safe to proceed.
+function _guardArrayReplace({ target, key, value, current, updates }) {
+  const knownFields = target === 'skill' ? SKILL_ARRAY_FIELDS : SOLUTION_ARRAY_FIELDS;
+  if (!knownFields.has(key)) return null;
+  if (!Array.isArray(value)) return null;
+  const currentArr = Array.isArray(current) ? current : [];
+  if (currentArr.length === 0) return null; // nothing to lose
+  if (updates && updates._replace === true) return null;
+  if (updates && updates[key + '_replace'] === true) return null;
+
+  // Compute what would be dropped so the error message is actionable.
+  const keyOf = (item) => (item && typeof item === 'object') ? (item.id ?? item.name ?? JSON.stringify(item)) : item;
+  const newKeys = new Set(value.map(keyOf));
+  const dropped = currentArr.map(keyOf).filter(k => !newKeys.has(k));
+  const kept = currentArr.map(keyOf).filter(k => newKeys.has(k));
+  const wouldAdd = value.map(keyOf).filter(k => !currentArr.map(keyOf).includes(k));
+
+  return {
+    ok: false,
+    phase: 'patch',
+    error:
+      `⚠️ REFUSED: bare-array replace on ${target}.${key} would drop ${dropped.length} sibling item(s): ` +
+      `[${dropped.slice(0, 8).join(', ')}${dropped.length > 8 ? ', ...' : ''}]. ` +
+      `This footgun wiped a whole solution in the wild — v0.4.0 refuses it by default. ` +
+      `\n\nWhat to do instead:` +
+      `\n  • To ADD items: updates: { "${key}_push": ${JSON.stringify(wouldAdd)} }` +
+      (dropped.length ? `\n  • To REMOVE items: updates: { "${key}_delete": ${JSON.stringify(dropped)} }` : '') +
+      `\n  • To FULLY REPLACE (rare): updates: { "${key}": [...], "${key}_replace": true }` +
+      `\n  • To replace many arrays in one call: updates: { _replace: true, "${key}": [...] }`,
+    dropped_ids: dropped,
+    kept_ids: kept,
+    would_add: wouldAdd,
+    safe_alternatives: {
+      push: { [`${key}_push`]: wouldAdd },
+      ...(dropped.length && { delete: { [`${key}_delete`]: dropped } }),
+      force_replace: { [key]: value, [`${key}_replace`]: true },
+    },
+  };
+}
+
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -428,24 +511,27 @@ export const tools = [
     core: true,
     description:
       "Surgically update ANY field in a skill or solution definition, redeploy, and optionally re-test — all in one step.\n\n" +
-      "SUPPORTED OPERATIONS:\n" +
+      "⚠️ MERGE-BY-DEFAULT (v0.4.0) — Arrays are protected from silent replace. Bare array writes on solution.linked_skills / ui_plugins / platform_connectors / handoffs / grants / triggers (etc.) and skill.tools / connectors / handoffs / scenarios are REFUSED to prevent sibling loss. Add or remove items with the _push / _delete / _update suffixes; opt into a full-array replace only when you really mean it.\n\n" +
+      "OPERATIONS (safe by construction):\n" +
       "1. Scalar (dot notation): { \"problem.statement\": \"new value\", \"role.persona\": \"You are...\" }\n" +
       "2. Deep nested: { \"intents.thresholds.accept\": 0.9, \"policy.escalation.enabled\": true }\n" +
-      "3. Array push: { \"tools_push\": [{ name: \"new_tool\", description: \"...\" }] }\n" +
-      "4. Array delete: { \"tools_delete\": [\"tool_name\"] }\n" +
-      "5. Array update: { \"tools_update\": [{ name: \"existing_tool\", description: \"updated\" }] }\n" +
-      "6. Replace whole section: { \"role\": { persona: \"...\", goals: [...] } }\n\n" +
-      "EXAMPLES:\n" +
-      "- Change persona (full replace): updates: { \"role.persona\": \"You are a friendly assistant\" }\n" +
-      "- Append to persona (don't replace): updates: { \"persona_append\": \"\\n\\nALWAYS respond in 2 sentences.\" }\n" +
+      "3. Array APPEND: { \"tools_push\": [{ name: \"new_tool\", description: \"...\" }] }\n" +
+      "4. Array REMOVE: { \"tools_delete\": [\"tool_name\"] }\n" +
+      "5. Array MODIFY-ONE: { \"tools_update\": [{ name: \"existing_tool\", description: \"updated\" }] }\n" +
+      "6. Full-array REPLACE (opt-in): { \"linked_skills\": [...], \"linked_skills_replace\": true } — or { _replace: true, ... } to opt every array in this call.\n\n" +
+      "SOLUTION-LEVEL EXAMPLES (target='solution'):\n" +
+      "- ADD a skill to the solution: updates: { \"linked_skills_push\": [\"my-new-skill\"] } ← NOT { linked_skills: [\"my-new-skill\"] } (that would REFUSE — it drops your other skills)\n" +
+      "- REMOVE a skill: updates: { \"linked_skills_delete\": [\"old-skill\"] }\n" +
+      "- ADD a UI plugin: updates: { \"ui_plugins_push\": [{ id: \"mcp:conn:panel\", ... }] }\n" +
+      "- ADD a handoff: updates: { \"handoffs_push\": [{ id: \"h1\", ... }] }\n\n" +
+      "SKILL-LEVEL EXAMPLES (target='skill' + skill_id):\n" +
+      "- Change persona: updates: { \"role.persona\": \"You are a friendly assistant\" }\n" +
+      "- Append to persona: updates: { \"persona_append\": \"\\n\\nALWAYS respond in 2 sentences.\" }\n" +
       "- Add a guardrail: updates: { \"policy.guardrails.never_push\": [\"Never share passwords\"] }\n" +
-      "- Update problem: updates: { \"problem.statement\": \"...\", \"problem.goals\": [\"goal1\"] }\n" +
       "- Add a tool: updates: { \"tools_push\": [{ name: \"conn.tool\", description: \"...\", inputs: [...], output: {...} }] }\n" +
       "- Change intent: updates: { \"intents.supported_update\": [{ id: \"i1\", description: \"new desc\" }] }\n" +
-      "- Force redeploy: updates: { \"_force_redeploy\": true }\n" +
-      "- CREATE a new skill: target='skill', skill_id='my-new-skill', updates: { \"problem.statement\": \"...\", \"role.persona\": \"...\" }\n" +
-      "  If the skill doesn't exist yet, a default scaffold is created and the updates are applied on top. The skill is automatically added to the solution topology.\n\n" +
-      "Use target='skill' + skill_id for skill fields. Use target='solution' for solution-level fields (linked_skills, platform_connectors, ui_plugins).",
+      "- CREATE a new skill: target='skill', skill_id='my-new-skill', updates: { \"problem.statement\": \"...\", \"role.persona\": \"...\" } — auto-scaffolded and added to solution topology.\n\n" +
+      "PREVIEW BEFORE WRITING: pass dry_run:true to see the diff (arrays_merged, arrays_replaced, dropped_ids, added_ids) without applying. Use this before any destructive-looking edit.",
     inputSchema: {
       type: "object",
       properties: {
@@ -472,6 +558,10 @@ export const tools = [
         test_message: {
           type: "string",
           description: "Optional: re-test the skill after patching. Requires skill_id.",
+        },
+        dry_run: {
+          type: "boolean",
+          description: "If true, apply the patch in memory and return the diff (arrays_merged, arrays_replaced, dropped_ids, added_ids, would_write_bytes) WITHOUT writing to GitHub or redeploying. Preview a change before committing to it.",
         },
       },
       required: ["solution_id", "target", "updates"],
@@ -516,7 +606,9 @@ export const tools = [
     name: "ateam_delete_solution",
     core: true,
     description:
-      "Delete a deployed solution and all its skills from A-Team. Use with caution — this removes the solution from both the Skill Builder and A-Team Core. Useful for cleaning up test solutions or starting fresh.",
+      "⚠️ IRREVERSIBLE — kills Mongo state, running MCP processes, and Builder FS for the whole solution and every skill. " +
+      "REQUIRES `confirm:true` AND `confirm_solution_id` echoing the solution id you're destroying (defeats typos and hallucinated ids). " +
+      "RECOVERY: the GitHub repo is untouched; `ateam_github_pull` rebuilds the solution from `main`. Prefer that over re-deploying from memory.",
     inputSchema: {
       type: "object",
       properties: {
@@ -524,15 +616,24 @@ export const tools = [
           type: "string",
           description: "The solution ID to delete",
         },
+        confirm: {
+          type: "boolean",
+          description: "REQUIRED. Must be exactly true. A missing/false value refuses the call with a recovery hint.",
+        },
+        confirm_solution_id: {
+          type: "string",
+          description: "REQUIRED. Must exactly equal `solution_id`. This defeats typos and hallucinated ids — you can't wipe a solution you couldn't spell.",
+        },
       },
-      required: ["solution_id"],
+      required: ["solution_id", "confirm", "confirm_solution_id"],
     },
   },
   {
     name: "ateam_delete_skill",
     core: true,
     description:
-      "Delete a single skill from a deployed solution. Removes the skill from A-Team Core (kills the running MCP process, unregisters from skill registry, deletes from Mongo), removes the skill from solution.skills[] and solution.linked_skills, and deletes the skill's files from Builder FS. Use this to drop a skill without tearing down the whole solution.",
+      "⚠️ IRREVERSIBLE in Core + Builder FS — kills the running MCP process, unregisters from skill registry, deletes the Mongo record, drops from solution.skills[] and solution.linked_skills, and removes the skill's files from Builder FS. " +
+      "REQUIRES `confirm:true`. RECOVERY: the skill still lives in GitHub — `ateam_github_pull` rebuilds the whole solution (no per-skill restore path).",
     inputSchema: {
       type: "object",
       properties: {
@@ -544,15 +645,22 @@ export const tools = [
           type: "string",
           description: "The skill ID to remove (e.g. 'linkedin-agent')",
         },
+        confirm: {
+          type: "boolean",
+          description: "REQUIRED. Must be exactly true. A missing/false value refuses the call with a recovery hint.",
+        },
       },
-      required: ["solution_id", "skill_id"],
+      required: ["solution_id", "skill_id", "confirm"],
     },
   },
   {
     name: "ateam_delete_connector",
     core: true,
     description:
-      "Remove a connector from a deployed solution. Stops and deletes it from A-Team Core, removes references from the solution definition (grants, platform_connectors) and skill definitions (connectors array), and cleans up mcp-store files.",
+      "⚠️ CASCADING — any skill whose engine.bootstrap_tools or tools[] name a tool from this connector will FAIL its next execution. " +
+      "Stops and deletes the connector from A-Team Core; drops references from the solution definition (grants, platform_connectors, ui_plugins ids starting `mcp:<connector-id>:*`) and skill definitions (connectors array); cleans up mcp-store files. " +
+      "GitHub source is preserved — a follow-up `ateam_build_and_run(github:true)` can resurrect. " +
+      "REQUIRES `confirm:true`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -564,8 +672,12 @@ export const tools = [
           type: "string",
           description: "The connector ID to remove (e.g. 'device-mock-mcp')",
         },
+        confirm: {
+          type: "boolean",
+          description: "REQUIRED. Must be exactly true. A missing/false value refuses the call with a recovery hint.",
+        },
       },
-      required: ["solution_id", "connector_id"],
+      required: ["solution_id", "connector_id", "confirm"],
     },
   },
 
@@ -2535,9 +2647,10 @@ const handlers = {
   // Updates → Redeploys → Optionally tests
   // One call replaces: ateam_update + ateam_redeploy
 
-  ateam_patch: async ({ solution_id, target, skill_id, updates, test_message }, sid) => {
+  ateam_patch: async ({ solution_id, target, skill_id, updates, test_message, dry_run }, sid) => {
     const phases = [];
     let isNewSkill = false;
+    const _diff = { arrays_merged: [], arrays_replaced: [], scalars_changed: [], sections_replaced: [] };
 
     // GitHub-first patch: read from GitHub → apply patch → write back → redeploy
     // This ensures GitHub stays the single source of truth.
@@ -2656,9 +2769,30 @@ const handlers = {
             else arr.push(upd);
           }
           parent[leaf] = arr;
+        } else if (key === "_replace" || key.endsWith("_replace")) {
+          // Escape-hatch flags handled by the guard — skip them here so they
+          // don't get written into the patched object as literal fields.
+          continue;
         } else if (key.includes(".")) {
           // Dot notation: "role.persona", "intents.thresholds.accept"
           const parts = key.split(".");
+          // Sibling-loss guard: if the leaf resolves to an existing non-empty
+          // array and the incoming value is also an array, refuse the replace
+          // unless the caller opted in. (Dot-notation is how many agents
+          // accidentally hit this — e.g. updates:{ "linked_skills": ["one"] }
+          // on target='solution'.)
+          const leafKey = parts[parts.length - 1];
+          let cursor = patched;
+          for (let i = 0; i < parts.length - 1; i++) {
+            if (!cursor || typeof cursor[parts[i]] !== 'object') { cursor = null; break; }
+            cursor = cursor[parts[i]];
+          }
+          const currentLeaf = cursor && Object.prototype.hasOwnProperty.call(cursor, leafKey) ? cursor[leafKey] : undefined;
+          const guardErr = _guardArrayReplace({ target, key: leafKey, value, current: currentLeaf, updates });
+          if (guardErr) return guardErr;
+          if (Array.isArray(value) && Array.isArray(currentLeaf)) _diff.arrays_replaced.push(key);
+          else if (typeof value === 'object' && value !== null && !Array.isArray(value)) _diff.sections_replaced.push(key);
+          else _diff.scalars_changed.push(key);
           let obj = patched;
           for (let i = 0; i < parts.length - 1; i++) {
             if (!obj[parts[i]] || typeof obj[parts[i]] !== "object") obj[parts[i]] = {};
@@ -2666,13 +2800,37 @@ const handlers = {
           }
           obj[parts[parts.length - 1]] = value;
         } else {
-          // Direct field replacement
+          // Direct top-level field replacement. Sibling-loss guard: if this
+          // names a known array field and would drop items, refuse unless the
+          // caller passed _replace:true (object-level) or <field>_replace:true.
+          const guardErr = _guardArrayReplace({ target, key, value, current: patched[key], updates });
+          if (guardErr) return guardErr;
+          if (Array.isArray(value) && Array.isArray(patched[key])) _diff.arrays_replaced.push(key);
+          else if (typeof value === 'object' && value !== null && !Array.isArray(value)) _diff.sections_replaced.push(key);
+          else _diff.scalars_changed.push(key);
           patched[key] = value;
         }
       }
       phases.push({ phase: "patch", status: "done" });
     } catch (err) {
       return { ok: false, phase: "patch", error: `Failed to apply patch: ${err.message}` };
+    }
+
+    // Dry-run: return diff + would-be after-state without writing to GitHub
+    // or redeploying. Lets an agent preview any destructive-looking edit.
+    if (dry_run) {
+      return {
+        ok: true,
+        dry_run: true,
+        target,
+        solution_id,
+        skill_id,
+        phases,
+        _diff,
+        after_state: patched,
+        would_write_bytes: JSON.stringify(patched, null, 2).length,
+        hint: "No changes applied. Remove dry_run:true to commit + redeploy.",
+      };
     }
 
     // Phase 3: Write patched version back to GitHub
@@ -3364,14 +3522,46 @@ const handlers = {
   ateam_github_list_versions: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/versions/dev`, sid),
 
-  ateam_delete_solution: async ({ solution_id }, sid) =>
-    del(`/deploy/solutions/${solution_id}`, sid),
+  ateam_delete_solution: async ({ solution_id, confirm, confirm_solution_id }, sid) => {
+    if (confirm !== true) {
+      return {
+        ok: false,
+        error: "⚠️ REFUSED: ateam_delete_solution requires confirm:true. This is irreversible in Core + Builder FS. GitHub source is preserved — ateam_github_pull rebuilds from `main` if you already deleted by mistake.",
+        recovery: "ateam_github_pull(solution_id, ref:'main')",
+      };
+    }
+    if (confirm_solution_id !== solution_id) {
+      return {
+        ok: false,
+        error: `⚠️ REFUSED: confirm_solution_id must exactly equal solution_id. Got confirm_solution_id="${confirm_solution_id}" but solution_id="${solution_id}". This check defeats typos and hallucinated ids — you should not be able to wipe a solution whose id you can't spell correctly.`,
+        expected: solution_id,
+        received: confirm_solution_id,
+      };
+    }
+    return del(`/deploy/solutions/${solution_id}`, sid);
+  },
 
-  ateam_delete_skill: async ({ solution_id, skill_id }, sid) =>
-    del(`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid),
+  ateam_delete_skill: async ({ solution_id, skill_id, confirm }, sid) => {
+    if (confirm !== true) {
+      return {
+        ok: false,
+        error: `⚠️ REFUSED: ateam_delete_skill requires confirm:true. Kills the running MCP process and deletes the skill from Core + Builder FS. GitHub source is preserved — ateam_github_pull rebuilds the whole solution.`,
+        recovery: "ateam_github_pull(solution_id, ref:'main') — no per-skill restore path",
+      };
+    }
+    return del(`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
+  },
 
-  ateam_delete_connector: async ({ solution_id, connector_id }, sid) =>
-    del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid),
+  ateam_delete_connector: async ({ solution_id, connector_id, confirm }, sid) => {
+    if (confirm !== true) {
+      return {
+        ok: false,
+        error: `⚠️ REFUSED: ateam_delete_connector requires confirm:true. Cascading — any skill wired to this connector's tools will fail its next execution. GitHub source is preserved.`,
+        recovery: "ateam_build_and_run(solution_id, github:true) can resurrect from GitHub",
+      };
+    }
+    return del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
+  },
 
   ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace }, sid) =>
     post(
