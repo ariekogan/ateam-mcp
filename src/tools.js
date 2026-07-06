@@ -563,6 +563,12 @@ export const tools = [
           type: "boolean",
           description: "If true, apply the patch in memory and return the diff (arrays_merged, arrays_replaced, dropped_ids, added_ids, would_write_bytes) WITHOUT writing to GitHub or redeploying. Preview a change before committing to it.",
         },
+        source: {
+          type: "string",
+          enum: ["github", "local"],
+          description:
+            "Where the solution/skill definition lives. 'github' (DEFAULT) — read from and write to the tenant's GitHub repo (GitHub is master; the normal path). 'local' — read from and write to the Builder FS store (no GitHub repo required). Use 'local' ONLY for a repo-less bootstrap tenant (e.g. freshly onboarded from a template, before GitHub is connected). This is a DEDICATED, EXPLICIT switch — never a fallback. Redeploy is local in both modes.",
+        },
       },
       required: ["solution_id", "target", "updates"],
     },
@@ -2647,22 +2653,45 @@ const handlers = {
   // Updates → Redeploys → Optionally tests
   // One call replaces: ateam_update + ateam_redeploy
 
-  ateam_patch: async ({ solution_id, target, skill_id, updates, test_message, dry_run }, sid) => {
+  ateam_patch: async ({ solution_id, target, skill_id, updates, test_message, dry_run, source }, sid) => {
     const phases = [];
     let isNewSkill = false;
     const _diff = { arrays_merged: [], arrays_replaced: [], scalars_changed: [], sections_replaced: [] };
 
-    // GitHub-first patch: read from GitHub → apply patch → write back → redeploy
-    // This ensures GitHub stays the single source of truth.
+    // Two backing stores, chosen EXPLICITLY by `source` (never inferred):
+    //   'github' (default) — GitHub-first: read from GitHub → apply patch → write
+    //     back → redeploy. GitHub stays the single source of truth.
+    //   'local' — Builder-FS-first: read from and write to the Builder store for a
+    //     repo-less bootstrap tenant (freshly onboarded from a template, GitHub not
+    //     yet connected). GitHub is still master overall; local is a temporary
+    //     bootstrap until the tenant connects a repo (then local is pushed → GitHub).
+    // Redeploy (Phase 4) is local (Builder FS → Core) in BOTH modes.
+    const isLocal = source === "local";
 
-    // Phase 1: Read current state from GitHub (or create scaffold if new skill)
+    // Phase 1: Read current state (or create scaffold if new skill)
     let current;
     const filePath = target === "skill" && skill_id
       ? `skills/${skill_id}/skill.json`
       : `solution.json`;
     try {
-      const readResult = await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid);
-      current = JSON.parse(readResult.content);
+      if (isLocal) {
+        // Read the raw definition from the Builder store — no GitHub repo needed.
+        if (target === "skill" && skill_id) {
+          const r = await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, sid);
+          current = r.skill || r.definition || r;
+        } else {
+          // ?raw=1 → the agent-api returns the UNSTRIPPED solution (keeps
+          // linked_skills/conversation) so _delete/_push operate on the real arrays.
+          const r = await get(`/deploy/solutions/${solution_id}/definition?raw=1`, sid);
+          current = r.solution || r;
+        }
+        if (!current || typeof current !== "object") {
+          throw new Error(`Local ${filePath} not found (empty definition)`);
+        }
+      } else {
+        const readResult = await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid);
+        current = JSON.parse(readResult.content);
+      }
     } catch (err) {
       // If it's a skill that doesn't exist yet, create a default scaffold.
       // This lets agents use ateam_patch to both CREATE and UPDATE skills —
@@ -2694,7 +2723,7 @@ const handlers = {
         };
         phases.push({ phase: "read", status: "created_scaffold", skill_id });
       } else {
-        return { ok: false, phase: "read", error: `Failed to read ${filePath} from GitHub: ${err.message}` };
+        return { ok: false, phase: "read", error: `Failed to read ${filePath} from ${isLocal ? "Builder store (local)" : "GitHub"}: ${err.message}` };
       }
     }
 
@@ -2833,42 +2862,63 @@ const handlers = {
       };
     }
 
-    // Phase 3: Write patched version back to GitHub
+    // Phase 3: Write patched version back to the chosen store.
     try {
       const patchKeys = Object.keys(updates || {});
       const message = `Patch: ${target}${skill_id ? ` ${skill_id}` : ""} — ${patchKeys.join(", ")}`;
-      await post(`/deploy/solutions/${solution_id}/github/patch`, {
-        path: filePath,
-        content: JSON.stringify(patched, null, 2),
-        message,
-      }, sid, { timeoutMs: 30_000 });
-      phases.push({ phase: "github_write", status: "done" });
+      if (isLocal) {
+        // Write the FULL patched object to the Builder store. Top-level keys are
+        // replaced (removals honored) — the client-side merge above already
+        // resolved _push/_delete/_update, so we send the resolved object.
+        const endpoint = (target === "skill" && skill_id)
+          ? `/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`
+          : `/deploy/solutions/${solution_id}`;
+        await patch(endpoint, { state_update: patched }, sid, { timeoutMs: 30_000 });
+        phases.push({ phase: "local_write", status: "done" });
+      } else {
+        await post(`/deploy/solutions/${solution_id}/github/patch`, {
+          path: filePath,
+          content: JSON.stringify(patched, null, 2),
+          message,
+        }, sid, { timeoutMs: 30_000 });
+        phases.push({ phase: "github_write", status: "done" });
+      }
     } catch (err) {
-      return { ok: false, phase: "github_write", error: `Patch applied but failed to write to GitHub: ${err.message}`, phases };
+      const store = isLocal ? "Builder store (local)" : "GitHub";
+      return { ok: false, phase: isLocal ? "local_write" : "github_write", error: `Patch applied but failed to write to ${store}: ${err.message}`, phases };
     }
 
     // Phase 3b: If new skill, add it to solution.json topology (skills[], linked_skills)
     if (isNewSkill && skill_id) {
       try {
-        const solRead = await get(`/deploy/solutions/${solution_id}/github/read?path=solution.json`, sid);
-        const sol = JSON.parse(solRead.content);
         const skillEntry = { id: skill_id, name: patched.name || skill_id, role: "worker", description: patched.description || "", connectors: patched.connectors || [] };
-        // Add to skills[] if not already present
-        if (!sol.skills) sol.skills = [];
-        if (!sol.skills.find(s => s.id === skill_id)) {
-          sol.skills.push(skillEntry);
+        if (isLocal) {
+          // Local: _push the entries via the Builder store (dedup handled by the
+          // store's _push — it updates in place if the id already exists).
+          await patch(`/deploy/solutions/${solution_id}`, {
+            state_update: { skills_push: [skillEntry], linked_skills_push: [skill_id] },
+          }, sid, { timeoutMs: 30_000 });
+          phases.push({ phase: "solution_topology", status: "done", added: skill_id });
+        } else {
+          const solRead = await get(`/deploy/solutions/${solution_id}/github/read?path=solution.json`, sid);
+          const sol = JSON.parse(solRead.content);
+          // Add to skills[] if not already present
+          if (!sol.skills) sol.skills = [];
+          if (!sol.skills.find(s => s.id === skill_id)) {
+            sol.skills.push(skillEntry);
+          }
+          // Add to linked_skills if not already present
+          if (!sol.linked_skills) sol.linked_skills = [];
+          if (!sol.linked_skills.includes(skill_id)) {
+            sol.linked_skills.push(skill_id);
+          }
+          await post(`/deploy/solutions/${solution_id}/github/patch`, {
+            path: "solution.json",
+            content: JSON.stringify(sol, null, 2),
+            message: `Add skill "${skill_id}" to solution topology`,
+          }, sid, { timeoutMs: 30_000 });
+          phases.push({ phase: "solution_topology", status: "done", added: skill_id });
         }
-        // Add to linked_skills if not already present
-        if (!sol.linked_skills) sol.linked_skills = [];
-        if (!sol.linked_skills.includes(skill_id)) {
-          sol.linked_skills.push(skill_id);
-        }
-        await post(`/deploy/solutions/${solution_id}/github/patch`, {
-          path: "solution.json",
-          content: JSON.stringify(sol, null, 2),
-          message: `Add skill "${skill_id}" to solution topology`,
-        }, sid, { timeoutMs: 30_000 });
-        phases.push({ phase: "solution_topology", status: "done", added: skill_id });
       } catch (err) {
         // Non-fatal: skill.json was written, topology can be fixed manually
         phases.push({ phase: "solution_topology", status: "warning", error: err.message });
@@ -2914,19 +2964,23 @@ const handlers = {
     }
 
     const redeployOk = phases.some(p => p.phase === "redeploy" && p.status === "done");
+    const store = isLocal ? "Builder store (local)" : "GitHub";
     return {
       ok: true,
       solution_id,
-      branch: 'main',
+      source: isLocal ? "local" : "github",
+      ...(isLocal ? {} : { branch: 'main' }),
       phases,
       patched: patched,
       ...(isNewSkill && { created_skill: skill_id }),
       ...(redeployResult && { redeploy: redeployResult }),
       ...(test_result && { test_result }),
       _status: redeployOk
-        ? '✅ Patched on GitHub + redeployed.'
-        : '⚠️ Patched on GitHub ✅ but redeploy timed out. Run: ateam_redeploy(solution_id' + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')',
-      _next: 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
+        ? `✅ Patched on ${store} + redeployed.`
+        : `⚠️ Patched on ${store} ✅ but redeploy timed out. Run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')',
+      _next: isLocal
+        ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
+        : 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
     };
   },
 
