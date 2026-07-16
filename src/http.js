@@ -29,6 +29,7 @@ import {
   bindSessionBearer, getAuthOverride,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
+import { connectGithubPage } from "./pages.js";
 
 // Active sessions
 const transports = {};
@@ -224,6 +225,12 @@ export function startHttpServer(port = 3100) {
   // ─── Get API Key — redirect to Skill Builder with auto-open ──
   app.get("/get-api-key", (_req, res) => {
     res.redirect("https://app.ateam-ai.com/builder/?show=api-key");
+  });
+
+  // ─── Connect GitHub — user-facing guide an agent links to on
+  //     github_not_connected (see formatError in api.js). ──
+  app.get("/connect-github", (_req, res) => {
+    res.type("html").send(connectGithubPage());
   });
 
   // ─── MCP POST — handle tool calls + initialize ───────────────
