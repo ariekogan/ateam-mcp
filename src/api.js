@@ -364,6 +364,30 @@ function formatError(method, path, status, body) {
     503: "A-Team API is temporarily unavailable. Try again in a minute.",
   };
 
+  // Special-case: GitHub App not connected for this tenant. This is the wall a
+  // user hits the first time they iterate on CONNECTOR CODE (github_patch /
+  // github_write / github_push / build_and_run auto-pull). The raw
+  // "github_not_connected" code + a generic 409 hint tells them nothing — so
+  // guide them explicitly to the one-time connect step and note the repo-less
+  // escape hatch for definition edits.
+  const bodyStr = typeof body === "string" ? body : (body ? JSON.stringify(body) : "");
+  if (/github_not_connected/i.test(bodyStr)) {
+    return [
+      `A-Team API error: ${method} ${path} — GitHub isn't connected for this tenant.`,
+      "",
+      "Versioned connector-code changes (edit, push, promote, deploy-from-repo) need a",
+      "GitHub repo, and this tenant hasn't connected one yet.",
+      "",
+      "Connect it once (takes ~30s):",
+      "  1. Open Tenant Admin → GitHub (https://app.ateam-ai.com → pick your tenant → GitHub).",
+      "  2. Click \"Connect GitHub\" and approve the A-Team GitHub App.",
+      "  3. Retry this step — the repo is auto-created on the next deploy.",
+      "",
+      "No GitHub yet? Skill/solution DEFINITION edits still work without a repo via",
+      "ateam_patch(..., source:\"local\"). Only connector CODE iteration needs GitHub.",
+    ].join("\n");
+  }
+
   const hint = hints[status] || "";
   const detail = typeof body === "string" && body.length > 0 && body.length < 2000 ? body : "";
 
