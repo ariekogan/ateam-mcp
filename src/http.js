@@ -417,9 +417,16 @@ function seedCredentials(req, sessionId) {
     return;
   }
 
-  // Default: use the bearer token itself as credentials
+  // Default: use the bearer token itself as credentials.
+  // `explicit: true` — a Bearer is a per-connection credential the user
+  // deliberately configured (OAuth authorize page, or the plugin's userConfig
+  // key injected as `Authorization: Bearer`). Unlike an ambient ADAS_API_KEY
+  // env var baked into shared MCP config, it carries explicit tenant intent, so
+  // it satisfies isExplicitlyAuthenticated and tenant tools work without a
+  // redundant ateam_auth call. (The env-var guard in tools.js is unaffected —
+  // env creds never flow through here; this path only fires for a real Bearer.)
   const parsed = parseApiKey(token);
   if (parsed.isValid) {
-    setSessionCredentials(sessionId, { tenant: parsed.tenant, apiKey: token });
+    setSessionCredentials(sessionId, { tenant: parsed.tenant, apiKey: token, explicit: true });
   }
 }
