@@ -435,8 +435,9 @@ export const tools = [
     core: true,
     description:
       "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
-      "ALWAYS ASYNC: returns a chain id (job_id) immediately — the assistant's reply is NOT in this response (a conversation can run for minutes, so a synchronous wait would hit the 100s edge timeout → 524). Poll for the reply with ateam_get_chain(job_id) — it returns the chain tree + per-job status; the routed worker's terminal job carries the reply.\n\n" +
-      "Multi-turn: pass the actor_id from a previous response back in to continue the same thread (e.g. reply to a confirmation prompt). Each call is a new job; the same actor_id maintains conversation context.",
+      "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
+      "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true (or pending_question is set — the assistant is waiting on the user). That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
+      "Multi-turn: pass the actor_id from a previous response back in to continue the same thread (e.g. reply to a confirmation prompt). Each call starts a new chain; the same actor_id maintains conversation context.",
     inputSchema: {
       type: "object",
       properties: {
