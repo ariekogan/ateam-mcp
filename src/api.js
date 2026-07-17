@@ -256,6 +256,49 @@ export function getBaseUrl(sessionId) {
   return BASE_URL;
 }
 
+/**
+ * Map an API base URL → the user-facing app URL where a deployed change is
+ * visible. ateam-mcp is a PUBLIC MCP: a given user talks to exactly ONE
+ * platform (their tenant is on one live deployment), so the useful thing to
+ * surface is NOT an internal "env" but WHERE to go look at the result.
+ *   api.ateam-ai.com          → app.ateam-ai.com          (prod)
+ *   dev-api.ateam-ai.com      → dev-app.ateam-ai.com      (our internal dev)
+ *   anything else (self-host) → best-effort api→app swap, or the base itself
+ */
+function apiToAppUrl(baseUrl) {
+  try {
+    const u = new URL(baseUrl);
+    // host swaps: <x>api.<domain> → <x>app.<domain>; "api." prefix → "app."
+    let host = u.hostname;
+    if (host.startsWith("api.")) host = "app." + host.slice(4);
+    else if (host.startsWith("dev-api.")) host = "dev-app." + host.slice(8);
+    else if (host.includes("-api.")) host = host.replace("-api.", "-app.");
+    else if (host.includes("api")) host = host.replace(/api/, "app");
+    return `${u.protocol}//${host}`;
+  } catch {
+    return baseUrl;
+  }
+}
+
+/**
+ * Location stamp for a tool result: which tenant + which app URL a change
+ * landed on. Returned as `_where` so any consumer (desktop, mobile, cloud
+ * agent) can tell the user where to see it — no reliance on a plugin SKILL.md.
+ */
+export function getWhere(sessionId) {
+  let tenant = null;
+  try { tenant = getCredentials(sessionId)?.tenant || null; } catch { /* unauthed */ }
+  const apiBase = getBaseUrl(sessionId);
+  const appUrl = apiToAppUrl(apiBase);
+  return {
+    tenant,
+    app_url: appUrl,
+    _note: tenant
+      ? `This change is on tenant "${tenant}". View it at ${appUrl}.`
+      : `View at ${appUrl}.`,
+  };
+}
+
 /** Check if a bearer has an active auth override. */
 export function hasBearerAuth(sessionId) {
   const bearer = sessionBearers.get(sessionId);

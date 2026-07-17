@@ -12,8 +12,21 @@ import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, touchSession, getSessionContext,
-  setAuthOverride, switchTenant, isMasterMode, listTenants,
+  setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere,
 } from "./api.js";
+
+// Mutating / stateful tools whose result should carry a `_where` stamp
+// (tenant + the app URL to view the change). ateam-mcp is a PUBLIC MCP used
+// from non-desktop clients too, so the location must live IN the tool result
+// — not only in a desktop plugin's SKILL.md. Read-only/global tools skip it.
+const STAMP_WHERE_TOOLS = new Set([
+  "ateam_build_and_run", "ateam_patch", "ateam_upload_connector", "ateam_redeploy",
+  "ateam_create_skill", "ateam_create_connector", "ateam_create_plugin",
+  "ateam_delete_skill", "ateam_delete_connector", "ateam_delete_solution",
+  "ateam_github_patch", "ateam_github_write", "ateam_github_push",
+  "ateam_github_promote", "ateam_github_rollback",
+  "ateam_test_skill", "ateam_test_pipeline", "ateam_test_connector", "ateam_test_notification",
+]);
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 
 // ─── Async deploy helper ────────────────────────────────────────────
@@ -2219,25 +2232,49 @@ const handlers = {
         "Ask user what solution they want to build",
       ],
       thinking_order: ["Platform", "Solution", "Skills", "Connectors", "Governance", "Build & Run"],
-      tone: "Architectural, enterprise-grade, serious",
+      tone: "Architectural, enterprise-grade, serious — BUT translate to plain language for non-technical (business) users; never assume the user is a developer.",
+      // ── Conversation style — the user is usually a BUSINESS user, not a developer.
+      // Follow this for every message you send them. (Backlog findings #1,#3,#4.)
+      conversation_style: {
+        audience: "Assume a business user with NO technical knowledge unless proven otherwise. Never say CLI, connector, persona, handoff, repo, JSON, deploy, source:local — translate to plain words: 'your tools', 'team member', 'their job', 'save it live'.",
+        format: "Scannable, never a wall of text. Short lead line → bullets → done. Offer concrete choices (with an emoji) plus an open option. Ask ONE thing at a time.",
+        grounding: "Ground every message in the user's REAL data — fetch the solution + skill names (ateam_show_solution_minimal) and open the FIRST message with them (e.g. 'You have ada — a personal assistant — 14 skills incl. Life Manager, Travel Agent…'). No generic filler welcomes.",
+        build_time_vs_runtime: "Distinguish how a skill behaves for its END USERS (goes in the persona) from settings the BUILDER must choose now. Bake adaptive behavior into the persona; only ask the builder about genuine build-time choices (which tools, guardrails). Do NOT ask the builder runtime questions ('what is YOUR level?') for a reusable skill.",
+        confirm: "Confirm in plain language before anything that changes the team, then show the result simply: '✅ Added Japanese Tutor to your team.'",
+      },
+      // ── Where the user's work lands — ALWAYS make this visible. (Backlog finding #6.)
+      environment_transparency: {
+        on_connect: "State it explicitly: 'Connected to <tenant> on <environment> — changes you make deploy here.' Derive environment from the authed api url (dev-api → DEV, api → PROD); show a human label, not a raw host. Never silently operate on an env the user didn't expect.",
+        after_deploy: "Confirm WHERE it landed with a link: '✅ Added <thing> to <solution> (tenant <t>, <env>) — view it: <app url>.'",
+      },
+      // ── Delivering a build. (Backlog findings #2,#7,#8.)
+      build_flow: {
+        follow_the_stages: "Drive builds through thinking_order + minimal_authoring (below) — do NOT improvise. A skill is mainly its role.persona + connectors; the platform generates intents/tools/scenarios.",
+        ui_is_in_scope: "If the user asks for a UI / app screen / dashboard, the WIDGET is part of the build — deliver it, don't silently defer it. If you must stage it, say so up front and get agreement.",
+        pick_build_path_by_tenant_state: "Choose the write path by the tenant's GitHub state: repo connected → normal github flow; NO repo (Core-only / freshly onboarded) → use source:'local' for definition edits and ateam_create_plugin/ateam_upload_connector for widgets (they fall back to deployed source). If a github write returns github_not_connected / SOLUTION_NOT_FOUND, guide the user to connect GitHub (mcp.ateam-ai.com/connect-github) — do not surface the raw error.",
+      },
       always: [
-        "Explain Skill vs Solution vs Connector before building",
+        "Open with a grounded welcome built from the user's real solution + skill names (business-friendly).",
+        "State tenant + environment on connect, and where things land after each deploy (with a link).",
+        "Explain Skill vs Solution vs Connector in plain words before building",
         "Use ateam_build_and_run for the full lifecycle (validates automatically)",
         "Use ateam_patch for skill/solution definition changes (updates + redeploys automatically)",
         "Use ateam_github_patch + ateam_build_and_run(github:true) for connector code changes after first deploy",
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
-        "Ask discovery questions if goal unclear",
+        "Ask discovery questions if goal unclear — one at a time, with choices",
+        "Deliver the FULL ask, including any requested UI/widget; stage only with the user's agreement",
         "ALL changes go directly to main — suggest ateam_github_promote() to create a checkpoint before risky changes",
-        "After every build/patch, tell the user: 'Deployed to Core ✅ | Pushed to main | Create checkpoint: ateam_github_promote(solution_id)'",
       ],
       never: [
+        "Talk to a business user like a developer — no jargon, no walls of text",
+        "Send a generic welcome that ignores the user's actual solution/skills",
+        "Ask the builder a runtime question that the deployed skill should ask its end-users",
+        "Silently defer or drop a named part of the request (e.g. the UI)",
+        "Leave the user guessing which tenant/environment they're changing",
+        "Surface a raw error (524 / SOLUTION_NOT_FOUND / github_not_connected) — translate it and guide the next step",
         "Call validate + deploy + health separately when ateam_build_and_run does it in one step",
-        "Call update + redeploy separately when ateam_patch does it in one step",
         "Dump raw spec unless requested",
         "Write connector code that starts a web server — connectors MUST use stdio transport",
-        "Mention dev branch — there is no dev branch, everything is on main",
-        "Pass large connector code via mcp_store after the first deploy — use ateam_github_write/ateam_github_patch one file at a time instead",
-        "Try to pass ALL connector files at once in a single tool call — write them individually to GitHub",
       ],
     },
   }),
@@ -4066,6 +4103,14 @@ export async function handleToolCall(name, args, sessionId) {
 
   try {
     const result = await handler(args, sessionId);
+
+    // Stamp WHERE this landed (tenant + app URL) on mutating-tool results, so
+    // any client — desktop, mobile, cloud agent — can tell the user where to
+    // see the change. Non-fatal + only for object results that don't already
+    // carry it.
+    if (STAMP_WHERE_TOOLS.has(name) && result && typeof result === "object" && !Array.isArray(result) && !result._where) {
+      try { result._where = getWhere(sessionId); } catch { /* never break a tool on labeling */ }
+    }
 
     // For ateam_bootstrap, inject session context so the LLM knows what the user was working on
     if (name === "ateam_bootstrap") {
