@@ -771,11 +771,14 @@ export const tools = [
       "Eliminates ~50% of identical plugin boilerplate (imports, theme/bridge hooks, " +
       "postMessage protocol, default export shape). You then fill in the component body. " +
       "Use kind='iframe' for web-only, 'rn' for mobile-only, 'adaptive' for both. " +
-      "Auto-discovery (Phase 5 of the strip) picks up the new plugin at next deploy " +
-      "without a manifest declaration. " +
-      "The scaffold MERGES into the existing connector (its server.js + other files are preserved) — " +
-      "works on both GitHub-backed and repo-less (locally-deployed) tenants; the merge base is the " +
-      "GitHub repo when connected, otherwise the deployed connector source.",
+      "Also writes ui-dist/<plugin>/manifest.json with the required render block.\n\n" +
+      "⚠️ RENDERING IS NOT AUTOMATIC. At deploy, Phase 5 discovers plugins by calling each connector's " +
+      "ui.listPlugins + ui.getPlugin — a plugin only appears (and renders) if the connector ADVERTISES it there " +
+      "with a render.{mode, iframeUrl?, reactNative?} block. Dropping the scaffold files alone does NOT register it. " +
+      "If the connector generates its plugin list from ui-dist/<plugin>/manifest.json, the emitted manifest is picked up automatically; " +
+      "if the connector has a HARDCODED list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), you MUST add this plugin there (copy the render block from the manifest.json). " +
+      "Verify after deploy with ateam_get_solution(solution_id, 'connectors_health') or ateam_get_widget_catalog. Then declare it at solution ui_plugins[] so a skill can open it via sys.focusUiPlugin (see ateam_get_spec topic:'widgets').\n\n" +
+      "The scaffold MERGES into the existing connector (server.js + other files preserved) — works on GitHub-backed AND repo-less tenants; merge base is the GitHub repo when connected, else the deployed connector source.",
     inputSchema: {
       type: "object",
       properties: {
