@@ -3162,15 +3162,17 @@ const handlers = {
     // accepted for back-compat but no longer hold the HTTP request open.
     const body = { message, async: true, ...(actor_id ? { actor_id } : {}) };
     const kickoff = await post(`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs: 15_000 });
-    const jobId = kickoff?.job_id || kickoff?.jobId || null;
+    // The CHAIN id — not a single job id — is the conversation's identity and
+    // what you poll. The Builder returns it as chain_id (falls back to the
+    // root job id only if an older Builder didn't send one).
+    const chainId = kickoff?.chain_id || kickoff?.chainId || kickoff?.job_id || kickoff?.jobId || null;
     return {
       ...kickoff,
-      job_id: jobId,
-      chain_id: jobId,
-      _poll: jobId
+      chain_id: chainId,
+      _poll: chainId
         ? {
-            _note: "Conversation started (async). Poll for the reply — do NOT expect it in this response.",
-            slim: `ateam_get_chain(job_id: "${jobId}")  → chain tree + per-job status`,
+            _note: "Conversation started (async). The reply is NOT in this response — poll the CHAIN for it.",
+            slim: `ateam_get_chain(job_id: "${chainId}")  → chain tree + per-job status; the routed worker's terminal job carries the reply`,
             continue: kickoff?.actor_id ? `ateam_conversation(actor_id: "${kickoff.actor_id}", ...) to continue the thread` : undefined,
           }
         : undefined,
