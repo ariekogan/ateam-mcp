@@ -2079,9 +2079,24 @@ const handlers = {
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Version", description: "Every deploy auto-pushes to main on GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
         { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch, then redeploy with ateam_build_and_run (auto-pulls from GitHub). NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
-        { step: 5, action: "Test & Debug", description: "Test with ateam_conversation (auto-routes, supports multi-turn with actor_id for confirmations). Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. Diagnose with logs and metrics.", tools: ["ateam_conversation", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. Diagnose with logs and metrics.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
       ],
+    },
+    conversation_flow: {
+      _important: "ateam_conversation is ASYNC and CHAIN-based. A conversation runs across handoffs + askAnySkill subcalls for possibly minutes — a synchronous wait would hit the 100s edge timeout (524). ALWAYS poll by CHAIN, NEVER by a single job (a job can terminate while the chain is still active).",
+      steps: [
+        "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id } immediately. The reply is NOT here.",
+        "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true, OR when pending_question is set (the assistant is asking the user something — answer via step 4).",
+        "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
+        "4. CONTINUE THE THREAD — reply / next turn: ateam_conversation(solution_id, message, actor_id: <same actor_id>). New chain, same conversation context. Repeat from step 2.",
+      ],
+      example: {
+        kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "test_x" }',
+        poll: 'ateam_chain_status(chain_id: "job_ab12") → { chain_status: "running", chain_done: false } … repeat … → { chain_status: "completed", chain_done: true, result: "…" }',
+        full_tree: 'ateam_get_chain(chain_id: "job_ab12") → { chainJobs: [ {jobId, skill, status, relation, depth} … ], executionSteps: [ … ] }',
+        continue: 'ateam_conversation(solution_id: "ada", message: "yes", actor_id: "test_x")',
+      },
     },
     branching: {
       _important: "Single-branch model: ALL changes go directly to 'main'. Use checkpoints (safe-* tags) as safe rollback points.",
