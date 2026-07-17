@@ -764,7 +764,10 @@ export const tools = [
       "postMessage protocol, default export shape). You then fill in the component body. " +
       "Use kind='iframe' for web-only, 'rn' for mobile-only, 'adaptive' for both. " +
       "Auto-discovery (Phase 5 of the strip) picks up the new plugin at next deploy " +
-      "without a manifest declaration.",
+      "without a manifest declaration. " +
+      "The scaffold MERGES into the existing connector (its server.js + other files are preserved) — " +
+      "works on both GitHub-backed and repo-less (locally-deployed) tenants; the merge base is the " +
+      "GitHub repo when connected, otherwise the deployed connector source.",
     inputSchema: {
       type: "object",
       properties: {
