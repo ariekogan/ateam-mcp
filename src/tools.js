@@ -2017,6 +2017,32 @@ export default {
     });
   }
 
+  // Emit a manifest.json with the render block the platform requires. A plugin
+  // is only DISCOVERABLE + RENDERABLE if it appears in the connector's
+  // ui.listPlugins / ui.getPlugin output WITH a render.{ mode, iframeUrl?,
+  // reactNative? } — dropping the HTML/TSX files alone is NOT enough. This
+  // manifest is the source of truth for that block; connectors whose
+  // ui.listPlugins is generated from ui-dist/<plugin>/manifest.json pick it up
+  // automatically, and for connectors with a HARDCODED plugin list (e.g.
+  // personal-assistant-ui-mcp) copy this render block into their ui.getPlugin.
+  const mode = k === "iframe" ? "iframe" : k === "rn" ? "react-native" : "adaptive";
+  const render = { mode };
+  if (k === "iframe" || k === "adaptive") render.iframeUrl = `/ui/${pluginName}/index.html`;
+  if (k === "rn" || k === "adaptive") render.reactNative = { component: pluginName };
+  const prettyName = pluginName.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  files.push({
+    path: `ui-dist/${pluginName}/manifest.json`,
+    content: JSON.stringify({
+      id: pluginName,
+      name: prettyName,
+      version: "1.0.0",
+      description: `${prettyName} plugin — replace with your real description.`,
+      render,
+      channels: ["command"],
+      capabilities: { commands: [] },
+    }, null, 2) + "\n",
+  });
+
   return files;
 }
 
@@ -3899,8 +3925,9 @@ const handlers = {
         k === "iframe" || k === "adaptive"
           ? `Edit ui-dist/${plugin_name}/index.html — replace the placeholder UI.`
           : null,
-        `Phase 5 auto-discovery will register the plugin at next deploy.`,
-        `Optional: drop a manifest.json next to the source for custom commands/capabilities.`,
+        `A manifest.json (with the required render block) was written to ui-dist/${plugin_name}/manifest.json.`,
+        `⚠️ REQUIRED to render: the plugin must appear in this connector's ui.listPlugins / ui.getPlugin output WITH that render block. Dropping the files alone does NOT register it. If the connector has a HARDCODED plugin list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), add this plugin there — copy the render block from the manifest.json. Verify with ateam_get_solution(solution_id, "connectors_health") or ateam_get_widget_catalog after deploy.`,
+        `Then declare it at solution level (ui_plugins[]) so a skill can open it via sys.focusUiPlugin — see ateam_get_spec(topic:"widgets").`,
       ].filter(Boolean),
     };
   },
