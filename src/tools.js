@@ -1122,6 +1122,24 @@ export const tools = [
     },
   },
   {
+    name: "ateam_chain_status",
+    core: true,
+    description:
+      "SLIM chain status — the chip-quick poll. Given a chain_id (from ateam_conversation), returns the WHOLE-CHAIN aggregate status cheaply: chain_status + chain_done (true only when the ENTIRE chain — root job + every handoff + askAnySkill subcall — is terminal), plus pending_question, result, and a short progress line.\n\n" +
+      "This is what you poll on a loop after ateam_conversation — NOT ateam_get_chain (that returns the full tree; too heavy for periodic polling). A single job can finish while the chain is still running, so poll chain_done, not a job's status.\n\n" +
+      "Loop: call every ~2s until chain_done === true (or pending_question is set — the assistant is waiting on the user). Then read `result` / fetch the full tree once via ateam_get_chain if you need per-job detail.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chain_id: {
+          type: "string",
+          description: "The chain id returned by ateam_conversation (the conversation's identity). Any job id in the chain also works — Core resolves the chain aggregate.",
+        },
+      },
+      required: ["chain_id"],
+    },
+  },
+  {
     name: "ateam_get_widget_catalog",
     core: true,
     description:
@@ -1722,6 +1740,7 @@ const TENANT_TOOLS = new Set([
   "ateam_test_status",
   "ateam_test_abort",
   "ateam_get_chain",
+  "ateam_chain_status",
   "ateam_get_widget_catalog",
   "ateam_get_connector_source",
   "ateam_get_metrics",
@@ -3172,7 +3191,8 @@ const handlers = {
       _poll: chainId
         ? {
             _note: "Conversation started (async). The reply is NOT in this response — poll the CHAIN for it.",
-            slim: `ateam_get_chain(job_id: "${chainId}")  → chain tree + per-job status; the routed worker's terminal job carries the reply`,
+            slim: `ateam_chain_status(chain_id: "${chainId}")  → cheap chip-quick poll; loop ~2s until chain_done===true (whole chain terminal, not just one job). Then read result.`,
+            full: `ateam_get_chain(job_id: "${chainId}")  → full tree + per-job detail (heavier; use once, not in a poll loop)`,
             continue: kickoff?.actor_id ? `ateam_conversation(actor_id: "${kickoff.actor_id}", ...) to continue the thread` : undefined,
           }
         : undefined,
@@ -3419,6 +3439,43 @@ const handlers = {
       throw new Error(`Core /api/job/${job_id}/chain returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
     }
     return data;
+  },
+
+  // SLIM chain status — the chip-quick poll. Hits Core /api/job/:id/status
+  // (slimJob), which returns the WHOLE-CHAIN aggregate `chainStatus`/`chainDone`
+  // (computeChainStatus over chainId) alongside the single-job status. This is
+  // the right thing to poll on a loop after ateam_conversation: a single job
+  // can terminate while the chain is still active — chainDone only flips when
+  // the CHAIN is done. Cheap enough for periodic polling (no full tree).
+  ateam_chain_status: async ({ chain_id, job_id }, sid) => {
+    const id = chain_id || job_id;
+    if (!id) throw new Error("chain_id required");
+    const creds = getCredentials(sid);
+    const apiKey = creds?.apiKey;
+    if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
+    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+    const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(id)}/status`, {
+      method: "GET",
+      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.chain_status" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
+    if (!res.ok) {
+      throw new Error(`Core /api/job/${id}/status returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
+    }
+    // Surface the chain-aggregate truth as the primary fields; keep the raw
+    // slim job under `job` for callers that want per-job detail.
+    return {
+      chain_id: data.chainId || id,
+      chain_status: data.chainStatus ?? data.status ?? null,
+      chain_done: data.chainDone ?? data.done ?? null,
+      pending_question: data.pendingQuestion || null,
+      result: data.result ?? null,
+      progress: data.progress || null,
+      job: data,
+    };
   },
 
   ateam_get_widget_catalog: async ({ origin, format }, sid) => {
