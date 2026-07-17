@@ -434,7 +434,9 @@ export const tools = [
     name: "ateam_conversation",
     core: true,
     description:
-      "Send a message to a deployed solution and get the result. No skill_id needed — the system auto-routes to the right skill. Supports multi-turn conversations: pass the actor_id from a previous response to continue the thread (e.g., reply to a confirmation prompt). Each call creates a new job but the same actor_id maintains conversation context.",
+      "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
+      "ALWAYS ASYNC: returns a chain id (job_id) immediately — the assistant's reply is NOT in this response (a conversation can run for minutes, so a synchronous wait would hit the 100s edge timeout → 524). Poll for the reply with ateam_get_chain(job_id) — it returns the chain tree + per-job status; the routed worker's terminal job carries the reply.\n\n" +
+      "Multi-turn: pass the actor_id from a previous response back in to continue the same thread (e.g. reply to a confirmation prompt). Each call is a new job; the same actor_id maintains conversation context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -449,14 +451,6 @@ export const tools = [
         actor_id: {
           type: "string",
           description: "Optional: actor ID from a previous response to continue the conversation. Omit for a new conversation.",
-        },
-        wait: {
-          type: "boolean",
-          description: "If true (default), wait for completion. If false, return job_id immediately for polling.",
-        },
-        timeout_ms: {
-          type: "number",
-          description: "Optional: max wait time in ms (default: 60000, max: 300000).",
         },
       },
       required: ["solution_id", "message"],
@@ -3161,15 +3155,26 @@ const handlers = {
   },
 
   ateam_conversation: async ({ solution_id, message, actor_id, wait, timeout_ms }, sid) => {
-    const asyncMode = wait === false;
-    const body = {
-      message,
-      ...(actor_id ? { actor_id } : {}),
-      ...(asyncMode ? { async: true } : {}),
-      ...(timeout_ms ? { timeout_ms } : {}),
+    // ALWAYS async on the wire. A conversation can run for minutes (auto-route
+    // → worker → sub-skills), and a synchronous hold would blow past the 100s
+    // Cloudflare edge limit → 524. So we kick off, return the chain id (job_id)
+    // immediately, and the caller polls a SLIM status. `wait`/`timeout_ms` are
+    // accepted for back-compat but no longer hold the HTTP request open.
+    const body = { message, async: true, ...(actor_id ? { actor_id } : {}) };
+    const kickoff = await post(`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs: 15_000 });
+    const jobId = kickoff?.job_id || kickoff?.jobId || null;
+    return {
+      ...kickoff,
+      job_id: jobId,
+      chain_id: jobId,
+      _poll: jobId
+        ? {
+            _note: "Conversation started (async). Poll for the reply — do NOT expect it in this response.",
+            slim: `ateam_get_chain(job_id: "${jobId}")  → chain tree + per-job status`,
+            continue: kickoff?.actor_id ? `ateam_conversation(actor_id: "${kickoff.actor_id}", ...) to continue the thread` : undefined,
+          }
+        : undefined,
     };
-    const timeoutMs = asyncMode ? 15_000 : Math.min((timeout_ms || 60_000) + 30_000, 330_000);
-    return post(`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs });
   },
 
   ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id }, sid) => {
