@@ -2847,7 +2847,17 @@ const handlers = {
 
     // Dry-run: return diff + would-be after-state without writing to GitHub
     // or redeploying. Lets an agent preview any destructive-looking edit.
+    // would_write mirrors the EXACT persistence request the real run makes
+    // (method/endpoint/body key) so create-vs-update routing bugs surface in
+    // dry-run instead of only on the real write.
     if (dry_run) {
+      const would_write = isLocal
+        ? (target === "skill" && skill_id && isNewSkill
+            ? { method: "POST", endpoint: `/deploy/solutions/${solution_id}/skills`, body_key: "skill", creates: true }
+            : target === "skill" && skill_id
+              ? { method: "PATCH", endpoint: `/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, body_key: "updates" }
+              : { method: "PATCH", endpoint: `/deploy/solutions/${solution_id}`, body_key: "state_update" })
+        : { method: "POST", endpoint: `/deploy/solutions/${solution_id}/github/patch`, body_key: "content" };
       return {
         ok: true,
         dry_run: true,
@@ -2857,6 +2867,7 @@ const handlers = {
         phases,
         _diff,
         after_state: patched,
+        would_write,
         would_write_bytes: JSON.stringify(patched, null, 2).length,
         hint: "No changes applied. Remove dry_run:true to commit + redeploy.",
       };
@@ -2867,14 +2878,27 @@ const handlers = {
       const patchKeys = Object.keys(updates || {});
       const message = `Patch: ${target}${skill_id ? ` ${skill_id}` : ""} — ${patchKeys.join(", ")}`;
       if (isLocal) {
-        // Write the FULL patched object to the Builder store. Top-level keys are
-        // replaced (removals honored) — the client-side merge above already
-        // resolved _push/_delete/_update, so we send the resolved object.
-        const endpoint = (target === "skill" && skill_id)
-          ? `/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`
-          : `/deploy/solutions/${solution_id}`;
-        await patch(endpoint, { state_update: patched }, sid, { timeoutMs: 30_000 });
-        phases.push({ phase: "local_write", status: "done" });
+        // Write the FULL patched object to the Builder store. The client-side
+        // merge above already resolved _push/_delete/_update, so we send the
+        // resolved object. THREE distinct Builder routes, each with its own
+        // body contract (mismatching them 400s):
+        //   • NEW skill    → POST /deploy/solutions/:id/skills   { skill }
+        //     (creates via the Builder, applies the full definition, and
+        //      pushes the topology skills[] entry — the PATCH route can't
+        //      create: it 404s on resolveSkillId / 400s "Updates object is
+        //      required". This was the japanese-tutor repo-less bug.)
+        //   • EXISTING skill → PATCH …/skills/:skillId           { updates }
+        //   • Solution       → PATCH /deploy/solutions/:id       { state_update }
+        if (target === "skill" && skill_id && isNewSkill) {
+          await post(`/deploy/solutions/${solution_id}/skills`, { skill: patched }, sid, { timeoutMs: 30_000 });
+          phases.push({ phase: "local_write", status: "done", created: true });
+        } else if (target === "skill" && skill_id) {
+          await patch(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, { updates: patched }, sid, { timeoutMs: 30_000 });
+          phases.push({ phase: "local_write", status: "done" });
+        } else {
+          await patch(`/deploy/solutions/${solution_id}`, { state_update: patched }, sid, { timeoutMs: 30_000 });
+          phases.push({ phase: "local_write", status: "done" });
+        }
       } else {
         await post(`/deploy/solutions/${solution_id}/github/patch`, {
           path: filePath,
