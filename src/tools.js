@@ -74,6 +74,88 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   };
 }
 
+// ─── Widget health verification ────────────────────────────────────
+//
+// A skill/solution that declares UI plugins (ui_plugins[]) can silently ship
+// a NON-RENDERING widget: the connector may not expose the plugin via
+// ui.listPlugins, the manifest may lack a render block, or the declared id may
+// be mistyped. Core's live catalog (GET /api/ui-plugins) reflects what Core
+// ACTUALLY discovered — it calls each connector's ui.listPlugins live — so we
+// cross-check every declared plugin against it AND assert a usable render
+// block. Callers fold the report into deploy/verify output so a broken widget
+// is surfaced at deploy time, not discovered later as a blank panel.
+//
+// Returns null when the solution declares no widgets (nothing to check), else
+// { ok, checked, healthy, plugins[], issues[]?, hint? }.
+function _widgetHasRender(r) {
+  if (!r || typeof r !== "object" || !r.mode) return false;
+  const hasIframe = !!(r.iframeUrl || r.iframe?.iframeUrl);
+  const hasRn = !!(r.reactNative?.component);
+  if (r.mode === "iframe") return hasIframe;
+  if (r.mode === "react-native") return hasRn;
+  if (r.mode === "adaptive") return hasIframe || hasRn;
+  return true; // unknown mode — don't false-positive on a custom render
+}
+
+async function verifyWidgetHealth(solution_id, sid) {
+  // 1. Declared plugins — solution.ui_plugins[]
+  let declared = [];
+  try {
+    const def = await get(`/deploy/solutions/${solution_id}/definition`, sid);
+    const sol = def?.solution || def?.definition || def || {};
+    declared = Array.isArray(sol.ui_plugins) ? sol.ui_plugins : [];
+  } catch (e) {
+    return { ok: false, error: `widget health: could not read solution definition — ${e.message}` };
+  }
+  if (declared.length === 0) return null; // no widgets → nothing to verify
+
+  // 2. Live catalog — what Core actually discovered/serves right now
+  const apiKey = getCredentials(sid)?.apiKey;
+  let live = [];
+  try {
+    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+    const res = await fetch(`${coreUrl}/api/ui-plugins`, {
+      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.verify_widget_health" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await res.json().catch(() => ({}));
+    live = Array.isArray(data?.plugins) ? data.plugins : [];
+  } catch (e) {
+    return { ok: false, error: `widget health: could not read live plugin catalog — ${e.message}` };
+  }
+  const liveById = new Map(live.map((p) => [p?.id, p]));
+
+  // 3. Cross-check each declared plugin against live discovery + render block
+  const plugins = declared.map((d) => {
+    const id = typeof d === "string" ? d : d?.id;
+    const problems = [];
+    const found = id ? liveById.get(id) : null;
+    if (!id) {
+      problems.push("ui_plugins entry has no id");
+    } else if (!found) {
+      problems.push("not discovered by Core — the owning connector's ui.listPlugins does not return this id (check the plugin id, and that the connector is ui_capable + deployed)");
+    }
+    const render = found?.render || (typeof d === "object" ? d?.render : null);
+    const render_ok = _widgetHasRender(render);
+    if (found && !render_ok) {
+      problems.push("no usable render block — need render.mode + iframeUrl (iframe) or reactNative.component (RN)");
+    }
+    return { id: id || "(missing)", discovered: !!found, render_ok, problems };
+  });
+
+  const unhealthy = plugins.filter((p) => p.problems.length);
+  return {
+    ok: unhealthy.length === 0,
+    checked: plugins.length,
+    healthy: plugins.length - unhealthy.length,
+    plugins,
+    ...(unhealthy.length && {
+      issues: unhealthy.map((p) => `${p.id}: ${p.problems.join("; ")}`),
+      hint: "A declared widget Core doesn't discover will render as a blank panel. If the connector was scaffolded by ateam_create_connector, confirm the plugin's ui-dist/<plugin>/manifest.json deployed; for a hardcoded-list connector, add the plugin to its ui.listPlugins/getPlugin. Re-check with ateam_get_widget_catalog.",
+    }),
+  };
+}
+
 // ─── Dotted-field resolver ─────────────────────────────────────────
 //
 // Given an object and a dotted field name, walk down the path creating
@@ -2797,6 +2879,17 @@ const handlers = {
       phases.push({ phase: "agent_doc", status: "skipped", reason: err.message });
     }
 
+    // Phase 6: Widget health — if the solution declares UI plugins, verify each
+    // one actually renders (Core discovered it + it has a render block). Catches
+    // the silent "declared but non-rendering" widget at deploy time.
+    let widget_health = null;
+    try {
+      widget_health = await verifyWidgetHealth(solutionId, sid);
+      if (widget_health) {
+        phases.push({ phase: "widget_health", status: widget_health.ok ? "done" : "warn", checked: widget_health.checked });
+      }
+    } catch { /* advisory — never fail a successful deploy on the health check */ }
+
     return {
       ok: true,
       solution_id: solutionId,
@@ -2809,11 +2902,14 @@ const handlers = {
         ...(deploy.auto_expanded_skills?.length > 0 && { auto_expanded: deploy.auto_expanded_skills }),
       },
       health,
+      ...(widget_health && { widget_health }),
       ...(test_result && { test_result }),
       ...(github_result && !github_result.error && !github_result.skipped && { github: github_result }),
       ...(agent_doc_result && !agent_doc_result.error && { agent_doc: agent_doc_result }),
       ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
-      _status: '✅ Deployed to Core + pushed to main.',
+      _status: widget_health && !widget_health.ok
+        ? `✅ Deployed to Core + pushed to main. ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
+        : '✅ Deployed to Core + pushed to main.',
       _next: 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
     };
   },
@@ -3158,6 +3254,17 @@ const handlers = {
 
     const redeployOk = phases.some(p => p.phase === "redeploy" && p.status === "done");
     const store = isLocal ? "Builder store (local)" : "GitHub";
+
+    // Widget health — if the redeploy landed and the solution declares UI
+    // plugins, verify each renders (Core discovered it + has a render block).
+    let widget_health = null;
+    if (redeployOk) {
+      try {
+        widget_health = await verifyWidgetHealth(solution_id, sid);
+        if (widget_health) phases.push({ phase: "widget_health", status: widget_health.ok ? "done" : "warn", checked: widget_health.checked });
+      } catch { /* advisory — never downgrade a successful patch on the health check */ }
+    }
+
     return {
       ok: true,
       solution_id,
@@ -3167,9 +3274,12 @@ const handlers = {
       patched: patched,
       ...(isNewSkill && { created_skill: skill_id }),
       ...(redeployResult && { redeploy: redeployResult }),
+      ...(widget_health && { widget_health }),
       ...(test_result && { test_result }),
       _status: redeployOk
-        ? `✅ Patched on ${store} + redeployed.`
+        ? (widget_health && !widget_health.ok
+            ? `✅ Patched on ${store} + redeployed. ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
+            : `✅ Patched on ${store} + redeployed.`)
         : `⚠️ Patched on ${store} ✅ but redeploy timed out. Run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')',
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
@@ -3986,12 +4096,45 @@ const handlers = {
       sid,
       { timeoutMs: 120_000, retries: 1 },
     );
+
+    // Verify the plugin actually became RENDERABLE — poll Core's live catalog
+    // (which calls the connector's ui.listPlugins) for this plugin id. The
+    // connector restarts on upload, so allow a few seconds to re-scan ui-dist
+    // and re-announce. Turns create_plugin into a VERIFIED result (renders:true
+    // or a concrete reason) instead of a hopeful "files written".
+    const pluginId = `mcp:${connector_id}:${plugin_name}`;
+    let verified = { renders: false, note: "not yet discovered by Core after upload" };
+    try {
+      const apiKey = getCredentials(sid)?.apiKey;
+      const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 2500));
+        const res = await fetch(`${coreUrl}/api/ui-plugins`, {
+          headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.create_plugin_verify" },
+          signal: AbortSignal.timeout(15_000),
+        }).catch(() => null);
+        if (!res || !res.ok) continue;
+        const data = await res.json().catch(() => ({}));
+        const found = (data?.plugins || []).find((p) => p?.id === pluginId);
+        if (found) {
+          verified = _widgetHasRender(found.render)
+            ? { renders: true, render_ok: true, note: "discovered by Core with a valid render block — it will render" }
+            : { renders: false, render_ok: false, note: "discovered, but its manifest has no usable render block (need render.mode + iframeUrl/reactNative)" };
+          break;
+        }
+      }
+      if (!verified.renders && !("render_ok" in verified)) {
+        verified.hint = "Not in Core's live catalog yet. If the connector is lazy (stopped until first call), its plugins only appear once declared in solution ui_plugins[] — declare it, or ensure the connector is ui_capable + connected. Re-check with ateam_get_widget_catalog.";
+      }
+    } catch { /* advisory — never fail the create on the verify probe */ }
+
     return {
       ok: true,
-      plugin_id: `mcp:${connector_id}:${plugin_name}`,
+      plugin_id: pluginId,
       kind: k,
       files_created: files.map(f => f.path),
       upload_result: result,
+      verified,
       next_steps: [
         k === "rn" || k === "adaptive"
           ? `Edit plugins/${plugin_name}/index.tsx — fill in the Component body.`
@@ -4067,7 +4210,7 @@ const handlers = {
     const deployedCount = result.deployed ?? (result.ok ? (skill_id ? 1 : (result.skills?.filter(s => s.ok !== false).length || 0)) : 0);
     const totalCount = result.total ?? (deployedCount + failedCount);
 
-    return {
+    const out = {
       ok: result.ok,
       solution_id,
       ...(skill_id && { skill_id }),
@@ -4089,6 +4232,19 @@ const handlers = {
             ? `Re-deploy failed: ${result.error}${result.hint ? ` — ${result.hint}` : ''}`
             : `Re-deploy had ${failedCount} failure(s). Check skills array or call the underlying endpoint with verbose:true.`),
     };
+    // If the deploy landed and the solution declares widgets, verify each one
+    // actually renders (discovered by Core + has a render block). A silently
+    // non-rendering widget is a common, hard-to-notice failure — surface it here.
+    if (result.ok) {
+      try {
+        const wh = await verifyWidgetHealth(solution_id, sid);
+        if (wh) {
+          out.widget_health = wh;
+          if (!wh.ok) out.message += ` ⚠️ ${wh.issues?.length || 0} widget issue(s) — see widget_health.`;
+        }
+      } catch { /* health check is advisory — never fail the deploy on it */ }
+    }
+    return out;
   },
 
   // ─── Master Key Bulk Tools ───────────────────────────────────────────
