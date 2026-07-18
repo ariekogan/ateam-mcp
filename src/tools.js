@@ -4052,9 +4052,14 @@ const handlers = {
       displayName: name || connector_id,
       uiCapable: !!ui_capable,
     });
+    // replace:true — this is a NEW connector: the scaffold IS the complete file
+    // set, and there's nothing to merge against (no GitHub base, nothing
+    // deployed yet). Without it the upload route's merge-protection 409s a
+    // brand-new connector on a repo-less tenant ("no existing base to merge").
+    // Partial uploads (ateam_create_plugin) still merge; a full create replaces.
     const result = await post(
       `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
-      { files },
+      { files, replace: true },
       sid,
       { timeoutMs: 120_000, retries: 1 },
     );
