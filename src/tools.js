@@ -2181,10 +2181,10 @@ export default {
   // ui.listPlugins is generated from ui-dist/<plugin>/manifest.json pick it up
   // automatically, and for connectors with a HARDCODED plugin list (e.g.
   // personal-assistant-ui-mcp) copy this render block into their ui.getPlugin.
-  const mode = k === "iframe" ? "iframe" : k === "rn" ? "react-native" : "adaptive";
+  const mode = kind === "iframe" ? "iframe" : kind === "rn" ? "react-native" : "adaptive";
   const render = { mode };
-  if (k === "iframe" || k === "adaptive") render.iframeUrl = `/ui/${pluginName}/index.html`;
-  if (k === "rn" || k === "adaptive") render.reactNative = { component: pluginName };
+  if (kind === "iframe" || kind === "adaptive") render.iframeUrl = `/ui/${pluginName}/index.html`;
+  if (kind === "rn" || kind === "adaptive") render.reactNative = { component: pluginName };
   const prettyName = pluginName.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   files.push({
     path: `ui-dist/${pluginName}/manifest.json`,

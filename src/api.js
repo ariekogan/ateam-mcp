@@ -393,7 +393,7 @@ function headers(sessionId) {
 /**
  * Format an API error into a user-friendly message with actionable hints.
  */
-function formatError(method, path, status, body) {
+function formatError(method, path, status, body, baseUrl) {
   const hints = {
     400: "Bad request — see the error details above for what to fix.",
     401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call ateam_auth(api_key: \"your_key\").",
@@ -434,7 +434,12 @@ function formatError(method, path, status, body) {
   const hint = hints[status] || "";
   const detail = typeof body === "string" && body.length > 0 && body.length < 2000 ? body : "";
 
-  let msg = `A-Team API error: ${method} ${path} returned ${status}`;
+  // Always show the FULL URL actually hit — ateam-mcp is a PUBLIC MCP with a
+  // configurable base (prod default, dev/self-host overrides), so a bare
+  // "POST /deploy/..." 404 is ambiguous: is the route missing, or did the
+  // request go to the wrong base? The full URL disambiguates instantly.
+  const target = baseUrl ? `${baseUrl}${path}` : path;
+  let msg = `A-Team API error: ${method} ${target} returned ${status}`;
   if (detail) msg += ` — ${detail}`;
   if (hint) msg += `\nHint: ${hint}`;
 
@@ -486,7 +491,7 @@ async function request(method, path, body, sessionId, opts = {}) {
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(formatError(method, path, res.status, text));
+        throw new Error(formatError(method, path, res.status, text, baseUrl));
       }
 
       return res.json();
