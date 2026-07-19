@@ -383,6 +383,26 @@ export const tools = [
     },
   },
   {
+    name: "ateam_spec_search",
+    core: true,
+    description:
+      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Natural-language question, e.g. 'how do I send a proactive daily reminder?' or 'per-user persistence'.",
+        },
+        top_k: {
+          type: "number",
+          description: "How many chunks to return (default 8, max 25).",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
     name: "ateam_build_and_run",
     core: true,
     description:
@@ -2231,7 +2251,7 @@ const handlers = {
     },
     design_advisor: {
       _important: "BEFORE and WHILE you design any skill/solution you MUST consult ateam_design_advisor. You do NOT know which platform capabilities exist or when to use them — the advisor does. Describe your goal to it and it returns pointers to the right capabilities (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill handoff, GitHub, …) with the /spec topic to read next and the tool to wire each. It's advisory — you decide and own the design — but skipping it means you'll miss capabilities the platform already provides.",
-      how: "ateam_design_advisor({ goal: '<what you are building, in your words>', design_state: {} }). Re-call it as the design evolves (pass the current design_state) to get 'what's still missing' hints. Then ateam_get_spec(topic) for any capability it points you to.",
+      how: "ateam_design_advisor({ goal: '<what you are building, in your words>', design_state: {} }). Re-call it as the design evolves (pass the current design_state) to get 'what's still missing' hints. Then ateam_get_spec(topic) for any capability it points you to. For anything deeper — details, examples, or topics outside the capability list — ateam_spec_search({ query: '<how do I…>' }) does a semantic search over the FULL spec docs.",
     },
     what_is_a_team: {
       definition: "A Team is a structured multi-role AI system composed of Skills, Connectors, Governance contracts, and Managed Runtime deployment.",
@@ -2598,6 +2618,13 @@ const handlers = {
   ateam_design_advisor: async ({ goal, design_state }, sid) => {
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
     return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1 });
+  },
+
+  // Semantic search over the full /spec corpus (Builder /spec/search → the
+  // sysSpecSearch-mcp platform connector). Public read-only endpoint.
+  ateam_spec_search: async ({ query, top_k }, sid) => {
+    if (!query || typeof query !== "string") throw new Error("query required (a string question)");
+    return post("/spec/search", { query, ...(top_k ? { top_k } : {}) }, sid, { timeoutMs: 30_000, retries: 1 });
   },
 
   // ─── Composite: Build & Run ────────────────────────────────────────
