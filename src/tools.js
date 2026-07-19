@@ -87,6 +87,27 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
 //
 // Returns null when the solution declares no widgets (nothing to check), else
 // { ok, checked, healthy, plugins[], issues[]?, hint? }.
+// Compress a skill/solution definition to a small, non-truncating summary for
+// tool results — enough to confirm the shape without the 10s-of-KB full doc.
+function _summarizeDef(def) {
+  if (!def || typeof def !== "object") return def;
+  const pick = (arr, key) => Array.isArray(arr) ? arr.map((x) => (typeof x === "string" ? x : x?.[key] || x?.id)).filter(Boolean) : undefined;
+  return {
+    id: def.id,
+    name: def.name,
+    version: def.version,
+    phase: def.phase,
+    ...(def.linked_skills && { linked_skills: pick(def.linked_skills, "id") }),
+    ...(def.skills && { skills: pick(def.skills, "id") }),
+    ...(def.connectors && { connectors: pick(def.connectors, "id") }),
+    ...(def.platform_connectors && { platform_connectors: pick(def.platform_connectors, "id") }),
+    ...(def.ui_plugins && { ui_plugins: pick(def.ui_plugins, "id") }),
+    ...(def.tools && { tools: pick(def.tools, "name") }),
+    _fields: Object.keys(def),
+    _note: "compact summary — pass include_definition:true to ateam_patch for the full definition.",
+  };
+}
+
 function _widgetHasRender(r) {
   if (!r || typeof r !== "object" || !r.mode) return false;
   const hasIframe = !!(r.iframeUrl || r.iframe?.iframeUrl);
@@ -109,16 +130,12 @@ async function verifyWidgetHealth(solution_id, sid) {
   }
   if (declared.length === 0) return null; // no widgets → nothing to verify
 
-  // 2. Live catalog — what Core actually discovered/serves right now
-  const apiKey = getCredentials(sid)?.apiKey;
+  // 2. Live catalog — what Core actually discovered/serves right now. Go through
+  // the Builder proxy (reliable from any connection), NOT ADAS_CORE_URL directly
+  // (unreachable from remote/desktop MCP — the old "fetch failed" flakiness).
   let live = [];
   try {
-    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
-    const res = await fetch(`${coreUrl}/api/ui-plugins`, {
-      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.verify_widget_health" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    const data = await res.json().catch(() => ({}));
+    const data = await get(`/deploy/solutions/${solution_id}/ui-plugins`, sid);
     live = Array.isArray(data?.plugins) ? data.plugins : [];
   } catch (e) {
     return { ok: false, error: `widget health: could not read live plugin catalog — ${e.message}` };
@@ -698,6 +715,10 @@ export const tools = [
           enum: ["github", "local"],
           description:
             "Where the solution/skill definition lives. 'github' (DEFAULT) — read from and write to the tenant's GitHub repo (GitHub is master; the normal path). 'local' — read from and write to the Builder FS store (no GitHub repo required). Use 'local' ONLY for a repo-less bootstrap tenant (e.g. freshly onboarded from a template, before GitHub is connected). This is a DEDICATED, EXPLICIT switch — never a fallback. Redeploy is local in both modes.",
+        },
+        include_definition: {
+          type: "boolean",
+          description: "If true, return the FULL patched definition. Default false — the result returns a compact patched_summary instead, because the full definition can exceed the ~50KB output limit and truncate the rest of the result (redeploy status, widget_health).",
         },
       },
       required: ["solution_id", "target", "updates"],
@@ -1372,6 +1393,10 @@ export const tools = [
           type: "string",
           description: "The connector ID to read (e.g. 'home-assistant-mcp')",
         },
+        path: {
+          type: "string",
+          description: "Optional. Read ONE file (e.g. 'server.js', 'ui-dist/panel/index.html'). Omit to get a file manifest (paths + sizes, no content) — a whole connector's source exceeds the ~50KB output limit and truncates, so read files one at a time.",
+        },
       },
       required: ["solution_id", "connector_id"],
     },
@@ -1396,6 +1421,19 @@ export const tools = [
           type: "string",
           description: "Optional: recent metrics for a specific skill",
         },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_verify",
+    core: true,
+    description:
+      "ONE call that returns the REAL runtime end-state of a solution — connectors connected + tools discovered, every declared widget actually rendering, skills deployed — with the EXACT failing gaps. Use this instead of guess-and-check after a deploy/patch: it tells you the truth (what's actually live) and names precisely what's broken, not a generic warning. Reliable from any connection (routes through the Builder, not a direct Core call).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID to verify." },
       },
       required: ["solution_id"],
     },
@@ -2977,7 +3015,7 @@ const handlers = {
   // Updates → Redeploys → Optionally tests
   // One call replaces: ateam_update + ateam_redeploy
 
-  ateam_patch: async ({ solution_id, target, skill_id, updates, test_message, dry_run, source }, sid) => {
+  ateam_patch: async ({ solution_id, target, skill_id, updates, test_message, dry_run, source, include_definition }, sid) => {
     const phases = [];
     let isNewSkill = false;
     const _diff = { arrays_merged: [], arrays_replaced: [], scalars_changed: [], sections_replaced: [] };
@@ -3330,7 +3368,13 @@ const handlers = {
       source: isLocal ? "local" : "github",
       ...(isLocal ? {} : { branch: 'main' }),
       phases,
-      patched: patched,
+      // The full patched definition can be 10s of KB and pushes the rest of the
+      // result (redeploy status, widget_health) past the ~50KB output ceiling,
+      // truncating it. Return a compact summary by default; pass
+      // include_definition:true for the whole thing.
+      ...(include_definition
+        ? { patched }
+        : { patched_summary: _summarizeDef(patched) }),
       ...(isNewSkill && { created_skill: skill_id }),
       ...(redeployResult && { redeploy: redeployResult }),
       ...(widget_health && { widget_health }),
@@ -3763,25 +3807,18 @@ const handlers = {
     };
   },
 
-  ateam_get_widget_catalog: async ({ origin, format }, sid) => {
-    // Wraps Core's existing GET /api/ui-plugins (merged tenant plugin list)
-    // and enriches each entry with the documentation/how-to-use layer.
-    // Filtering by origin and the summary/full format projection happen
-    // client-side here — Core just returns the raw merged plugins[].
-    const creds = getCredentials(sid);
-    const apiKey = creds?.apiKey;
-    if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
-    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
-    const res = await fetch(`${coreUrl}/api/ui-plugins`, {
-      method: "GET",
-      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.get_widget_catalog" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
-    if (!res.ok) {
-      throw new Error(`Core /api/ui-plugins returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
+  ateam_get_widget_catalog: async ({ origin, format, solution_id }, sid) => {
+    // Wraps Core's GET /api/ui-plugins (merged tenant plugin list) and enriches
+    // each entry with the documentation/how-to-use layer. Filtering by origin
+    // and the summary/full projection happen client-side here.
+    //
+    // Reaches the catalog through the Builder proxy (/deploy/.../ui-plugins) on
+    // the normal base URL — reliable from any connection. (The old direct
+    // ADAS_CORE_URL fetch "fetch failed" from remote/desktop MCP connections.)
+    if (!solution_id) throw new Error("solution_id required (used to route the catalog request through the Builder).");
+    const data = await get(`/deploy/solutions/${solution_id}/ui-plugins`, sid);
+    if (data?.ok === false) {
+      throw new Error(`widget catalog unavailable: ${data.error || "unknown"}`);
     }
 
     // Project each plugin into the catalog shape with how_to_use guidance.
@@ -3844,8 +3881,29 @@ const handlers = {
   ateam_test_abort: async ({ solution_id, skill_id, job_id }, sid) =>
     del(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
 
-  ateam_get_connector_source: async ({ solution_id, connector_id }, sid) =>
-    get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid),
+  ateam_get_connector_source: async ({ solution_id, connector_id, path }, sid) => {
+    const data = await get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
+    const files = Array.isArray(data?.files) ? data.files : [];
+    // A whole connector's source easily exceeds the ~50KB tool-output ceiling and
+    // truncates (you couldn't read the file you needed). So: no `path` → return a
+    // FILE MANIFEST (paths + sizes, no content — small); with `path` → return just
+    // that ONE file's content. Targeted, never truncated.
+    if (!path) {
+      return {
+        ok: true,
+        connector_id,
+        files: files.map((f) => ({ path: f.path, bytes: (f.content || "").length, encoding: f.encoding || "utf8" })),
+        total_bytes: files.reduce((n, f) => n + (f.content || "").length, 0),
+        hint: "Large source is not returned inline. Call again with path:'<file>' to read one file (e.g. path:'server.js').",
+      };
+    }
+    const norm = String(path).replace(/^\.?\//, "");
+    const file = files.find((f) => f.path === path || f.path === norm || f.path.replace(/^\.?\//, "") === norm);
+    if (!file) {
+      return { ok: false, connector_id, error: `file '${path}' not found`, available: files.map((f) => f.path) };
+    }
+    return { ok: true, connector_id, path: file.path, encoding: file.encoding || "utf8", content: file.content };
+  },
 
   // Render + write CLAUDE.md into the solution's GitHub repo.
   // Preserves content below the sentinel unless overwrite=true.
@@ -3919,6 +3977,70 @@ const handlers = {
 
   ateam_verify_consistency: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/verify`, sid),
+
+  // OPEN-7: one call that returns the REAL runtime end-state — connectors
+  // connected + tools discovered, declared widgets actually rendering, skills
+  // deployed — with the exact failing gaps, so you never guess-and-check.
+  // All sub-checks go through the Builder base (reliable from any connection).
+  ateam_verify: async ({ solution_id }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    const gaps = [];
+    const out = { ok: true, solution_id };
+
+    // 1. Connectors — connected + tools discovered.
+    try {
+      const ch = await get(`/deploy/solutions/${solution_id}/connectors/health`, sid);
+      const raw = ch?.connectors || ch?.results || (Array.isArray(ch) ? ch : []);
+      out.connectors = (raw || []).map((c) => {
+        const id = c.id || c.connector_id || c.name;
+        const connected = c.status === "connected" || c.connected === true || c.ok === true || c.healthy === true;
+        const tools = Array.isArray(c.tools) ? c.tools.length : (typeof c.tools === "number" ? c.tools : (c.toolCount ?? c.tool_count));
+        return { id, connected, tools };
+      });
+      for (const c of out.connectors) {
+        if (!c.connected) gaps.push(`connector '${c.id}' not connected`);
+        else if (c.tools === 0) gaps.push(`connector '${c.id}' connected but discovered 0 tools`);
+      }
+    } catch (e) {
+      out.connectors = { error: e.message };
+      gaps.push(`connectors health unavailable: ${e.message}`);
+    }
+
+    // 2. Widgets — every declared ui_plugin actually renders (reliable proxy).
+    try {
+      const wh = await verifyWidgetHealth(solution_id, sid);
+      out.widgets = wh || { checked: 0, note: "no widgets declared" };
+      if (wh && !wh.ok) for (const i of (wh.issues || [])) gaps.push(`widget: ${i}`);
+    } catch (e) {
+      out.widgets = { error: e.message };
+      gaps.push(`widget health unavailable: ${e.message}`);
+    }
+
+    // 3. Skills — deployed + registered (from the solution health check).
+    try {
+      const h = await get(`/deploy/solutions/${solution_id}/health`, sid);
+      const skills = h?.skills || h?.verification?.skills || [];
+      out.skills = (Array.isArray(skills) ? skills : []).map((s) => ({
+        id: s.skill_id || s.id || s.skillSlug,
+        deployed: s.ok !== false && s.status !== "failed",
+      }));
+      for (const s of out.skills) if (!s.deployed) gaps.push(`skill '${s.id}' not deployed`);
+      if (h?.needs_attention && Array.isArray(h.issues)) {
+        // Surface Core's own attention flags that aren't already captured.
+        for (const iss of h.issues.slice(0, 10)) gaps.push(`health: ${typeof iss === "string" ? iss : JSON.stringify(iss)}`);
+      }
+    } catch (e) {
+      out.skills = { error: e.message };
+      gaps.push(`solution health unavailable: ${e.message}`);
+    }
+
+    out.gaps = gaps;
+    out.ok = gaps.length === 0;
+    out._status = out.ok
+      ? "✅ Verified live — connectors connected, widgets render, skills deployed."
+      : `⚠️ ${gaps.length} gap(s): ${gaps.slice(0, 5).join("; ")}${gaps.length > 5 ? " …" : ""}`;
+    return out;
+  },
 
   ateam_diff: async ({ solution_id, skill_id }, sid) => {
     const qs = skill_id ? `?skill_id=${encodeURIComponent(skill_id)}` : "";
@@ -4169,16 +4291,11 @@ const handlers = {
     const pluginId = `mcp:${connector_id}:${plugin_name}`;
     let verified = { renders: false, note: "not yet discovered by Core after upload" };
     try {
-      const apiKey = getCredentials(sid)?.apiKey;
-      const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
       for (let attempt = 0; attempt < 4; attempt++) {
         await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 2500));
-        const res = await fetch(`${coreUrl}/api/ui-plugins`, {
-          headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.create_plugin_verify" },
-          signal: AbortSignal.timeout(15_000),
-        }).catch(() => null);
-        if (!res || !res.ok) continue;
-        const data = await res.json().catch(() => ({}));
+        // Reliable catalog via the Builder proxy (not direct ADAS_CORE_URL).
+        const data = await get(`/deploy/solutions/${solution_id}/ui-plugins`, sid).catch(() => null);
+        if (!data || data.ok === false) continue;
         const found = (data?.plugins || []).find((p) => p?.id === pluginId);
         if (found) {
           verified = _widgetHasRender(found.render)
