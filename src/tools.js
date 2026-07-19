@@ -363,6 +363,26 @@ export const tools = [
     },
   },
   {
+    name: "ateam_design_advisor",
+    core: true,
+    description:
+      "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the /spec topic to read next (via ateam_get_spec) and the tool to wire it. Also returns 'missing' hints (capabilities your goal implies but the design hasn't wired) and lifecycle hints (e.g. connect GitHub when the project will iterate). ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call; consult it as often as you like as the design evolves.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        goal: {
+          type: "string",
+          description: "What you're trying to build, in your own words (e.g. 'a coach that tracks each user's meals from photos and shows a dashboard').",
+        },
+        design_state: {
+          type: "object",
+          description: "Optional. The design so far (skills, connectors, capabilities already wired) so the advisor can point at what's still missing. Pass {} at the start.",
+        },
+      },
+      required: ["goal"],
+    },
+  },
+  {
     name: "ateam_build_and_run",
     core: true,
     description:
@@ -2209,6 +2229,10 @@ const handlers = {
       category: "AI Team Solution Platform",
       summary: "A-Team is a platform for building governed AI Teams as complete operational solutions.",
     },
+    design_advisor: {
+      _important: "BEFORE and WHILE you design any skill/solution you MUST consult ateam_design_advisor. You do NOT know which platform capabilities exist or when to use them — the advisor does. Describe your goal to it and it returns pointers to the right capabilities (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill handoff, GitHub, …) with the /spec topic to read next and the tool to wire each. It's advisory — you decide and own the design — but skipping it means you'll miss capabilities the platform already provides.",
+      how: "ateam_design_advisor({ goal: '<what you are building, in your words>', design_state: {} }). Re-call it as the design evolves (pass the current design_state) to get 'what's still missing' hints. Then ateam_get_spec(topic) for any capability it points you to.",
+    },
     what_is_a_team: {
       definition: "A Team is a structured multi-role AI system composed of Skills, Connectors, Governance contracts, and Managed Runtime deployment.",
       core_components: {
@@ -2567,6 +2591,14 @@ const handlers = {
   ateam_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
 
   ateam_get_examples: async ({ type }, sid) => get(EXAMPLE_PATHS[type], sid),
+
+  // Design-time capability advisor. Proxies to the Builder's /spec/advisor
+  // (LLM over the curated capability catalog). Public endpoint (auth-exempt),
+  // but we forward the session so a base override is honored.
+  ateam_design_advisor: async ({ goal, design_state }, sid) => {
+    if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
+    return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1 });
+  },
 
   // ─── Composite: Build & Run ────────────────────────────────────────
   // Validates → Deploys → Health-checks → Optionally tests
