@@ -257,7 +257,15 @@ export function startHttpServer(port = 3100) {
           console.log(`[HTTP] Stale session ${sessionId} — auto-reinitializing transparently (${req.body?.method || "unknown"})`);
         }
 
-        const newSessionId = randomUUID();
+        // Reuse the client's existing session id instead of rotating to a fresh
+        // one. Many MCP clients (Claude Code, desktop) cache their session id and
+        // keep resending it, ignoring a rotated id we hand back. If we minted a
+        // new id here, every subsequent call would look stale again → another new
+        // id → the id set by ateam_auth is abandoned by the next call → the agent
+        // must re-auth "every few calls" (OPEN-6). Reusing the incoming id keeps
+        // it stable, so credentials set under it survive across recovery. Only
+        // mint a fresh id for a truly new client that has none yet.
+        const newSessionId = sessionId || randomUUID();
 
         // Seed credentials from OAuth Bearer token before server starts
         seedCredentials(req, newSessionId);
