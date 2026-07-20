@@ -2653,16 +2653,43 @@ const handlers = {
   // Design-time capability advisor. Proxies to the Builder's /spec/advisor
   // (LLM over the curated capability catalog). Public endpoint (auth-exempt),
   // but we forward the session so a base override is honored.
-  ateam_design_advisor: async ({ goal, design_state }, sid) => {
+  ateam_design_advisor: async ({ goal, design_state, solution_id }, sid) => {
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
-    return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1 });
+    // Reach the advisor through the sysSpecSearch-mcp platform connector via the
+    // proven connector-call path (same as ateam_spec_search) — works on prod with
+    // no bespoke /spec route. The connector's advise tool proxies the Builder's
+    // LLM+catalog internally.
+    const sol = solution_id || "_";
+    const r = await post(
+      `/deploy/solutions/${encodeURIComponent(sol)}/connectors/sysSpecSearch-mcp/call`,
+      { tool: "sysSpecSearch.advise", args: { goal, design_state: design_state || {} } },
+      sid,
+      { timeoutMs: 90_000, retries: 1 },
+    );
+    const text = r?.result?.content?.[0]?.text;
+    if (text) { try { return JSON.parse(text); } catch { return { ok: true, raw: text }; } }
+    return r?.result ?? r;
   },
 
-  // Semantic search over the full /spec corpus (Builder /spec/search → the
-  // sysSpecSearch-mcp platform connector). Public read-only endpoint.
-  ateam_spec_search: async ({ query, top_k }, sid) => {
+  // Semantic search over the full /spec corpus. Reaches the sysSpecSearch-mcp
+  // PLATFORM connector through the proven connector-call path (the same route
+  // ateam_test_connector uses) — so it works wherever the existing tools do, with
+  // no bespoke /spec route to route on prod. Auth: the agent's api-key gates the
+  // Builder route; the Builder calls Core with the internal secret; tenant is
+  // forwarded from the session. solution_id is only for the route path (any).
+  ateam_spec_search: async ({ query, top_k, solution_id }, sid) => {
     if (!query || typeof query !== "string") throw new Error("query required (a string question)");
-    return post("/spec/search", { query, ...(top_k ? { top_k } : {}) }, sid, { timeoutMs: 30_000, retries: 1 });
+    const sol = solution_id || "_";
+    const r = await post(
+      `/deploy/solutions/${encodeURIComponent(sol)}/connectors/sysSpecSearch-mcp/call`,
+      { tool: "sysSpecSearch.search", args: { query, ...(top_k ? { top_k } : {}) } },
+      sid,
+      { timeoutMs: 30_000, retries: 1 },
+    );
+    // Unwrap the MCP tool result: { result: { content: [{ type:"text", text }] } }.
+    const text = r?.result?.content?.[0]?.text;
+    if (text) { try { return JSON.parse(text); } catch { return { ok: true, raw: text }; } }
+    return r?.result ?? r;
   },
 
   // ─── Composite: Build & Run ────────────────────────────────────────
