@@ -2653,22 +2653,13 @@ const handlers = {
   // Design-time capability advisor. Proxies to the Builder's /spec/advisor
   // (LLM over the curated capability catalog). Public endpoint (auth-exempt),
   // but we forward the session so a base override is honored.
-  ateam_design_advisor: async ({ goal, design_state, solution_id }, sid) => {
+  ateam_design_advisor: async ({ goal, design_state }, sid) => {
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
-    // Reach the advisor through the sysSpecSearch-mcp platform connector via the
-    // proven connector-call path (same as ateam_spec_search) — works on prod with
-    // no bespoke /spec route. The connector's advise tool proxies the Builder's
-    // LLM+catalog internally.
-    const sol = solution_id || "_";
-    const r = await post(
-      `/deploy/solutions/${encodeURIComponent(sol)}/connectors/sysSpecSearch-mcp/call`,
-      { tool: "sysSpecSearch.advise", args: { goal, design_state: design_state || {} } },
-      sid,
-      { timeoutMs: 90_000, retries: 1 },
-    );
-    const text = r?.result?.content?.[0]?.text;
-    if (text) { try { return JSON.parse(text); } catch { return { ok: true, raw: text }; } }
-    return r?.result ?? r;
+    // Direct call to the Builder's /spec/advisor. The session's X-ADAS-TENANT
+    // header rides along (post() sets it), so the Builder resolves this tenant's
+    // LLM via Core's sys.llm gateway (stage→tier→model, transparent — no keys in
+    // the Builder). Reachable externally on prod: the relay forwards /spec/*.
+    return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1 });
   },
 
   // Semantic search over the full /spec corpus. Reaches the sysSpecSearch-mcp
