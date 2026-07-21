@@ -4179,18 +4179,26 @@ const handlers = {
     return del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
   },
 
-  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace }, sid) =>
-    post(
-      `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
-      {
-        github,
-        files,
-        ...(ref ? { ref } : {}),
-        ...(replace === true ? { replace: true } : {}),
-      },
-      sid,
-      { timeoutMs: 300_000, retries: 1 },
-    ),
+  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace }, sid) => {
+    // Async-first: this runs npm install + build in Core (up to ~7min) and is a
+    // prime Cloudflare-524 culprit. Kick async → poll /deploy/jobs; fall back to
+    // sync for older backends that don't honor async. Mirrors ateam_github_pull.
+    const body = {
+      github,
+      files,
+      ...(ref ? { ref } : {}),
+      ...(replace === true ? { replace: true } : {}),
+    };
+    const url = `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
+    let kicked;
+    try {
+      kicked = await post(url, { ...body, async: true }, sid, { timeoutMs: 30_000 });
+    } catch (err) {
+      return await post(url, body, sid, { timeoutMs: 300_000, retries: 1 });
+    }
+    if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async
+    return await pollDeployJob(kicked.job_id, sid, { label: 'connector-upload', maxMs: 15 * 60_000, intervalMs: 2000 });
+  },
 
   // ── Phase 9 strip: focused minimal responses ────────────────────────
   ateam_show_skill_minimal: async ({ solution_id, skill_id }, sid) => {
@@ -4303,12 +4311,18 @@ const handlers = {
       pluginName: plugin_name,
       kind: k,
     });
-    const result = await post(
-      `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
-      { files },
-      sid,
-      { timeoutMs: 120_000, retries: 1 },
-    );
+    // Async-first upload — npm install+build can exceed Cloudflare's 100s → 524.
+    // Kick async → poll /deploy/jobs; fall back to sync for older backends.
+    const _uploadUrl = `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
+    let result;
+    try {
+      const kicked = await post(_uploadUrl, { files, async: true }, sid, { timeoutMs: 30_000 });
+      result = (kicked?.async && kicked.job_id)
+        ? await pollDeployJob(kicked.job_id, sid, { label: 'create-plugin', maxMs: 15 * 60_000, intervalMs: 2000 })
+        : kicked;
+    } catch (err) {
+      result = await post(_uploadUrl, { files }, sid, { timeoutMs: 120_000, retries: 1 });
+    }
 
     // Verify the plugin actually became RENDERABLE — poll Core's live catalog
     // (which calls the connector's ui.listPlugins) for this plugin id. The
