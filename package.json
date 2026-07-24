@@ -12,7 +12,8 @@
     "start": "node src/index.js",
     "start:http": "node src/index.js --http",
     "dev": "node --watch src/index.js",
-    "dev:http": "node --watch src/index.js --http"
+    "dev:http": "node --watch src/index.js --http",
+    "test": "node test/session-isolation.test.mjs"
   },
   "keywords": [
     "mcp",

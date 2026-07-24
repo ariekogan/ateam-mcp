@@ -211,6 +211,35 @@ export function bindSessionBearer(sessionId, bearerToken) {
   console.log(`[Auth] Bearer bound for session ${sessionId}`);
 }
 
+/**
+ * The bearer a session is bound to, or null if the session was never
+ * bearer-authenticated (e.g. a no-bearer ateam_auth flow). Used by the HTTP
+ * transport to enforce that a bearer-bound session can only be reused by a
+ * request presenting the SAME validated bearer — a client-supplied session-id
+ * alone must never grant access to another client's credentials.
+ */
+export function getSessionBearer(sessionId) {
+  return sessionBearers.get(sessionId) || null;
+}
+
+/**
+ * May a request presenting `presentedToken` (its validated bearer, or
+ * null/undefined if none) reuse a session whose bound bearer is `boundBearer`?
+ *
+ * - No bound bearer → the session was never bearer-authenticated (a no-bearer
+ *   ateam_auth flow); nothing to match against, allow (unchanged behavior).
+ * - Bound bearer → the request MUST present the exact same validated bearer.
+ *   A missing or different bearer is denied — so a client that knows another
+ *   client's (non-secret, logged/echoed) session-id cannot be served that
+ *   client's credentials by sending the id with no/other Authorization.
+ *
+ * Pure + exported for unit testing.
+ */
+export function bearerOwnershipOk(boundBearer, presentedToken) {
+  if (!boundBearer) return true;
+  return !!presentedToken && presentedToken === boundBearer;
+}
+
 /** Store ateam_auth override for this user (by bearer). Called from tools.js. */
 export function setAuthOverride(sessionId, { tenant, apiKey, apiUrl }) {
   const bearer = sessionBearers.get(sessionId);

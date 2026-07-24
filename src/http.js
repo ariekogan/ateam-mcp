@@ -26,7 +26,7 @@ import { createServer } from "./server.js";
 import {
   clearSession, setSessionCredentials, parseApiKey,
   startSessionSweeper, getSessionStats, sweepStaleSessions,
-  bindSessionBearer, getAuthOverride,
+  bindSessionBearer, getAuthOverride, getSessionBearer, bearerOwnershipOk,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
 import { connectGithubPage } from "./pages.js";
@@ -222,9 +222,10 @@ export function startHttpServer(port = 3100) {
     });
   });
 
-  // ─── Get API Key — redirect to Skill Builder with auto-open ──
+  // ─── Get API Key — redirect to the main web app's Tenant Admin →
+  //     Tokens & Keys (the key now lives in the main UI, not the builder). ──
   app.get("/get-api-key", (_req, res) => {
-    res.redirect("https://app.ateam-ai.com/builder/?show=api-key");
+    res.redirect("https://app.ateam-ai.com/?admin=tokens");
   });
 
   // ─── Connect GitHub — user-facing guide an agent links to on
@@ -235,8 +236,31 @@ export function startHttpServer(port = 3100) {
 
   // ─── MCP POST — handle tool calls + initialize ───────────────
   // Mounted at both "/" and "/mcp" for Claude.ai compatibility
+  // SECURITY (multi-client isolation): a session-id is client-supplied and
+  // non-secret (logged + echoed in the mcp-session-id response header). If a
+  // session was authenticated with a Bearer, ONLY a request presenting that SAME
+  // validated Bearer may reuse it — for POST (tool calls), GET (SSE stream) and
+  // DELETE (terminate). Without this, a client could send another client's
+  // session-id on the optional-auth /mcp path with no/other Authorization and be
+  // served that client's tenant + api key (or read its stream / kill its
+  // session). A session with no bound bearer (the no-bearer ateam_auth flow) has
+  // nothing to match against, so this is a no-op there.
+  const denySessionReuse = (req, res, sessionId) => {
+    if (sessionId && !bearerOwnershipOk(getSessionBearer(sessionId), req.auth?.token)) {
+      console.warn(`[Auth] DENY session reuse: bearer mismatch for session ${sessionId} (presented=${req.auth?.token ? "other-bearer" : "none"})`);
+      res.status(401).json({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Unauthorized: this session belongs to a different credential. Re-initialize with your own Authorization." },
+        id: req.body?.id ?? null,
+      });
+      return true;
+    }
+    return false;
+  };
+
   const mcpPost = async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
+    if (denySessionReuse(req, res, sessionId)) return;
 
     try {
       let transport;
@@ -345,6 +369,7 @@ export function startHttpServer(port = 3100) {
       res.json({ ok: true, service: "ateam-mcp", transport: "http" });
       return;
     }
+    if (denySessionReuse(req, res, sessionId)) return;
     await transports[sessionId].handleRequest(req, res);
   };
 
@@ -355,6 +380,7 @@ export function startHttpServer(port = 3100) {
       res.status(400).send("Invalid or missing session ID");
       return;
     }
+    if (denySessionReuse(req, res, sessionId)) return;
     await transports[sessionId].handleRequest(req, res);
   };
 
