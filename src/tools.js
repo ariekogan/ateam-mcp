@@ -332,9 +332,9 @@ export const tools = [
       properties: {
         topic: {
           type: "string",
-          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets"],
+          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins"],
           description:
-            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory.",
+            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget.",
         },
         section: {
           type: "string",
@@ -371,9 +371,9 @@ export const tools = [
       properties: {
         type: {
           type: "string",
-          enum: ["skill", "connector", "connector-ui", "solution", "script-cache-skill", "index"],
+          enum: ["skill", "connector", "connector-ui", "solution", "script-cache-skill", "ui-plugin-native", "index"],
           description:
-            "Example type: 'skill' = Order Support Agent, 'connector' = stdio MCP connector, 'connector-ui' = UI-capable connector, 'solution' = full 3-skill e-commerce solution, 'script-cache-skill' = fat-tool skill with script_cache opt-in (reference implementation of script-level JIT shortcuts — study this before building any browser-automation skill), 'index' = list all available examples",
+            "Example type: 'skill' = Order Support Agent, 'connector' = stdio MCP connector, 'connector-ui' = UI-capable connector, 'solution' = full 3-skill e-commerce solution, 'script-cache-skill' = fat-tool skill with script_cache opt-in (reference implementation of script-level JIT shortcuts — study this before building any browser-automation skill), 'ui-plugin-native' = complete working React Native (mobile) UI plugin (rn-src/index.tsx + esbuild build:rn → rn-bundle, @adas/plugin-sdk, es2015), 'index' = list all available examples",
         },
       },
       required: ["type"],
@@ -1862,6 +1862,7 @@ const SPEC_PATHS = {
   "connector-multi-user": "/spec/multi-user-connector",
   python_helpers: "/spec/python_helpers",
   widgets: "/spec/widgets",
+  "ui-plugins": "/spec/ui-plugins",
 };
 
 const EXAMPLE_PATHS = {
@@ -1871,6 +1872,7 @@ const EXAMPLE_PATHS = {
   "connector-ui": "/spec/examples/connector-ui",
   solution: "/spec/examples/solution",
   "script-cache-skill": "/spec/examples/script-cache-skill",
+  "ui-plugin-native": "/spec/examples/ui-plugin-native",
 };
 
 // Tools that are tenant-aware — require EXPLICIT ateam_auth (env vars alone not enough).
@@ -2102,10 +2104,15 @@ the \`tools/call\` dispatch. Data tools are per-actor — call \`getActorId(args
 ## Adding UI plugins (ui_capable connectors)
 
 Use \`ateam_create_plugin\` (or drop the files yourself): iframe plugins go under
-\`ui-dist/<plugin-name>/index.html\` with a \`ui-dist/<plugin-name>/manifest.json\`
-(RN under \`plugins/<plugin-name>/index.tsx\`). This connector's
-\`ui.listPlugins\` / \`ui.getPlugin\` read those manifests at call time, so a new
-plugin renders with NO server.js edit.
+\`ui-dist/<plugin-name>/index.html\` with a \`ui-dist/<plugin-name>/manifest.json\`.
+RN plugins have editable source at \`rn-src/<plugin-name>.tsx\` (imported from
+\`@adas/plugin-sdk\`) AND a PRE-BUILT, COMMITTED bundle at
+\`rn-bundle/<plugin-name>.bundle.js\` — the mobile
+app downloads the bundle, and Core never compiles the .tsx (deploys run
+\`npm install --no-optional\`, which skips esbuild). After editing the .tsx,
+rebuild the bundle with the esbuild command in its header and commit it. This
+connector's \`ui.listPlugins\` / \`ui.getPlugin\` read the manifests at call time,
+so a new plugin renders with NO server.js edit.
 
 ## Deploy
 
@@ -2187,15 +2194,24 @@ function _scaffoldPluginFiles({ connectorId, pluginName, kind }) {
   }
 
   if (kind === "rn" || kind === "adaptive") {
-    const tsx = `// ${pluginName} — React Native plugin. Generated by ateam_create_plugin.
+    const tsx = `// ${pluginName} — React Native plugin SOURCE (editable). Generated by ateam_create_plugin.
 //
-// Fill in the Component body. Imports, hooks, default export shape are
-// template-provided — Phase 7 of the strip eliminates this boilerplate.
+// ⚠️  Core does NOT compile this .tsx. Deploys run "npm install --production
+//     --no-optional" (which skips esbuild's platform binary) and only ever run a
+//     "build" script — never "build:rn". The mobile app therefore loads the
+//     PRE-BUILT, COMMITTED bundle at rn-bundle/${pluginName}.bundle.js, NOT this
+//     file. cp.getContextPlugin advertises reactNative.bundleUrl only when that
+//     bundle exists on disk — no bundle → mobile has nothing to download.
+//
+// After editing this file, rebuild the bundle and commit it (target=es2015 is
+// REQUIRED — the mobile runtime evals the bundle with new Function(), which
+// cannot parse async/await; es2015 downlevels it):
+//   npx esbuild rn-src/${pluginName}.tsx --bundle --format=cjs --platform=neutral --target=es2015 --external:react --external:react-native --external:@adas/plugin-sdk --outfile=rn-bundle/${pluginName}.bundle.js
 
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { useApi } from '../../plugin-sdk';
-import type { PluginProps } from '../../plugin-sdk/types';
+import { useApi } from '@adas/plugin-sdk';
+import type { PluginProps } from '@adas/plugin-sdk';
 
 // Plain object export — NO PluginSDK.register() (pollutes shared registry).
 export default {
@@ -2214,7 +2230,7 @@ export default {
         const result = await api.call('${connectorId}.echo', { message: 'hello' });
         setOutput(JSON.stringify(result, null, 2));
       } catch (err: any) {
-        native?.haptics?.error?.();
+        native?.haptics?.notification?.('error');
         setOutput('Error: ' + err.message);
       }
     };
@@ -2246,8 +2262,87 @@ export default {
 };
 `;
     files.push({
-      path: `plugins/${pluginName}/index.tsx`,
+      path: `rn-src/${pluginName}.tsx`,
       content: tsx,
+    });
+
+    // Pre-built RN bundle — THIS is the file the mobile app actually downloads.
+    // cp.getContextPlugin only advertises reactNative.bundleUrl when a
+    // rn-bundle/<pluginId>.bundle.js (or index.bundle.js) exists on disk; the
+    // deploy pipeline can't produce it (npm install --no-optional skips esbuild,
+    // and only a "build" script would run — not "build:rn"), so we SHIP it
+    // pre-built and committed. Without this file the manifest carries
+    // render.reactNative.component but no bundleUrl and mobile renders nothing
+    // (the web iframe still works). Named per-plugin (matches cp.getContextPlugin's
+    // \`${'$'}{pluginId}.bundle.js\` primary lookup) so multiple RN widgets can
+    // coexist in one connector. Kept in sync with the .tsx above via the esbuild
+    // command in its header. es2015 CJS, plain-object default export, no
+    // async/await — passes the mobile new Function() load test.
+    const rnBundle = `"use strict";
+// ${pluginName} — pre-built React Native bundle (es2015 CJS). Generated by
+// ateam_create_plugin from rn-src/${pluginName}.tsx. DO NOT hand-edit —
+// edit the .tsx and rerun the esbuild command in its header, then commit this.
+var React = require("react");
+var ReactNative = require("react-native");
+var sdk = require("@adas/plugin-sdk");
+var useState = React.useState;
+var h = React.createElement;
+var View = ReactNative.View;
+var Text = ReactNative.Text;
+var TouchableOpacity = ReactNative.TouchableOpacity;
+var StyleSheet = ReactNative.StyleSheet;
+var useApi = sdk.useApi;
+
+function Component(props) {
+  var native = props.native, theme = props.theme;
+  var api = useApi(props.bridge);
+  var _s = useState(""), output = _s[0], setOutput = _s[1];
+
+  function handlePress() {
+    if (native && native.haptics && native.haptics.selection) native.haptics.selection();
+    api.call("${connectorId}.echo", { message: "hello" }).then(function (result) {
+      setOutput(JSON.stringify(result, null, 2));
+    }, function (err) {
+      if (native && native.haptics && native.haptics.notification) native.haptics.notification("error");
+      setOutput("Error: " + (err && err.message ? err.message : String(err)));
+    });
+  }
+
+  var c = theme.colors;
+  var styles = StyleSheet.create({
+    container: { padding: 16, backgroundColor: c.bg, flex: 1 },
+    card: { backgroundColor: c.surface, padding: 12, borderRadius: 8 },
+    title: { fontSize: 18, fontWeight: "600", color: c.text, marginBottom: 8 },
+    button: { backgroundColor: c.accent, padding: 12, borderRadius: 6, marginTop: 12 },
+    buttonText: { color: "#fff", textAlign: "center", fontWeight: "600" },
+    output: { color: c.textMuted, marginTop: 12, fontFamily: "Menlo" }
+  });
+
+  return h(View, { style: styles.container },
+    h(View, { style: styles.card },
+      h(Text, { style: styles.title }, "${pluginName}"),
+      h(Text, { style: { color: c.textMuted } }, "Plugin body — replace with your real UI."),
+      h(TouchableOpacity, { style: styles.button, onPress: handlePress },
+        h(Text, { style: styles.buttonText }, "Call sample tool")),
+      output ? h(Text, { style: styles.output }, output) : null
+    )
+  );
+}
+
+var plugin = {
+  id: "${pluginName}",
+  type: "ui",
+  version: "1.0.0",
+  capabilities: { haptics: true },
+  Component: Component
+};
+
+module.exports = plugin;
+module.exports.default = plugin;
+`;
+    files.push({
+      path: `rn-bundle/${pluginName}.bundle.js`,
+      content: rnBundle,
     });
   }
 
@@ -4350,7 +4445,7 @@ const handlers = {
       verified,
       next_steps: [
         k === "rn" || k === "adaptive"
-          ? `Edit plugins/${plugin_name}/index.tsx — fill in the Component body.`
+          ? `Edit rn-src/${plugin_name}.tsx — fill in the Component body, THEN rebuild + commit rn-bundle/${plugin_name}.bundle.js (esbuild command is in the .tsx header). Core does NOT compile the .tsx — mobile loads the committed bundle. A pre-built starter bundle ships with this scaffold, so it renders as-is until you edit it.`
           : null,
         k === "iframe" || k === "adaptive"
           ? `Edit ui-dist/${plugin_name}/index.html — replace the placeholder UI.`
