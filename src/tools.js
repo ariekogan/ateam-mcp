@@ -103,6 +103,14 @@ function _summarizeDef(def) {
     ...(def.platform_connectors && { platform_connectors: pick(def.platform_connectors, "id") }),
     ...(def.ui_plugins && { ui_plugins: pick(def.ui_plugins, "id") }),
     ...(def.tools && { tools: pick(def.tools, "name") }),
+    // OPEN-20: connector-imported tools don't all appear as literal entries in
+    // `tools` — they come from `toolbox_imports` and/or wildcard entries like
+    // "connector-id:*" that EXPAND to every tool of that connector at runtime.
+    // Surface both so an agent doesn't read a real runtime tool as "missing".
+    ...(def.toolbox_imports && { toolbox_imports: pick(def.toolbox_imports, "connector_id") || def.toolbox_imports }),
+    ...((Array.isArray(def.tools) && def.tools.some((t) => typeof (t?.name) === "string" && t.name.endsWith(":*"))) && {
+      _tools_note: "Entries ending ':*' (or toolbox_imports) grant ALL of that connector's tools at RUNTIME — the specific tool names (e.g. 'connector.foo.get') are callable even though they aren't listed literally here. Verify with a live test_skill / connectors_health, not this summary.",
+    }),
     _fields: Object.keys(def),
     _note: "compact summary — pass include_definition:true to ateam_patch for the full definition.",
   };
