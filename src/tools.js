@@ -136,11 +136,13 @@ async function verifyWidgetHealth(solution_id, sid) {
   } catch (e) {
     return { ok: false, error: `widget health: could not read solution definition — ${e.message}` };
   }
-  if (declared.length === 0) return null; // no widgets → nothing to verify
 
-  // 2. Live catalog — what Core actually discovered/serves right now. Go through
-  // the Builder proxy (reliable from any connection), NOT ADAS_CORE_URL directly
-  // (unreachable from remote/desktop MCP — the old "fetch failed" flakiness).
+  // 2. Live catalog — what Core actually discovered/serves right now. Includes
+  // CONNECTOR-BUNDLED widgets that render WITHOUT being declared in ui_plugins[],
+  // so we must consult it even when ui_plugins is empty (was the bug: verify
+  // reported "no widgets declared / checked 0" while 16 widgets were live).
+  // Go through the Builder proxy (reliable from any connection), NOT
+  // ADAS_CORE_URL directly (unreachable from remote/desktop MCP).
   let live = [];
   try {
     const data = await get(`/deploy/solutions/${solution_id}/ui-plugins`, sid);
@@ -149,6 +151,29 @@ async function verifyWidgetHealth(solution_id, sid) {
     return { ok: false, error: `widget health: could not read live plugin catalog — ${e.message}` };
   }
   const liveById = new Map(live.map((p) => [p?.id, p]));
+
+  // Nothing declared AND nothing served → genuinely no widgets.
+  if (declared.length === 0 && live.length === 0) return null;
+
+  // Nothing declared but connectors SERVE widgets → verify the live
+  // (connector-bundled) set instead of falsely reporting "no widgets".
+  if (declared.length === 0) {
+    const plugins = live.map((p) => {
+      const render_ok = _widgetHasRender(p?.render);
+      return {
+        id: p?.id || "(missing)", discovered: true, render_ok, source: "connector-bundled",
+        problems: render_ok ? [] : ["no usable render block — need render.mode + iframeUrl (iframe) or reactNative.component (RN)"],
+      };
+    });
+    const unhealthy = plugins.filter((p) => p.problems.length);
+    return {
+      ok: unhealthy.length === 0,
+      checked: plugins.length,
+      note: `${plugins.length} connector-bundled widget(s) served by connectors (none declared in solution.ui_plugins[])`,
+      plugins,
+      issues: unhealthy.flatMap((p) => p.problems.map((pr) => `${p.id}: ${pr}`)),
+    };
+  }
 
   // 3. Cross-check each declared plugin against live discovery + render block
   const plugins = declared.map((d) => {
@@ -3991,8 +4016,17 @@ const handlers = {
     // Reaches the catalog through the Builder proxy (/deploy/.../ui-plugins) on
     // the normal base URL — reliable from any connection. (The old direct
     // ADAS_CORE_URL fetch "fetch failed" from remote/desktop MCP connections.)
-    if (!solution_id) throw new Error("solution_id required (used to route the catalog request through the Builder).");
-    const data = await get(`/deploy/solutions/${solution_id}/ui-plugins`, sid);
+    // solution_id is optional (one tenant = one solution): auto-resolve the
+    // tenant's solution when omitted, per the doc — don't hard-error.
+    let sol = solution_id;
+    if (!sol) {
+      const list = await get(`/deploy/solutions`, sid).catch((e) => { throw new Error(`solution_id omitted and could not list the tenant's solutions to auto-resolve: ${e.message}`); });
+      const sols = Array.isArray(list?.solutions) ? list.solutions : [];
+      if (sols.length === 1) sol = sols[0]?.id || sols[0];
+      else if (sols.length === 0) throw new Error("solution_id omitted and this tenant has no solutions yet.");
+      else throw new Error(`solution_id omitted and this tenant has multiple solutions (${sols.map((s) => s?.id || s).join(", ")}) — pass solution_id explicitly.`);
+    }
+    const data = await get(`/deploy/solutions/${sol}/ui-plugins`, sid);
     if (data?.ok === false) {
       throw new Error(`widget catalog unavailable: ${data.error || "unknown"}`);
     }
