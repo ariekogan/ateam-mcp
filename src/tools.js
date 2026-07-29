@@ -3160,6 +3160,7 @@ const handlers = {
     const phases = [];
     let isNewSkill = false;
     let _connectorToolPush = null;
+    let writeBranch = "dev"; // github/patch default; overwritten by the actual response branch
     const _diff = { arrays_merged: [], arrays_replaced: [], scalars_changed: [], sections_replaced: [] };
 
     // Two backing stores, chosen EXPLICITLY by `source` (never inferred):
@@ -3416,12 +3417,17 @@ const handlers = {
           phases.push({ phase: "local_write", status: "done" });
         }
       } else {
-        await post(`/deploy/solutions/${solution_id}/github/patch`, {
+        // github/patch writes to `dev` by default (agents don't edit prod
+        // directly). Capture the ACTUAL branch it committed to — do NOT assume
+        // 'main'; mislabeling it strands the change off `main` until an explicit
+        // ateam_github_promote (was: the result hardcoded branch:"main").
+        const ghResp = await post(`/deploy/solutions/${solution_id}/github/patch`, {
           path: filePath,
           content: JSON.stringify(patched, null, 2),
           message,
         }, sid, { timeoutMs: 30_000 });
-        phases.push({ phase: "github_write", status: "done" });
+        writeBranch = ghResp?.branch || writeBranch;
+        phases.push({ phase: "github_write", status: "done", branch: writeBranch });
       }
     } catch (err) {
       const store = isLocal ? "Builder store (local)" : "GitHub";
@@ -3520,7 +3526,12 @@ const handlers = {
       ok: true,
       solution_id,
       source: isLocal ? "local" : "github",
-      ...(isLocal ? {} : { branch: 'main' }),
+      ...(isLocal ? {} : {
+        branch: writeBranch,
+        // Be explicit: a github write lands on `dev`, not prod. The change is
+        // NOT on `main` until an explicit ateam_github_promote(dev→main).
+        ...(writeBranch !== "main" && { _branch_note: `Committed to "${writeBranch}" (not main). Run ateam_github_promote(solution_id) to ship dev→main; otherwise a future build_and_run(main) won't include this.` }),
+      }),
       phases,
       // The full patched definition can be 10s of KB and pushes the rest of the
       // result (redeploy status, widget_health) past the ~50KB output ceiling,
