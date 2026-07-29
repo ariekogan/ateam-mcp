@@ -3478,12 +3478,18 @@ const handlers = {
     // the redeploy with ateam_redeploy(solution_id, skill_id).
     let redeployResult;
     try {
-      if (target === "skill" && skill_id) {
-        redeployResult = await post(`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`, {}, sid, { timeoutMs: 180_000 });
-      } else {
-        redeployResult = await post(`/deploy/solutions/${solution_id}/redeploy`, {}, sid, { timeoutMs: 180_000 });
-      }
-      phases.push({ phase: "redeploy", status: "done" });
+      const rdEndpoint = (target === "skill" && skill_id)
+        ? `/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
+        : `/deploy/solutions/${solution_id}/redeploy`;
+      // Async-first, same as ateam_redeploy: a bulk (solution) redeploy of a
+      // many-skill solution takes >100s and 524s on the sync path — the patch
+      // then LOOKED like it failed / never reached Core. Kick async + poll;
+      // fall back to sync for older backends.
+      const kicked = await post(rdEndpoint, { async: true }, sid, { timeoutMs: 30_000 });
+      redeployResult = (kicked?.async && kicked.job_id)
+        ? await pollDeployJob(kicked.job_id, sid, { label: skill_id ? `redeploy-skill ${skill_id}` : "redeploy-bulk", maxMs: 15 * 60_000, intervalMs: 2000 })
+        : kicked;
+      phases.push({ phase: "redeploy", status: redeployResult?.ok === false ? "error" : "done" });
     } catch (err) {
       // Partial success: patch is saved to GitHub, only redeploy failed.
       // Return ok:true so the agent doesn't think the patch was lost.
