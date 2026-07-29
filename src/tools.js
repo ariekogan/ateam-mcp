@@ -12,7 +12,7 @@ import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, touchSession, getSessionContext,
-  setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere,
+  setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere, getBaseUrl,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -332,7 +332,7 @@ export const tools = [
       properties: {
         topic: {
           type: "string",
-          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins"],
+          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector"],
           description:
             "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget.",
         },
@@ -1863,6 +1863,16 @@ const SPEC_PATHS = {
   python_helpers: "/spec/python_helpers",
   widgets: "/spec/widgets",
   "ui-plugins": "/spec/ui-plugins",
+  // Capability topics — MUST stay in sync with the capability catalog's
+  // spec_topic values so every ateam_design_advisor `read_spec` pointer
+  // resolves (was OPEN-19: advisor pointed at topics get_spec didn't accept).
+  "actor-storage": "/spec/actor-storage",
+  voice: "/spec/voice",
+  "voice-native": "/spec/voice-native",
+  triggers: "/spec/triggers",
+  "sub-agent": "/spec/sub-agent",
+  "consumer-roles": "/spec/consumer-roles",
+  "mobile-connector": "/spec/mobile-connector",
 };
 
 const EXAMPLE_PATHS = {
@@ -2723,10 +2733,20 @@ const handlers = {
         message: `Authenticated to tenant "${resolvedTenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found.`,
       };
     } catch (err) {
+      // OPEN-18: a well-formed `adas_<tenant>_<hex>` key that's rejected is often
+      // a key for the OTHER environment (a dev key against the prod base, or vice
+      // versa). Surface the base we tried and, if it looks like that mismatch,
+      // hint the dev-api retry — instead of a generic "invalid/unconfigured key".
+      const base = getBaseUrl(sessionId) || "";
+      const wellFormedKey = parseApiKey(api_key).isValid;
+      const triedProd = /(?:^|\/\/)api\.ateam-ai\.com/.test(base);
+      const hint = wellFormedKey && triedProd
+        ? ` This is a well-formed tenant key ("adas_${resolvedTenant}_…") but ${base} rejected it — if it's a DEV key, retry: ateam_auth(api_key, url:"https://dev-api.ateam-ai.com").`
+        : ` (tried ${base || "the default base"})`;
       return {
         ok: false,
         tenant: resolvedTenant,
-        message: `Authentication failed: ${err.message}. The user can get a valid API key at https://mcp.ateam-ai.com/get-api-key`,
+        message: `Authentication failed: ${err.message}.${hint} The user can get a valid API key at https://mcp.ateam-ai.com/get-api-key`,
       };
     }
   },
