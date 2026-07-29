@@ -3408,10 +3408,15 @@ const handlers = {
         skill_id,
         phases,
         _diff,
-        after_state: patched,
+        // OPEN-8: the full after-state (a big skill/solution def) blows the ~50KB
+        // output cap and truncates the rest of the result. Return a compact
+        // summary by default; pass include_definition:true for the whole thing.
+        ...(include_definition
+          ? { after_state: patched }
+          : { after_state_summary: _summarizeDef(patched) }),
         would_write,
         would_write_bytes: JSON.stringify(patched, null, 2).length,
-        hint: "No changes applied. Remove dry_run:true to commit + redeploy.",
+        hint: "No changes applied. Remove dry_run:true to commit + redeploy. (Pass include_definition:true for the full after_state.)",
       };
     }
 
