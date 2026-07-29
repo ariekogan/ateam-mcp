@@ -116,6 +116,32 @@ function _summarizeDef(def) {
   };
 }
 
+// OPEN-8: byte offset/limit paging for reads that can exceed the ~50KB output
+// cap. Serializes the result to pretty JSON and returns a [offset, offset+limit)
+// slice plus a cursor so an agent can page the rest (like Read offset/limit).
+function _pageJson(data, offset = 0, limit) {
+  const full = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  const total = full.length;
+  const start = Math.min(Math.max(0, Math.trunc(offset) || 0), total);
+  const size = (limit != null) ? Math.max(1, Math.trunc(limit)) : (total - start);
+  const chunk = full.slice(start, start + size);
+  const end = start + chunk.length;
+  return {
+    ok: true,
+    _paging: {
+      offset: start,
+      limit: (limit != null) ? size : null,
+      returned_bytes: chunk.length,
+      total_bytes: total,
+      next_offset: end < total ? end : null,
+      has_more: end < total,
+      note: end < total ? `Truncated to bytes ${start}-${end} of ${total}. Fetch the next page with offset:${end}.` : `Complete (bytes ${start}-${end} of ${total}).`,
+    },
+    // Raw JSON text slice — parse only once you've concatenated all pages.
+    content: chunk,
+  };
+}
+
 function _widgetHasRender(r) {
   if (!r || typeof r !== "object" || !r.mode) return false;
   const hasIframe = !!(r.iframeUrl || r.iframe?.iframeUrl);
@@ -782,6 +808,14 @@ export const tools = [
         section: {
           type: "string",
           description: "Optional (with skill_id): return ONLY this section of the skill instead of the whole definition — avoids the ~50KB output truncation on big skills. Dotted paths work (e.g. 'role', 'tools', 'intents.supported', 'policy', 'engine'). Omit for the full skill; use ateam_show_skill_minimal for the slim authoring view.",
+        },
+        offset: {
+          type: "number",
+          description: "Optional byte-paging: start returning the serialized result from this byte offset. Use with 'limit' to page a result larger than the ~50KB output cap; the response's _paging.next_offset gives the next page (null when done). Concatenate the `content` slices across pages, then JSON.parse.",
+        },
+        limit: {
+          type: "number",
+          description: "Optional byte-paging: max bytes of the serialized result to return in this page (pair with 'offset'). Omit both for the whole result (may truncate at the output cap).",
         },
       },
       required: ["solution_id", "view"],
@@ -3672,22 +3706,24 @@ const handlers = {
     return { ...raw, solutions: enriched };
   },
 
-  ateam_get_solution: async ({ solution_id, view, skill_id, section }, sid) => {
+  ateam_get_solution: async ({ solution_id, view, skill_id, section, offset, limit }, sid) => {
     const base = `/deploy/solutions/${solution_id}`;
+    const paged = (offset != null || limit != null);
     if (skill_id) {
       const r = await get(`${base}/skills/${skill_id}`, sid);
       // OPEN-8: a single skill def can be 50KB+ and truncate at the output cap.
-      // `section` slices it to one field (dotted paths ok, e.g. intents.supported)
-      // so agents can page a big skill instead of grepping a truncated file.
+      // `section` slices it to one field (dotted paths ok, e.g. intents.supported);
+      // offset/limit page the raw bytes — so a big skill is always readable.
+      let result = r;
       if (section) {
         const skill = r?.skill || r?.definition || r || {};
         const val = String(section).split(".").reduce((o, k) => (o == null ? undefined : o[k]), skill);
-        return {
+        result = {
           ok: true, solution_id, skill_id, section, [section]: val,
           _note: `Sliced to '${section}'. Omit 'section' for the full skill; ateam_show_skill_minimal gives the slim authoring view.`,
         };
       }
-      return r;
+      return paged ? _pageJson(result, offset, limit) : result;
     }
     const paths = {
       definition: `${base}/definition`,
@@ -3698,7 +3734,8 @@ const handlers = {
       validate: `${base}/validate`,
       connectors_health: `${base}/connectors/health`,
     };
-    return get(paths[view], sid);
+    const viewResult = await get(paths[view], sid);
+    return paged ? _pageJson(viewResult, offset, limit) : viewResult;
   },
 
   ateam_update: async ({ solution_id, target, skill_id, updates }, sid) => {
