@@ -779,6 +779,10 @@ export const tools = [
           type: "string",
           description: "Optional: read a specific skill by ID (original or internal)",
         },
+        section: {
+          type: "string",
+          description: "Optional (with skill_id): return ONLY this section of the skill instead of the whole definition — avoids the ~50KB output truncation on big skills. Dotted paths work (e.g. 'role', 'tools', 'intents.supported', 'policy', 'engine'). Omit for the full skill; use ateam_show_skill_minimal for the slim authoring view.",
+        },
       },
       required: ["solution_id", "view"],
     },
@@ -3668,9 +3672,23 @@ const handlers = {
     return { ...raw, solutions: enriched };
   },
 
-  ateam_get_solution: async ({ solution_id, view, skill_id }, sid) => {
+  ateam_get_solution: async ({ solution_id, view, skill_id, section }, sid) => {
     const base = `/deploy/solutions/${solution_id}`;
-    if (skill_id) return get(`${base}/skills/${skill_id}`, sid);
+    if (skill_id) {
+      const r = await get(`${base}/skills/${skill_id}`, sid);
+      // OPEN-8: a single skill def can be 50KB+ and truncate at the output cap.
+      // `section` slices it to one field (dotted paths ok, e.g. intents.supported)
+      // so agents can page a big skill instead of grepping a truncated file.
+      if (section) {
+        const skill = r?.skill || r?.definition || r || {};
+        const val = String(section).split(".").reduce((o, k) => (o == null ? undefined : o[k]), skill);
+        return {
+          ok: true, solution_id, skill_id, section, [section]: val,
+          _note: `Sliced to '${section}'. Omit 'section' for the full skill; ateam_show_skill_minimal gives the slim authoring view.`,
+        };
+      }
+      return r;
+    }
     const paths = {
       definition: `${base}/definition`,
       skills: `${base}/skills`,
