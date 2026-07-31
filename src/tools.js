@@ -3261,11 +3261,51 @@ const handlers = {
         current = JSON.parse(readResult.content);
       }
     } catch (err) {
-      // If it's a skill that doesn't exist yet, create a default scaffold.
-      // This lets agents use ateam_patch to both CREATE and UPDATE skills —
-      // no separate "create" step needed.
+      // OPEN-31 guard: only scaffold-create when the skill is GENUINELY ABSENT.
+      // The old code scaffolded on ANY read error, so a transient github/read
+      // failure (fetch failed, 5xx, parse error) silently OVERWROTE a full
+      // deployed skill with a bare scaffold on the next write — total data loss.
+      //
+      // A genuine "doesn't exist" is a 404 (or the local empty-definition throw).
+      // Anything else = the store is unreachable/broken → FAIL LOUD, never write.
+      const notFound = err.status === 404 || /not found \(empty definition\)/i.test(err.message || "");
+      if (target === "skill" && skill_id && !notFound) {
+        return {
+          ok: false, phase: "read",
+          error: `Refusing to patch "${skill_id}": could not read its current definition from ${isLocal ? "the Builder store" : "GitHub"} (${err.message}). This is NOT a "skill doesn't exist" error (that would be a 404) — scaffolding now could DESTROY the existing definition. Retry once the store is reachable, or check ateam_get_solution(solution_id, skill_id).`,
+          phases,
+        };
+      }
+      // Even on a real 404, the skill may exist in the OTHER source (deployed to
+      // the Builder store but not pushed to GitHub, or vice versa). Scaffolding
+      // then would destroy/diverge that real def — cross-check before creating.
       if (target === "skill" && skill_id) {
-        console.log(`[ateam_patch] Skill "${skill_id}" not found on GitHub — creating new skill scaffold`);
+        let otherDef = null;
+        try {
+          const other = isLocal
+            ? JSON.parse((await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid)).content)
+            : await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, sid);
+          otherDef = other?.skill || other?.definition || other;
+        } catch { otherDef = null; /* absent in the other source too → truly new */ }
+        const otherIsReal = otherDef && typeof otherDef === "object" && (
+          (Array.isArray(otherDef.tools) && otherDef.tools.length > 0) ||
+          (Array.isArray(otherDef.connectors) && otherDef.connectors.length > 0) ||
+          otherDef.voice_native || otherDef.ui_plugins ||
+          (otherDef.role && otherDef.role.persona)
+        );
+        if (otherIsReal) {
+          return {
+            ok: false, phase: "read",
+            error: `Refusing to patch "${skill_id}": it was not found in ${isLocal ? "the Builder store" : "GitHub"}, but a full definition EXISTS in ${isLocal ? "GitHub" : "the Builder store"}. Scaffold-creating here would destroy/diverge it. Sync the two first (ateam_redeploy / ateam_verify_consistency), then retry — do NOT patch-create over an existing skill.`,
+            phases,
+          };
+        }
+      }
+      // If it's a skill that GENUINELY doesn't exist (404 in the primary source
+      // AND absent from the other), create a default scaffold. This lets agents
+      // use ateam_patch to both CREATE and UPDATE skills — no separate step.
+      if (target === "skill" && skill_id) {
+        console.log(`[ateam_patch] Skill "${skill_id}" genuinely absent (404, both sources) — creating new skill scaffold`);
         isNewSkill = true;
         current = {
           id: skill_id,

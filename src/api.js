@@ -520,7 +520,12 @@ async function request(method, path, body, sessionId, opts = {}) {
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(formatError(method, path, res.status, text, baseUrl));
+        // Attach the HTTP status so callers can distinguish a genuine 404
+        // (resource absent) from a transient/5xx failure. ateam_patch relies
+        // on this to NOT scaffold-clobber an existing skill on a read error.
+        const e = new Error(formatError(method, path, res.status, text, baseUrl));
+        e.status = res.status;
+        throw e;
       }
 
       return res.json();
