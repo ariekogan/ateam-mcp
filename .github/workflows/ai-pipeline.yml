@@ -147,7 +147,7 @@ jobs:
       - name: Stage review rules into the workspace
         run: |
           mkdir -p .github/review-rules
-          cp ._aip/.github/review-rules/*.md .github/review-rules/ 2>/dev/null || true
+          cp -n ._aip/.github/review-rules/*.md .github/review-rules/ 2>/dev/null || true
           git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=100 || true
       - name: Resolve review model + effort (fails loudly, never gpt-4o)
         id: model
