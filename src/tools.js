@@ -1026,6 +1026,7 @@ export const tools = [
       "  • github:true + files:[]        — GitHub state at `ref` as BASE, your files overlay on top (incoming wins).\n" +
       "  • files:[] (no github)          — default MERGE with GitHub state at `ref`. Refuses if no GitHub base exists (no silent nuke).\n" +
       "  • files:[] + replace:true       — full replace. Wipes connector dir + writes only the provided files. Use deliberately.\n\n" +
+      "Multi-file connectors (server.js + dashboard HTML + RN bundle + package/manifest): pass each file with content_base64 (a single-line, escape-safe base64 string) instead of content — so you don't hand-escape ~90KB of HTML/JS/JSON inside one tool call. This is the CANONICAL agent path for a full connector; do NOT hand-roll `curl` against the raw endpoint (that skips connector registration / PAT provisioning).\n\n" +
       "Common traps this design prevents:\n" +
       "  • Pre-fix bug (2026-06-06): sending just ui-dist HTML wiped server.js + node_modules — connector broke until a full re-upload. Now: those files merge with the GitHub base.\n" +
       "  • Pre-fix bug: github:true silently read from `main` even when patches were on `dev`. Now: defaults to dev; pass ref:'main' to opt into the legacy path.",
@@ -1054,11 +1055,12 @@ export const tools = [
             type: "object",
             properties: {
               path: { type: "string", description: "Relative file path (e.g. 'server.js', 'ui-dist/panel/index.html')" },
-              content: { type: "string", description: "File content" },
+              content: { type: "string", description: "File content as an inline string. Prefer content_base64 when the content has complex escaping (HTML/JS/JSON)." },
+              content_base64: { type: "string", description: "File content as a single-line base64 string — escape-safe. PREFERRED for a multi-file connector so large HTML/JS/bundles don't need hand-escaping in the tool call. Provide exactly ONE of content / content_base64 per file." },
             },
-            required: ["path", "content"],
+            required: ["path"],
           },
-          description: "Files to upload. By default merges with the GitHub state at `ref`. Set replace:true to wipe the connector dir and write only these files.",
+          description: "Files to upload — each needs 'path' plus ONE of content (inline string) or content_base64 (escape-safe base64; preferred for multi-file connectors). By default merges with the GitHub state at `ref`. Set replace:true to wipe the connector dir and write only these files.",
         },
         replace: {
           type: "boolean",
@@ -4463,12 +4465,40 @@ const handlers = {
   },
 
   ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace }, sid) => {
+    // OPEN-32: accept content_base64 per file (single-line, escape-safe) and
+    // decode it to plain content here, so an agent can upload a multi-file
+    // connector without hand-escaping ~90KB of HTML/JS/JSON in one tool call —
+    // and via THIS registered path (not a raw curl that skips PAT provisioning).
+    let normFiles = files;
+    if (Array.isArray(files)) {
+      normFiles = files.map((f, i) => {
+        if (!f || typeof f !== "object" || !f.path) {
+          throw new Error(`ateam_upload_connector: files[${i}] must be an object with a 'path'.`);
+        }
+        const hasContent = typeof f.content === "string";
+        const hasB64 = typeof f.content_base64 === "string";
+        if (hasContent && hasB64) {
+          throw new Error(`ateam_upload_connector: files[${i}] ("${f.path}") has BOTH content and content_base64 — provide exactly one.`);
+        }
+        if (!hasContent && !hasB64) {
+          throw new Error(`ateam_upload_connector: files[${i}] ("${f.path}") needs 'content' (inline string) or 'content_base64' (escape-safe base64).`);
+        }
+        if (hasB64) {
+          const decoded = Buffer.from(f.content_base64, "base64").toString("utf8");
+          if (!decoded && f.content_base64.trim()) {
+            throw new Error(`ateam_upload_connector: files[${i}] ("${f.path}") content_base64 did not decode to any content — check the encoding.`);
+          }
+          return { path: f.path, content: decoded };
+        }
+        return { path: f.path, content: f.content };
+      });
+    }
     // Async-first: this runs npm install + build in Core (up to ~7min) and is a
     // prime Cloudflare-524 culprit. Kick async → poll /deploy/jobs; fall back to
     // sync for older backends that don't honor async. Mirrors ateam_github_pull.
     const body = {
       github,
-      files,
+      files: normFiles,
       ...(ref ? { ref } : {}),
       ...(replace === true ? { replace: true } : {}),
     };
