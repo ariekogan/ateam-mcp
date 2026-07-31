@@ -4311,11 +4311,16 @@ const handlers = {
         const id = c.id || c.connector_id || c.name;
         const connected = c.status === "connected" || c.connected === true || c.ok === true || c.healthy === true;
         const tools = Array.isArray(c.tools) ? c.tools.length : (typeof c.tools === "number" ? c.tools : (c.toolCount ?? c.tool_count));
-        return { id, connected, tools };
+        // OPEN-30(c): a connector can be connected + list tools yet 401 on every
+        // per-actor call (stale/rotated credential). Surface Core's auth marker.
+        const auth_error = c.auth_error || c.authError || null;
+        return { id, connected, tools, ...(auth_error ? { auth_error } : {}) };
       });
       for (const c of out.connectors) {
         if (!c.connected) gaps.push(`connector '${c.id}' not connected`);
         else if (c.tools === 0) gaps.push(`connector '${c.id}' connected but discovered 0 tools`);
+        // Connected + tools > 0 but auth failing = the silent OPEN-30 failure — flag it.
+        if (c.auth_error) gaps.push(`connector '${c.id}' connected but auth failing (${c.auth_error}) — per-actor calls 401; refresh its credential (ateam_upload_connector github:true force:true)`);
       }
     } catch (e) {
       out.connectors = { error: e.message };
