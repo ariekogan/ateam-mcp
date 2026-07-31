@@ -1066,6 +1066,10 @@ export const tools = [
           type: "boolean",
           description: "Opt into FULL REPLACE: wipe the connector dir and write only the provided `files`. Default: false (= merge with GitHub state at `ref`). Use with intent — sending an incomplete file set with replace:true will break the connector.",
         },
+        force: {
+          type: "boolean",
+          description: "RECOVERY: respawn the connector + re-inject its CURRENT env even when the source is UNCHANGED. Normally an unchanged-source upload no-ops (unchanged:true) and leaves the process running. But a connector spawned before a shared-secret rotation keeps the STALE secret — it still lists tools (looks healthy) yet 401s on every per-actor call, with no recovery short of a fake source edit. Use `ateam_upload_connector(solution_id, connector_id, github:true, force:true)` to pull the current source and force a fresh respawn (which picks up the current secret). Default: false.",
+        },
       },
       required: ["solution_id", "connector_id"],
     },
@@ -4464,7 +4468,7 @@ const handlers = {
     return del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
   },
 
-  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace }, sid) => {
+  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace, force }, sid) => {
     // OPEN-32: accept content_base64 per file (single-line, escape-safe) and
     // decode it to plain content here, so an agent can upload a multi-file
     // connector without hand-escaping ~90KB of HTML/JS/JSON in one tool call —
@@ -4501,6 +4505,7 @@ const handlers = {
       files: normFiles,
       ...(ref ? { ref } : {}),
       ...(replace === true ? { replace: true } : {}),
+      ...(force === true ? { force: true } : {}),
     };
     const url = `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
     let kicked;
