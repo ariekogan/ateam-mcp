@@ -16,8 +16,12 @@ on:
     types: [labeled]
   issue_comment:
     types: [created]
+  # ⚠️ REVIEW IS ONE-SHOT AND EXPLICIT (2026-08-02). Reviews used to run on EVERY
+  # push, which combined with auto-repair is a money loop. Now a review happens
+  # only when the `codex-review` label is added, and the label is stripped after
+  # the run — one request == one review.
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [labeled]
     branches: [dev, main]
 
 concurrency:
@@ -112,6 +116,7 @@ jobs:
       github.event_name == 'pull_request'
       && github.event.pull_request.draft == false
       && github.event.pull_request.head.repo.full_name == github.repository
+      && contains(github.event.pull_request.labels.*.name, 'codex-review')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -320,3 +325,16 @@ jobs:
             gh pr comment "$PR" --body "⚠️ Repair round ${ROUND} produced no code changes. A human may need to look." || true
           fi
           gh pr edit "$PR" --remove-label ai-repairing 2>/dev/null || true
+
+  # Consume the request so the label cannot fire another paid review.
+  unlabel:
+    needs: [review]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: { pull-requests: write }
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr edit "$PR" --repo "$REPO" --remove-label codex-review >/dev/null 2>&1 || true
