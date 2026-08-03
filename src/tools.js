@@ -773,7 +773,7 @@ export const tools = [
           type: "string",
           enum: ["github", "local"],
           description:
-            "Where the solution/skill definition lives. 'github' (DEFAULT) — read from and write to the tenant's GitHub repo (GitHub is master; the normal path). 'local' — read from and write to the Builder FS store (no GitHub repo required). Use 'local' ONLY for a repo-less bootstrap tenant (e.g. freshly onboarded from a template, before GitHub is connected). This is a DEDICATED, EXPLICIT switch — never a fallback. Redeploy is local in both modes.",
+            "Where the solution/skill definition lives. Omit (DEFAULT) — prefer the tenant's GitHub repo (GitHub is master), but AUTO-DEGRADE to the Builder FS store if the tenant hasn't connected a repo, so a simple def patch always succeeds (it's pushed to GitHub once connected). 'github' — force GitHub; fails loud if not connected (use when you specifically require the repo write). 'local' — force the Builder FS store, no GitHub (repo-less bootstrap tenant). Redeploy is local in all modes.",
         },
         include_definition: {
           type: "boolean",
@@ -3240,7 +3240,15 @@ const handlers = {
     //     yet connected). GitHub is still master overall; local is a temporary
     //     bootstrap until the tenant connects a repo (then local is pushed → GitHub).
     // Redeploy (Phase 4) is local (Builder FS → Core) in BOTH modes.
-    const isLocal = source === "local";
+    let isLocal = source === "local";
+    // Was a source EXPLICITLY chosen? An unspecified source is the default ("github")
+    // and MAY auto-degrade to local when the tenant hasn't connected a repo — a simple
+    // def patch must work FS-only (Arie's rule: create/patch allowed offline; only
+    // GitHub-native ops refuse). An explicit source:'github' is honored as-is (the
+    // caller asked for GitHub → it fails loud if not connected), and explicit 'local'
+    // stays local.
+    const sourceExplicit = source === "github" || source === "local";
+    let degradedToLocal = false;
 
     // Phase 1: Read current state (or create scaffold if new skill)
     let current;
@@ -3263,8 +3271,39 @@ const handlers = {
           throw new Error(`Local ${filePath} not found (empty definition)`);
         }
       } else {
-        const readResult = await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid);
-        current = JSON.parse(readResult.content);
+        try {
+          const readResult = await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid);
+          current = JSON.parse(readResult.content);
+        } catch (ghErr) {
+          // Auto-degrade a DEFAULT-source patch to the Builder FS when the tenant
+          // hasn't connected GitHub. A github/read failure alone is ambiguous (could
+          // be a wrong solution_id or a transient Core hiccup — both must still fail
+          // loud), so disambiguate with the definitive /github/connected probe and
+          // only degrade on a genuine "not connected". Explicit source:'github' never
+          // degrades. The local write below reconciles to GitHub once connected.
+          let connected = true;
+          if (!sourceExplicit) {
+            try {
+              const probe = await get(`/deploy/solutions/${solution_id}/github/connected`, sid);
+              connected = probe?.connected !== false && probe?.enabled !== false;
+            } catch { connected = true; /* probe failed → don't mask the real read error */ }
+          }
+          if (!sourceExplicit && !connected) {
+            isLocal = true;
+            degradedToLocal = true;
+            const r = target === "skill" && skill_id
+              ? await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, sid)
+              : await get(`/deploy/solutions/${solution_id}/definition?raw=1`, sid);
+            current = target === "skill" && skill_id
+              ? (r.skill || r.definition || r)
+              : (r.solution || r);
+            if (!current || typeof current !== "object") {
+              throw new Error(`Local ${filePath} not found (empty definition)`);
+            }
+          } else {
+            throw ghErr; // connected (real error) or explicit github → surface it
+          }
+        }
       }
     } catch (err) {
       // OPEN-31 guard: only scaffold-create when the skill is GENUINELY ABSENT.
@@ -3646,6 +3685,10 @@ const handlers = {
       ok: true,
       solution_id,
       source: isLocal ? "local" : "github",
+      ...(degradedToLocal && {
+        degraded_to_local: true,
+        _degrade_note: `GitHub isn't connected for this tenant, so this patch was saved to the Builder store only (the edit succeeded). It will be pushed to GitHub automatically once the tenant connects a repo (Tenant Admin → GitHub). GitHub-native actions (promote, connector-source patch, github-sourced deploy) will refuse until then.`,
+      }),
       ...(isLocal ? {} : {
         branch: writeBranch,
         // Be explicit: a github write lands on `dev`, not prod. The change is
