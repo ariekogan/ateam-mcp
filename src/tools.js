@@ -126,6 +126,8 @@ function _representationFor(filePath, content, solution_id) {
   return {
     kind: authoredOnly ? "authored_source" : "git_mirror_v1",
     is_runtime_state: false,
+    runtime_state_may_differ: true,
+    may_include_generated_fields: !authoredOnly,
     ...(authoredOnly
       ? { generated_fields_omitted: ["auto_imported_tools", "deployment_timestamps"] }
       : { contains_generated_fields: ["auto_imported_tools", "deployment_timestamps"] }),
