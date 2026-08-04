@@ -87,6 +87,61 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
 //
 // Returns null when the solution declares no widgets (nothing to check), else
 // { ok, checked, healthy, plugins[], issues[]?, hint? }.
+// ─────────────────────────────────────────────────────────────────────────────
+// Authored-source representation marker
+//
+// A skill/solution definition read from GitHub is NOT the runtime. It is a
+// mirror that drifts: on solution 'ada' (2026-08-04) the `dev` copy declared 29
+// tools while production was running 66, because deploy-time connector imports
+// are regenerated on every deploy and only mirrored to `main`. An agent that
+// answers "what tools does this skill have?" from a repo read gets a wrong
+// answer today, and would get an emptier one once generated data leaves the
+// committed file.
+//
+// So every read of a definition path carries an ADDITIVE `_ateam_representation`
+// telling the caller what it is holding and which tool returns the live view.
+// Additive on purpose — wrapping or reshaping the existing response would break
+// callers that expect the raw payload.
+//
+// `kind` reports what the file ACTUALLY is right now, not what we intend it to
+// become: files without `source_schema_version >= 2` still carry generated data,
+// so calling them "authored_source" today would be a lie.
+// See Docs/WIP/SKILL_JSON_SPLIT_PLAN_2026-08-04.md (Phase C).
+// ─────────────────────────────────────────────────────────────────────────────
+const _SKILL_JSON_RE = /^skills\/([^/]+)\/skill\.json$/;
+
+function _representationFor(filePath, content, solution_id) {
+  const p = String(filePath || "");
+  const skillMatch = p.match(_SKILL_JSON_RE);
+  if (p !== "solution.json" && !skillMatch) return null;
+
+  let schemaVersion = null;
+  try {
+    const parsed = typeof content === "string" ? JSON.parse(content) : content;
+    schemaVersion = parsed?.source_schema_version ?? null;
+  } catch { /* not JSON, or truncated — fall through to the v1 wording */ }
+
+  const authoredOnly = typeof schemaVersion === "number" && schemaVersion >= 2;
+
+  return {
+    kind: authoredOnly ? "authored_source" : "git_mirror_v1",
+    is_runtime_state: false,
+    ...(authoredOnly
+      ? { generated_fields_omitted: ["auto_imported_tools", "deployment_timestamps"] }
+      : { contains_generated_fields: ["auto_imported_tools", "deployment_timestamps"] }),
+    warning: authoredOnly
+      ? "Authored source only. Connector-imported tools are NOT in this file — they are regenerated at deploy time. Do not answer capability questions from it."
+      : "This is a git mirror, not runtime state. Its tools[] and timestamps are a snapshot from the last write to this branch and may not match what is deployed. Do not answer capability questions from it.",
+    live_state_tool: {
+      name: "ateam_get_solution",
+      arguments: {
+        solution_id,
+        ...(skillMatch ? { skill_id: skillMatch[1], section: "tools" } : {}),
+      },
+    },
+  };
+}
+
 // Compress a skill/solution definition to a small, non-truncating summary for
 // tool results — enough to confirm the shape without the 10s-of-KB full doc.
 function _summarizeDef(def) {
@@ -1610,7 +1665,11 @@ export const tools = [
     core: true,
     description:
       "Read any file from a solution's GitHub repo. Returns the file content. Use this to read connector source code, skill definitions, or any versioned file. " +
-      "Default reads from `main` (deployed/prod state). Pass `ref: 'dev'` to read in-progress work.",
+      "Default reads from `main` (deployed/prod state). Pass `ref: 'dev'` to read in-progress work.\n\n" +
+      "⚠️ NOT RUNTIME STATE. For `solution.json` and `skills/<id>/skill.json` this returns a git MIRROR, not what is deployed. " +
+      "Connector-imported tools are regenerated at deploy time, so a repo copy's `tools[]` can differ from production (on one solution `dev` showed 29 tools while production ran 66). " +
+      "Reads of those paths carry an `_ateam_representation` field saying what you are holding. " +
+      "To answer \"what can this skill actually do?\", call ateam_get_solution(solution_id, skill_id, section:'tools') — never this tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1764,7 +1823,9 @@ export const tools = [
       "Use this when you want to:\n" +
       "  • Review changes before promoting to prod\n" +
       "  • See if dev is ahead of main at all (returns ahead_by: 0 if nothing to promote)\n" +
-      "  • Inspect arbitrary branch/tag/commit comparisons (override base/head)",
+      "  • **Diagnose a failed promote** — check `behind_by` and `status`. `status: 'diverged'` (behind_by > 0) means main holds commits dev never received, which is what makes ateam_github_promote return 409 Merge conflict. ALWAYS call this after a promote failure, before reporting anything to the user.\n" +
+      "  • Inspect arbitrary branch/tag/commit comparisons (override base/head)\n\n" +
+      "Note: `files[]` lists what DIFFERS, not what conflicts. For solution.json and skills/*/skill.json the difference is often deploy-generated data (regenerated connector tools, timestamps) rather than authored change — see ateam_github_read's `_ateam_representation`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3535,7 +3596,17 @@ const handlers = {
         // output cap and truncates the rest of the result. Return a compact
         // summary by default; pass include_definition:true for the whole thing.
         ...(include_definition
-          ? { after_state: patched }
+          ? {
+              after_state: patched,
+              // The base of this after-state came from a git read, so it inherits
+              // that copy's staleness — notably regenerated connector tools. Say so
+              // rather than letting an agent treat it as runtime truth.
+              _ateam_representation: _representationFor(
+                target === "skill" && skill_id ? `skills/${skill_id}/skill.json` : "solution.json",
+                patched,
+                solution_id,
+              ),
+            }
           : { after_state_summary: _summarizeDef(patched) }),
         would_write,
         would_write_bytes: JSON.stringify(patched, null, 2).length,
@@ -4437,7 +4508,12 @@ const handlers = {
   ateam_github_read: async ({ solution_id, path: filePath, ref }, sid) => {
     const qs = new URLSearchParams({ path: filePath });
     if (ref) qs.set('branch', ref);
-    return get(`/deploy/solutions/${solution_id}/github/read?${qs.toString()}`, sid);
+    const result = await get(`/deploy/solutions/${solution_id}/github/read?${qs.toString()}`, sid);
+    // Additive only — never reshape `result`, callers depend on the raw payload.
+    const rep = _representationFor(filePath, result?.content, solution_id);
+    return rep && result && typeof result === "object"
+      ? { ...result, _ateam_representation: rep }
+      : result;
   },
 
   ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref }, sid) =>
