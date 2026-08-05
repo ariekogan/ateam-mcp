@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "The CORE repos the review pipeline covers. Used by review-plan.sh to show, BEFORE",
+    "anything is spent, exactly what a review would cover in each repo.",
+    "PB is deliberately absent — it is an old solution repo, not platform code.",
+    "branch is PINNED per repo, never guessed: 'dev if it exists' picked ateam-mcp's",
+    "abandoned dev (94 behind main, 0 ahead) and would have reviewed nothing real."
+  ],
+  "repos": [
+    { "repo": "ariekogan/ai-dev-assistant",         "branch": "dev",  "what": "ADAS Core — backend, frontend, connectors, ACS" },
+    { "repo": "ariekogan/adas_mcp_toolbox_buider",  "branch": "dev",  "what": "Skill Builder — design-time, FS-only" },
+    { "repo": "ariekogan/ateam-mcp",                "branch": "main", "what": "Public MCP server + Claude Code plugin (dev is dead: 94 behind main, 0 ahead)" },
+    { "repo": "ariekogan/ateam-mobile",             "branch": "main", "what": "Mobile app + SDK packages (no dev branch)" }
+  ]
+}
