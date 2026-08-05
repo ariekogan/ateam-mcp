@@ -105,7 +105,20 @@ async function main() {
     catch (e) { fail(`Could not query available models to resolve the default review model: ${e.message}`); }
 
     // REVIEW_TIER=deep escalates to the pro model; anything else uses the cheap default.
-    const deep = /^(deep|pro|escalate)$/i.test(process.env.REVIEW_TIER || '');
+    //
+    // DEEP IS OFF BY DEFAULT. A single deep Codex slice measured 4,036,735 tokens on
+    // gpt-5.5-pro — roughly a hundred times a Claude slice, and enough on its own to
+    // trigger repeated auto-recharges. The value did not scale with the price: that
+    // 4M-token slice returned ONE finding. Escalation is now a deliberate act, not
+    // something triage can decide.
+    const askedDeep = /^(deep|pro|escalate)$/i.test(process.env.REVIEW_TIER || '');
+    const allowDeep = process.env.ALLOW_DEEP_REVIEW === '1';
+    const deep = askedDeep && allowDeep;
+    if (askedDeep && !allowDeep) {
+      console.log('[model] deep tier requested but NOT enabled — using the standard model.');
+      console.log('        Deep measured 4M tokens for one slice and returned a single finding.');
+      console.log('        Set ALLOW_DEEP_REVIEW=1 to override, deliberately.');
+    }
     const priority = deep ? DEEP_PRIORITY : DEFAULT_PRIORITY;
     for (const cand of priority) {
       if (available.has(cand) && !forbidden(cand)) { model = cand; resolvedFrom = `${deep ? 'DEEP' : 'default'} priority (${cand})`; break; }
@@ -123,7 +136,7 @@ async function main() {
 
   // Effort: default 'medium' (cost). Escalated (deep) reviews use 'high'.
   // OPENAI_REASONING_EFFORT overrides both.
-  const deepTier = /^(deep|pro|escalate)$/i.test(process.env.REVIEW_TIER || '');
+  const deepTier = /^(deep|pro|escalate)$/i.test(process.env.REVIEW_TIER || '') && process.env.ALLOW_DEEP_REVIEW === '1';
   const effort = OPENAI_REASONING_EFFORT || (deepTier ? 'high' : 'medium');
 
   // Reproducibility banner — logged at the start of every review.
