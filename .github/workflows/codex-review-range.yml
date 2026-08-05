@@ -72,10 +72,15 @@ jobs:
             *) echo "::error::reviewer must be exactly 'codex' or 'claude' (got '${REVIEWER}')"; exit 1 ;;
           esac
 
+      # A DEDICATED key for CI. With one key doing everything, "what did the reviews
+      # cost?" was unanswerable — 509 of 551 requests on the org came from a single
+      # key, so review spend could not be separated from interactive Codex use.
+      # OPENAI_REVIEW_API_KEY takes precedence; OPENAI_API_KEY remains the fallback
+      # so nothing breaks before the new secret exists.
       - name: Sanitize OpenAI key (strip stray paste characters)
         id: key
         env:
-          RAW: ${{ secrets.OPENAI_API_KEY }}
+          RAW: ${{ secrets.OPENAI_REVIEW_API_KEY || secrets.OPENAI_API_KEY }}
         run: |
           CLEAN=$(printf '%s' "$RAW" | LC_ALL=C tr -cd '[:print:]' | LC_ALL=C tr -d '[:space:]')
           echo "::add-mask::$CLEAN"
@@ -241,6 +246,13 @@ jobs:
         id: codex
         if: steps.triage.outputs.needs_review == 'true' && inputs.reviewer != 'claude'
         continue-on-error: true
+        # Codex reports its usage to the STEP LOG ("tokens used") and to its own
+        # session file — never to a file we scan, so every Codex run reported
+        # "usage not reported" while Claude runs showed a price. Point CODEX_HOME
+        # into the scanned temp dir so the session transcript lands where Capture
+        # spend can read it.
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex
         timeout-minutes: ${{ (inputs.tier == 'deep' || steps.triage.outputs.tier == 'deep') && 35 || 15 }}
         uses: openai/codex-action@v1
         with:
