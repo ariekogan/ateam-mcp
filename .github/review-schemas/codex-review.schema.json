@@ -1,0 +1,181 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ADASCodexArchitectureReview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "summary",
+    "blocking_findings",
+    "non_blocking_findings",
+    "architecture_compliance",
+    "tests_run",
+    "files_inspected",
+    "remaining_uncertainties"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "request_changes"
+      ],
+      "description": "request_changes if and only if blocking_findings is non-empty."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Principal-engineer summary of the change and the verdict, referencing the runtime flow you traced."
+    },
+    "architecture_compliance": {
+      "type": "boolean",
+      "description": "false if any blocking finding is architectural."
+    },
+    "blocking_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "severity",
+          "file",
+          "line",
+          "evidence",
+          "impact",
+          "required_change",
+          "category"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "repo-relative path"
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-indexed line; 0 if not tied to a specific changed line"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "concrete proof: file:line references, call paths, or command output you observed"
+          },
+          "impact": {
+            "type": "string",
+            "description": "the real runtime consequence"
+          },
+          "required_change": {
+            "type": "string",
+            "description": "the specific fix required to clear this finding"
+          },
+          "category": {
+            "type": "string",
+            "description": "One of: architecture, security, concurrency, state, cost, prompt, api, backcompat, multi-agent, voice, correctness, performance, tests, docs, logging, naming, cleanup. Use tests/docs/logging/naming/cleanup ONLY for mechanical fixes that need no design judgement."
+          }
+        }
+      }
+    },
+    "non_blocking_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "severity",
+          "file",
+          "line",
+          "evidence",
+          "impact",
+          "required_change",
+          "category"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "impact": {
+            "type": "string"
+          },
+          "required_change": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string",
+            "description": "One of: architecture, security, concurrency, state, cost, prompt, api, backcompat, multi-agent, voice, correctness, performance, tests, docs, logging, naming, cleanup. Use tests/docs/logging/naming/cleanup ONLY for mechanical fixes that need no design judgement."
+          }
+        }
+      }
+    },
+    "tests_run": {
+      "type": "array",
+      "description": "Every command you executed to verify the change.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command",
+          "result",
+          "details"
+        ],
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "not_run"
+            ]
+          },
+          "details": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "files_inspected": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Files you actually opened/read beyond the diff, incl. call sites and related implementation paths."
+    },
+    "remaining_uncertainties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Anything you could not fully verify and why."
+    }
+  }
+}

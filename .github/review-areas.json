@@ -1,0 +1,20 @@
+{
+  "_comment": ["Path -> AREA map for review-finding routing in ateam-mcp (the public MCP server + Claude Code plugin).",
+               "First matching pattern wins. session_hints are matched case-insensitively against live session titles."],
+  "areas": [
+    { "area": "mcp-tools", "patterns": ["src/tools.js", "src/api.js", "src/server.js", "src/index.js"],
+      "session_hints": ["ateam-mcp", "mcp", "connector"],
+      "description": "MCP tool surface: tool definitions, dispatch, A-Team API calls" },
+    { "area": "mcp-auth", "patterns": ["src/oauth.js", "src/http.js"],
+      "session_hints": ["ateam-mcp", "auth"],
+      "description": "Auth + transport: OAuth flow, HTTP client, tenant/token handling" },
+    { "area": "mcp-plugin", "patterns": ["src/pages.js", "src/agentDoc.js", "src/stub.js"],
+      "session_hints": ["plugin", "ateam-mcp"],
+      "description": "Claude Code plugin surface, agent docs, stubs" },
+    { "area": "tests", "patterns": ["test/"], "session_hints": ["ateam-mcp"], "description": "Test suite" },
+    { "area": "infra-ci", "patterns": [".github/", "scripts/", "package.json"],
+      "session_hints": ["dev-->production", "production"], "description": "CI/CD, publish, packaging" },
+    { "area": "docs", "patterns": ["docs/", "CLAUDE.md", "AGENTS.md", ".md"], "session_hints": [], "description": "Documentation" }
+  ],
+  "fallback_area": "unassigned"
+}
