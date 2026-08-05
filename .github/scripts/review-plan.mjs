@@ -68,13 +68,15 @@ async function plan(entry) {
   try {
     // One compare call gives commits AND per-file additions — no clone needed.
     const cmp = JSON.parse(gh(['api', `repos/${repo}/compare/${base}...${head}`,
-      '--jq', '{commits: (.commits|length), additions: ([.files[]?.additions] | add // 0), status: .status}']));
+      '--jq', '{commits: (.commits|length), additions: ([.files[]?.additions] | add // 0), status: .status, files: (.files|length), biggest: ([.files[]? | {f: .filename, a: .additions}] | sort_by(-.a) | .[0] // null)}']));
     if (cmp.status === 'diverged' || cmp.status === 'behind') {
       row.note = `marker ${cmp.status} — would refuse (reversed diff)`;
       return row;
     }
     row.commits = cmp.commits;
     row.insertions = cmp.additions;
+    row.files = cmp.files;
+    row.biggest = cmp.biggest;
     row.slices = Math.max(1, Math.ceil(cmp.additions / CHUNK));
   } catch (e) {
     // A range too large for one compare call still deserves an honest answer.
@@ -113,6 +115,47 @@ if (anyWork) {
   console.log(`  The marker is banked after each slice — a failure costs only the slice it died on.\n`);
 } else {
   console.log('\n  Nothing to review.\n');
+}
+
+
+// ── SANITY GATE ───────────────────────────────────────────────────────────────
+// This table exists to catch spending that does not make sense BEFORE it happens,
+// so it must say so rather than quietly printing a big number. Every threshold
+// here comes from something that actually went wrong:
+//   · ateam-mobile showed 1 commit / 2899 insertions / 12 slices — the marker sat
+//     before the pipeline install, so ~$40 would have gone on reviewing the
+//     rollout itself. Huge insertions on very few commits means generated,
+//     vendored, or bulk-copied files, not work worth an agent reading.
+//   · A single file dominating a range is the same smell (a lockfile, a bundle).
+//   · A range this large has repeatedly failed to finish at all, which is worse
+//     than not reviewing it: you pay and get nothing.
+const warnings = [];
+const MAX_SLICES_PER_REPO = 12;
+const MAX_TOTAL_USD = 40;
+const BULK_INSERTIONS_PER_COMMIT = 800;
+
+for (const r of rows) {
+  if (!r.slices) continue;
+  if (r.slices > MAX_SLICES_PER_REPO) {
+    warnings.push(`${r.repo}: ${r.slices} slices is a lot for one repo — reviews this long have died before finishing. Consider reviewing in two checkpoints (\`accept\` in between).`);
+  }
+  const perCommit = r.commits ? Math.round(r.insertions / r.commits) : 0;
+  if (r.commits > 0 && perCommit > BULK_INSERTIONS_PER_COMMIT) {
+    warnings.push(`${r.repo}: ${r.insertions} added lines across only ${r.commits} commit(s) — ~${perCommit}/commit. That is bulk-added content (generated, vendored, or a rollout), not hand-written work. Check the marker is where you think it is.`);
+  }
+  if (r.biggest && r.insertions && r.biggest.a > r.insertions * 0.5 && r.biggest.a > 500) {
+    warnings.push(`${r.repo}: one file is ${Math.round(100 * r.biggest.a / r.insertions)}% of the diff (${r.biggest.f}, +${r.biggest.a}). If it is generated or vendored, exclude it rather than pay to read it.`);
+  }
+}
+const estHigh = totalSlices * USD_PER_SLICE * 1.3;
+if (estHigh > MAX_TOTAL_USD) {
+  warnings.push(`Estimated up to $${estHigh.toFixed(0)} in one go. Past this point a review is worth splitting across checkpoints — findings you never act on cost the same as findings you do.`);
+}
+
+if (warnings.length) {
+  console.log('  ⚠️  BEFORE YOU SPEND:');
+  for (const w of warnings) console.log(`      · ${w}`);
+  console.log('');
 }
 
 // Anything needing a decision before spending, said plainly.
