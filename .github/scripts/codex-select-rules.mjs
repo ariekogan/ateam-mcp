@@ -25,6 +25,11 @@ const RULES = [
   ['CONCURRENCY_AND_STATE.md', () => has(/^apps\/backend\/(worker|storage|ai|utils)\//) || has(/^apps\/(acs|trigger-runner)\//)],
   ['COST_ACCOUNTING.md',     () => has(/^apps\/backend\/ai\//) || has(/usage|pricing|token|llm/i)],
   ['VOICE_REALTIME.md',      () => has(/^apps\/voice\//)],
+  // Domain drift is the easiest rule to break while making one scenario pass, and
+  // it lands in exactly these paths. Selected for ANY platform-surface change —
+  // not keyed on the domain words themselves, since the whole point is catching
+  // words nobody predicted.
+  ['PLATFORM_DOMAIN_NEUTRALITY.md', () => has(/^apps\/backend\/(skills\/platform|ai\/prompts|worker|tools\/impl\/system|storage)\//) || has(/^(apps\/acs|packages|connectors)\//)],
 ];
 
 const picked = RULES.filter(([, want]) => want()).map(([f]) => f)
