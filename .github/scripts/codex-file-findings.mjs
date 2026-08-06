@@ -113,7 +113,7 @@ const render = (f) => `- [ ] ${f.blocking ? '🔴 **BLOCKING**' : '🟡 non-bloc
   **${flat(f.title)}**
   ${flat(f.impact) ? `_Impact:_ ${flat(f.impact)}` : ''}
   ${flat(f.evidence) ? `_Evidence:_ ${flat(f.evidence)}` : ''}
-  ${flat(f.required_change) ? `_Fix:_ ${flat(f.required_change)}` : ''}
+  ${flat(f.required_change) ? `_Fix:_ ${flat(f.required_change)}` : ''}${repeatNote(f) || ''}
   <sub>id: \`${fp(f)}\`</sub>`;
 
 // A finding already filed ANYWHERE must not be filed again. Scanning only the
@@ -121,22 +121,101 @@ const render = (f) => `- [ ] ${f.blocking ? '🔴 **BLOCKING**' : '🟡 non-bloc
 // which issue a finding lands in, so a re-route silently created a twin.
 const idsIn = (text) => (text || '').match(/id: `([0-9a-f]{10})`/g)?.map((m) => m.slice(5, 15)) || [];
 const KNOWN = new Set();
+// id -> the file that finding is about, and the commit recorded as fixing it.
+// Both are already on the issues we read for dedup, so this costs no extra calls.
+const FINDING_FILE = new Map();   // id -> "apps/backend/x.js"
+const FIXED_BY = new Map();       // id -> sha recorded by `codex-finding.sh done`
+// A bullet carries its file in the first backticked path and its id in the <sub>.
+const scanBullets = (text) => {
+  for (const block of String(text || '').split(/\n\n(?=- \[)/)) {
+    const id = (block.match(/id: `([0-9a-f]{10})`/) || [])[1];
+    if (!id) continue;
+    const file = (block.match(/`([^`\s]+\.[A-Za-z]{2,5})(?::\d+)?`/) || [])[1];
+    if (file) FINDING_FILE.set(id, file);
+  }
+};
+// `codex-finding.sh done` writes: ✅ fixed `<id>` by **session** in `<sha>`
+const scanFixes = (text) => {
+  const m = String(text || '').match(/✅ fixed `([0-9a-f]{10})`[^\n]*? in `([0-9a-f]{6,40})`/);
+  if (m) FIXED_BY.set(m[1], m[2]);
+};
+
 try {
   const issues = JSON.parse(gh(['issue', 'list', '--repo', REPO, '--state', 'open',
     '--json', 'number,body,labels', '--limit', '200']))
     .filter((i) => (i.labels || []).some((l) => l.name.startsWith('area:')));
   for (const i of issues) {
     idsIn(i.body).forEach((x) => KNOWN.add(x));
+    scanBullets(i.body);
     const cs = JSON.parse(gh(['issue', 'view', String(i.number), '--repo', REPO, '--json', 'comments']));
-    for (const c of cs.comments || []) idsIn(c.body).forEach((x) => KNOWN.add(x));
+    for (const c of cs.comments || []) {
+      idsIn(c.body).forEach((x) => KNOWN.add(x));
+      scanBullets(c.body);
+      scanFixes(c.body);
+    }
   }
-  console.log(`known findings across ${issues.length} open area issue(s): ${KNOWN.size}`);
+  console.log(`known findings across ${issues.length} open area issue(s): ${KNOWN.size}` +
+              (FIXED_BY.size ? `, ${FIXED_BY.size} with a recorded fix` : ''));
 } catch (e) {
   // Fail loud: filing on a partial known-set is how duplicates get created.
   console.error(`\u274c cannot read existing findings — refusing to file (would duplicate): ${String(e.message).split('\n')[0]}`);
   process.exit(1);
 }
 const isKnown = (f) => KNOWN.has(fp(f)) || legacyFps(f).some((x) => KNOWN.has(x));
+
+// ── REPEAT OFFENDER ──────────────────────────────────────────────────────────
+// A fix that does not hold produces a NEW finding with a new id, and the thread is
+// lost — three rounds on the same code read as three unrelated problems. Twice in
+// one day the only thing connecting them was a human remembering.
+//
+// This is a NOTE, never a state change. It cannot strand a ticket open, cannot
+// reopen anything, and cannot block closure: if the correlation misses you get the
+// plain finding you would have got anyway, and if it links wrongly the damage is
+// one wrong sentence. That is deliberate — the existing flow took far too long to
+// stabilise to put a state machine on top of it.
+//
+// Matching is FILE first (collapses hundreds of fixed findings to a handful), then
+// HUNK OVERLAP: did the fix commit actually touch the lines this new finding points
+// at? File-match alone over-links on big files; hunk overlap is what makes the link
+// mean something.
+const HUNK_SLACK = 20;   // a fix and its regression rarely land on the exact line
+
+function touchedRanges(sha, file) {
+  // Line ranges of `file` that `sha` changed, from the diff's own @@ headers.
+  let out = [];
+  try {
+    const diff = execFileSync('git', ['show', '--unified=0', '--format=', sha, '--', file],
+      { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    for (const m of diff.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+      const start = Number(m[1]);
+      const len = m[2] === undefined ? 1 : Number(m[2]);
+      if (len > 0) out.push([start, start + len - 1]);
+    }
+  } catch { /* sha not in this checkout, or file untouched — no link, which is fine */ }
+  return out;
+}
+
+function repeatNote(f) {
+  if (!f.file || !f.line) return null;
+  // Candidates: findings on the SAME file that someone recorded a fix commit for.
+  const cands = [...FIXED_BY.entries()].filter(([id]) => FINDING_FILE.get(id) === f.file);
+  if (!cands.length) return null;
+
+  const hits = [];
+  for (const [id, sha] of cands) {
+    const inside = touchedRanges(sha, f.file)
+      .some(([a, b]) => f.line >= a - HUNK_SLACK && f.line <= b + HUNK_SLACK);
+    if (inside) hits.push({ id, sha });
+  }
+  if (!hits.length) return null;
+
+  // The LAST fix is the one being re-broken; older ones are history. Order follows
+  // the issues, which are read oldest-first.
+  const last = hits[hits.length - 1];
+  const attempt = hits.length + 1;
+  return `\n  ⟲ **Attempt ${attempt} on this code.** Last fixed in \`${last.sha.slice(0, 9)}\` for finding \`${last.id}\`` +
+         (attempt >= 3 ? ` — **three or more attempts: this is a design problem, not a bug. Escalate rather than patch again.**` : '');
+}
 
 let filed = 0, appended = 0, skipped = 0, failures = 0;
 
