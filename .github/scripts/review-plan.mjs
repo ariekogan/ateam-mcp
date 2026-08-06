@@ -20,6 +20,9 @@ import { execFileSync } from 'node:child_process';
 const args = process.argv.slice(2);
 const REVIEWER = args.find((a) => a === 'codex' || a === 'claude') || 'claude';
 const only = args.includes('--repo') ? args[args.indexOf('--repo') + 1] : null;
+// --json: the same numbers, for a scheduler to decide on. The human table and the
+// machine decision must come from ONE computation, or they will disagree.
+const JSON_OUT = args.includes('--json');
 
 // Slice size mirrors codex-review-since.sh: Claude explores per-turn and has a hard
 // turn cap, so it needs smaller slices than Codex.
@@ -89,6 +92,12 @@ const rows = [];
 for (const e of REG.repos) {
   if (only && e.repo !== only) continue;
   rows.push(await plan(e));
+}
+
+if (JSON_OUT) {
+  const totalSlices = rows.reduce((a, r) => a + r.slices, 0);
+  console.log(JSON.stringify({ reviewer: REVIEWER, chunk: CHUNK, totalSlices, rows }, null, 2));
+  process.exit(0);
 }
 
 const pad = (s, n) => String(s).padEnd(n);

@@ -1,0 +1,78 @@
+name: AI Review (scheduled)
+
+# The unattended checkpoint review. Every 2 hours it reviews what has landed since
+# the last marker — and when nothing has landed it exits at zero cost, which is why
+# a frequent timer is safe on a quiet repo.
+#
+# The cap is the point. Two hours of heavy work is a large spend that nobody chose,
+# so a repo needing more than MAX_SLICES is reported and SKIPPED: its marker does
+# not move, nothing is lost, and the next interactive `codex review` picks it up
+# with a human looking at the numbers.
+#
+# Turn it off without editing this file: set repo variable SCHEDULED_REVIEW=off.
+
+on:
+  schedule:
+    - cron: '17 */2 * * *'      # :17 avoids the top-of-hour queue on GitHub's schedulers
+  workflow_dispatch:
+    inputs:
+      reviewer:
+        description: "codex or claude"
+        required: false
+        type: string
+        default: "codex"
+      max_slices:
+        description: "Skip a repo needing more slices than this"
+        required: false
+        type: string
+        default: "3"
+      dry:
+        description: "Decide and report, spend nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write     # the runner banks the codex-reviewed marker tag
+  actions: write      # it dispatches codex-review-range.yml
+  issues: write
+
+concurrency:
+  group: scheduled-review
+  cancel-in-progress: false     # never kill a review mid-slice; a slice half-paid is a slice wasted
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+
+      - name: Off switch
+        id: gate
+        env:
+          SETTING: ${{ vars.SCHEDULED_REVIEW }}
+        run: |
+          if [ "${SETTING:-on}" = "off" ]; then
+            echo "::notice::SCHEDULED_REVIEW=off — skipping."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Review what landed since the last checkpoint
+        if: steps.gate.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAX_SLICES: ${{ inputs.max_slices || '3' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          .github/scripts/review-scheduled.sh "${{ inputs.reviewer || 'codex' }}" ${{ inputs.dry && '--dry' || '' }} \
+            | tee "$RUNNER_TEMP/scheduled.log"
+          # The decision is worth seeing even when it decided to do nothing.
+          { echo '## Scheduled review'; echo '```'; cat "$RUNNER_TEMP/scheduled.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
