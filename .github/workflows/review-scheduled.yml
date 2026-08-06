@@ -9,7 +9,9 @@ name: AI Review (scheduled)
 # not move, nothing is lost, and the next interactive `codex review` picks it up
 # with a human looking at the numbers.
 #
-# Turn it off without editing this file: set repo variable SCHEDULED_REVIEW=off.
+# Two repo variables control it, so neither needs a code change:
+#   SCHEDULED_REVIEW=off       stop the timer
+#   SCHEDULED_REVIEWER=claude  review with Claude instead of Codex (default codex)
 
 on:
   schedule:
@@ -72,7 +74,8 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          .github/scripts/review-scheduled.sh "${{ inputs.reviewer || 'codex' }}" ${{ inputs.dry && '--dry' || '' }} \
+          # A manual dispatch wins; otherwise the repo variable; otherwise codex.
+          .github/scripts/review-scheduled.sh "${{ inputs.reviewer || vars.SCHEDULED_REVIEWER || 'codex' }}" ${{ inputs.dry && '--dry' || '' }} \
             | tee "$RUNNER_TEMP/scheduled.log"
           # The decision is worth seeing even when it decided to do nothing.
           { echo '## Scheduled review'; echo '```'; cat "$RUNNER_TEMP/scheduled.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

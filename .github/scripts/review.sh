@@ -2,7 +2,7 @@
 # The scheduled review, across ALL CORE repos, in three words.
 #
 #   .github/scripts/review.sh show     # is it on? what has it done? what is pending?
-#   .github/scripts/review.sh start    # turn the 2-hourly review on, everywhere
+#   .github/scripts/review.sh start [codex|claude]   # on, everywhere (default codex)
 #   .github/scripts/review.sh stop     # turn it off, everywhere, immediately
 #
 # One command that covers every repo, because the alternative is remembering four
@@ -16,6 +16,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-show}"
+WANT_REVIEWER="${2:-}"
+case "${WANT_REVIEWER}" in ''|codex|claude) ;; *) echo "reviewer must be codex or claude"; exit 1;; esac
 WF="review-scheduled.yml"
 
 # The same registry the plan and the runner use — never a second list to drift.
@@ -27,17 +29,17 @@ REPOS=$(node -e '
   process.exit(1);
 ' "$SCRIPT_DIR") || { echo "❌ cannot read .github/review-repos.json"; exit 1; }
 
-state_of() {   # prints on|off|— for a repo
-  local v
-  v=$(gh variable list --repo "$1" --json name,value \
-        --jq '.[]|select(.name=="SCHEDULED_REVIEW")|.value' 2>/dev/null || true)
-  case "${v:-on}" in off) echo off;; *) echo on;; esac
+var_of() {     # $1=repo $2=var  → value or empty
+  gh variable list --repo "$1" --json name,value \
+    --jq ".[]|select(.name==\"$2\")|.value" 2>/dev/null || true
 }
+state_of()    { case "$(var_of "$1" SCHEDULED_REVIEW)" in off) echo off;; *) echo on;; esac; }
+reviewer_of() { local v; v=$(var_of "$1" SCHEDULED_REVIEWER); echo "${v:-codex}"; }
 
 case "$ACTION" in
   show)
-    printf '%-34s %-5s %-9s %s\n' "REPO" "SCHED" "LAST RUN" "PENDING"
-    printf '%-34s %-5s %-9s %s\n' "$(printf '─%.0s' {1..34})" "─────" "─────────" "──────────────────────"
+    printf '%-34s %-5s %-7s %-9s %s\n' "REPO" "SCHED" "BY" "LAST RUN" "PENDING"
+    printf '%-34s %-5s %-7s %-9s %s\n' "$(printf '─%.0s' {1..34})" "─────" "───────" "─────────" "──────────────────────"
     while read -r repo; do
       [ -n "$repo" ] || continue
       st=$(state_of "$repo")
@@ -45,7 +47,7 @@ case "$ACTION" in
       last=$(gh run list --repo "$repo" --workflow "$WF" --limit 1 \
                --json status,conclusion,createdAt \
                --jq '.[0] | (.createdAt[5:16] | sub("T"; " ")) + " " + (.conclusion // .status)' 2>/dev/null || true)
-      printf '%-34s %-5s %-9s ' "$repo" "$st" "${last:-never}"
+      printf '%-34s %-5s %-7s %-9s ' "$repo" "$st" "$(reviewer_of "$repo")" "${last:-never}"
       # What a review would cover right now, from the shared plan.
       node "$SCRIPT_DIR/review-plan.mjs" codex --json --repo "$repo" 2>/dev/null \
         | node -e 'try{const d=JSON.parse(require("fs").readFileSync(0,"utf8"));const r=d.rows[0]||{};
@@ -67,8 +69,15 @@ case "$ACTION" in
     want=$([ "$ACTION" = "start" ] && echo on || echo off)
     while read -r repo; do
       [ -n "$repo" ] || continue
-      if gh variable set SCHEDULED_REVIEW --body "$want" --repo "$repo" >/dev/null 2>&1; then
-        echo "✅ $repo → $want"
+      ok=1
+      gh variable set SCHEDULED_REVIEW --body "$want" --repo "$repo" >/dev/null 2>&1 || ok=0
+      # Only set the reviewer when starting AND one was asked for — `stop` must not
+      # silently change which agent a later `start` will use.
+      if [ "$ACTION" = "start" ] && [ -n "$WANT_REVIEWER" ]; then
+        gh variable set SCHEDULED_REVIEWER --body "$WANT_REVIEWER" --repo "$repo" >/dev/null 2>&1 || ok=0
+      fi
+      if [ "$ok" = "1" ]; then
+        echo "✅ $repo → $want$([ "$ACTION" = start ] && echo " ($(reviewer_of "$repo"))")"
       else
         # Loud, not silent: believing it is off when it is on is the expensive mistake.
         echo "❌ $repo — could NOT set SCHEDULED_REVIEW (it is still $(state_of "$repo"))"
