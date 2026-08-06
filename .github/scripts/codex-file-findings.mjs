@@ -209,8 +209,17 @@ function repeatNote(f) {
   }
   if (!hits.length) return null;
 
-  // The LAST fix is the one being re-broken; older ones are history. Order follows
-  // the issues, which are read oldest-first.
+  // The MOST RECENT fix is the one being re-broken. Order by the commit's own
+  // date, never by scan order: `gh issue list` returns newest-issue-first, so
+  // "the last one we happened to read" was frequently the OLDEST fix — the note
+  // then cited a stale sha and pointed at the wrong attempt.
+  for (const h of hits) {
+    try {
+      h.ts = Number(execFileSync('git', ['show', '-s', '--format=%ct', h.sha],
+        { encoding: 'utf8' }).trim()) || 0;
+    } catch { h.ts = 0; }
+  }
+  hits.sort((a, b) => a.ts - b.ts);
   const last = hits[hits.length - 1];
   const attempt = hits.length + 1;
   return `\n  ⟲ **Attempt ${attempt} on this code.** Last fixed in \`${last.sha.slice(0, 9)}\` for finding \`${last.id}\`` +
