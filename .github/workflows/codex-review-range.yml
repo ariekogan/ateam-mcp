@@ -354,6 +354,14 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The action refuses a run started by a bot: "Workflow initiated by
+          # non-human actor: github-actions (type: Bot)". The SCHEDULED review
+          # dispatches this workflow with GITHUB_TOKEN, so its actor IS that bot —
+          # which is why every hand-run review worked and every automatic one died
+          # after two seconds while the job still reported success.
+          # Scoped to github-actions rather than '*': only our own scheduler should
+          # be able to spend on a review, not any bot that can dispatch.
+          allowed_bots: "github-actions"
           prompt: |
             Follow the mission in ${{ steps.prep.outputs.prompt_file }} exactly.
             Read that file first; it contains the reviewer mission, the commit range
