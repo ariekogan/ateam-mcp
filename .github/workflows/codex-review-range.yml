@@ -42,7 +42,13 @@ permissions:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    # WHERE THIS RUNS. GitHub-hosted minutes are finite on a private repo, and when
+    # they run out the job is simply never picked up: "The job was not acquired by
+    # Runner of type hosted" — which looks like an agent failure and is not one.
+    # Set repo variable REVIEW_RUNNER='["self-hosted","mac1"]' to use the machine
+    # that is already there and free. Unset falls back to hosted, so a repo without
+    # a runner keeps working.
+    runs-on: ${{ vars.REVIEW_RUNNER && fromJSON(vars.REVIEW_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +56,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
+
+      # A self-hosted runner does not inherit a login shell's PATH, so the tools a
+      # hosted runner has by default are simply absent: `gh` lives in /usr/local/bin
+      # or /opt/homebrew/bin on mac1 and neither was on PATH. Every gh call then died
+      # with exit 127 — "command not found" — which surfaced as a preflight failure
+      # claiming the workflow differed from the default branch. It did not.
+      - name: Make local tooling visible (self-hosted runners)
+        run: |
+          for d in /opt/homebrew/bin /usr/local/bin; do
+            [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"
+          done
+          true
+
 
       # A mis-cased or unknown reviewer used to fall through to Codex, silently
       # billing the wrong provider for what the caller asked of the other one.
@@ -93,11 +112,13 @@ jobs:
           TO: ${{ inputs.to_sha }}
         run: |
           set -euo pipefail
-          # origin/dev was hard-coded; ateam-mobile and the Skill Builder have no
-          # `dev` branch, so the step died before reviewing anything there.
-          if [ -n "${TO:-}" ]; then TO_SHA="$TO"
-          elif git rev-parse -q --verify origin/dev >/dev/null 2>&1; then TO_SHA="$(git rev-parse origin/dev)"
-          else TO_SHA="$(git rev-parse HEAD)"; fi
+          # Default to the ref this run was dispatched with, never to a guessed
+          # branch. Preferring origin/dev "when it exists" picked ateam-mcp's
+          # ABANDONED dev — 94 behind main — and the range then failed the ancestry
+          # guard, because the marker sits on main. The caller always passes to_sha;
+          # this is the fallback for a hand-dispatched run, and the ref it was
+          # dispatched on is the only thing that reflects intent.
+          TO_SHA="${TO:-$(git rev-parse HEAD)}"
           git cat-file -e "${FROM}^{commit}" || { echo "::error::from_sha not found: $FROM"; exit 1; }
           # A diverged baseline makes a two-dot diff REVERSE the change — the agent
           # would review the fix as if it were the bug. Refuse rather than mislead.
@@ -177,6 +198,12 @@ jobs:
         if: steps.triage.outputs.needs_review == 'true' 
         env:
           REVIEW_TIER: ${{ inputs.tier == 'deep' && 'deep' || steps.triage.outputs.tier }}
+          # Deep must be REACHABLE but never automatic. Gating it behind an env var
+          # that nothing could set made it unreachable — an off switch with no on.
+          # The CALLER asking for tier=deep is the deliberate act; triage deciding
+          # deep on its own is the thing that bought 4M-token slices, and that path
+          # still resolves to standard because this is keyed on inputs.tier only.
+          ALLOW_DEEP_REVIEW: ${{ inputs.tier == 'deep' && '1' || '0' }}
           OPENAI_API_KEY: ${{ steps.key.outputs.clean }}
           OPENAI_REVIEW_MODEL: ${{ vars.OPENAI_REVIEW_MODEL }}
           OPENAI_REASONING_EFFORT: ${{ vars.OPENAI_REASONING_EFFORT }}

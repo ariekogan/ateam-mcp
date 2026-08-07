@@ -33,8 +33,18 @@ const RANGE = rangeIdx >= 0 ? args[rangeIdx + 1] : '';
 if (!FILE) { console.error('usage: codex-file-findings.mjs <verdict.json> [--range a..b] [--dry]'); process.exit(1); }
 
 const gh = (a) => execFileSync('gh', a, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
-const REPO = process.env.GITHUB_REPOSITORY
-  || JSON.parse(gh(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
+// GITHUB_REPOSITORY is always set inside Actions; `gh repo view` covers a local
+// run. A --dry run needs neither — it files nothing — so it must not die here just
+// because no one is authenticated.
+const REPO = (() => {
+  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
+  try { return JSON.parse(gh(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner; }
+  catch (e) {
+    if (DRY) return '(unknown/repo)';
+    console.error(`\u274c cannot determine the repository: ${String(e.message).split('\n')[0]}`);
+    process.exit(1);
+  }
+})();
 
 // ---- area map (same source of truth the session dispatcher uses) -------------
 let MAP;
@@ -158,8 +168,17 @@ try {
               (FIXED_BY.size ? `, ${FIXED_BY.size} with a recorded fix` : ''));
 } catch (e) {
   // Fail loud: filing on a partial known-set is how duplicates get created.
-  console.error(`\u274c cannot read existing findings — refusing to file (would duplicate): ${String(e.message).split('\n')[0]}`);
-  process.exit(1);
+  // A --dry run files NOTHING, so it cannot create a duplicate — and requiring an
+  // authenticated `gh` there made the tests depend on GitHub credentials, which CI
+  // does not have. Degrade instead of dying, and say the dedup numbers are not real.
+  const why = String(e.message).split('\n')[0];
+  if (DRY) {
+    console.log(`(dry run: could not read existing findings — ${why})`);
+    console.log('(dedup counts below are therefore NOT accurate; a real run would refuse)');
+  } else {
+    console.error(`\u274c cannot read existing findings — refusing to file (would duplicate): ${why}`);
+    process.exit(1);
+  }
 }
 const isKnown = (f) => KNOWN.has(fp(f)) || legacyFps(f).some((x) => KNOWN.has(x));
 
@@ -232,14 +251,20 @@ for (const [area, list] of byArea) {
   const label = `area:${area}`;
   const meta = MAP.areas.find((x) => x.area === area);
   try {
-    // label must exist for the per-area query to work
-    try { gh(['label', 'create', label, '--repo', REPO, '--color', 'BFD4F2',
-      '--description', `Codex review findings — ${meta?.description || area}`]); } catch {}
+    // A --dry run writes nothing, so it must not touch GitHub at all: creating a
+    // label and querying for the area issue are both writes-or-reads that need
+    // auth, and needing auth is what made these tests undrivable in CI.
+    let existing;
+    if (!DRY) {
+      // label must exist for the per-area query to work
+      try { gh(['label', 'create', label, '--repo', REPO, '--color', 'BFD4F2',
+        '--description', `Codex review findings — ${meta?.description || area}`]); } catch {}
 
-    // Existing OPEN issue for this area (one rolling issue per area).
-    const open = JSON.parse(gh(['issue', 'list', '--repo', REPO, '--label', label,
-      '--state', 'open', '--json', 'number,body', '--limit', '1']));
-    const existing = open[0];
+      // Existing OPEN issue for this area (one rolling issue per area).
+      const open = JSON.parse(gh(['issue', 'list', '--repo', REPO, '--label', label,
+        '--state', 'open', '--json', 'number,body', '--limit', '1']));
+      existing = open[0];
+    }
 
     // Dedup WITHIN this batch too. KNOWN was a snapshot taken before filing, so two
     // slices reporting the same defect in one run both passed the check and were

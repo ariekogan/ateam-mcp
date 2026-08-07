@@ -45,7 +45,13 @@ concurrency:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    # WHERE THIS RUNS. GitHub-hosted minutes are finite on a private repo, and when
+    # they run out the job is simply never picked up: "The job was not acquired by
+    # Runner of type hosted" — which looks like an agent failure and is not one.
+    # Set repo variable REVIEW_RUNNER='["self-hosted","mac1"]' to use the machine
+    # that is already there and free. Unset falls back to hosted, so a repo without
+    # a runner keeps working.
+    runs-on: ${{ vars.REVIEW_RUNNER && fromJSON(vars.REVIEW_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +59,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
+
+      # A self-hosted runner does not inherit a login shell's PATH, so the tools a
+      # hosted runner has by default are simply absent: `gh` lives in /usr/local/bin
+      # or /opt/homebrew/bin on mac1 and neither was on PATH. Every gh call then died
+      # with exit 127 — "command not found" — which surfaced as a preflight failure
+      # claiming the workflow differed from the default branch. It did not.
+      - name: Make local tooling visible (self-hosted runners)
+        run: |
+          for d in /opt/homebrew/bin /usr/local/bin; do
+            [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"
+          done
+          true
+
 
       - name: Off switch
         id: gate
@@ -70,12 +89,33 @@ jobs:
         if: steps.gate.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Every dispatch input goes through env, never into the script body. An
+          # input interpolated with ${{ }} is substituted as TEXT before bash sees
+          # it, so a crafted value runs as a command — the standard Actions script
+          # injection. This file's sibling was fixed for exactly this; the scheduler
+          # reintroduced it.
           MAX_SLICES: ${{ inputs.max_slices || '3' }}
+          IN_REVIEWER: ${{ inputs.reviewer }}
+          VAR_REVIEWER: ${{ vars.SCHEDULED_REVIEWER }}
+          IN_DRY: ${{ inputs.dry }}
         run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # A manual dispatch wins; otherwise the repo variable; otherwise codex.
-          .github/scripts/review-scheduled.sh "${{ inputs.reviewer || vars.SCHEDULED_REVIEWER || 'codex' }}" ${{ inputs.dry && '--dry' || '' }} \
+          REVIEWER="${IN_REVIEWER:-${VAR_REVIEWER:-codex}}"
+          # Validate rather than trust: the value reaches a paid agent, and an
+          # unknown reviewer silently falls through to the wrong provider.
+          case "$REVIEWER" in
+            codex|claude) ;;
+            *) echo "::error::reviewer must be codex or claude (got '${REVIEWER}')"; exit 1 ;;
+          esac
+          DRY=""; [ "${IN_DRY:-false}" = "true" ] && DRY="--dry"
+          # MAX_SLICES likewise: it is arithmetic downstream, so refuse a non-number.
+          case "${MAX_SLICES:-3}" in
+            ''|*[!0-9]*) echo "::error::max_slices must be a number (got '${MAX_SLICES}')"; exit 1 ;;
+          esac
+          .github/scripts/review-scheduled.sh "$REVIEWER" $DRY \
             | tee "$RUNNER_TEMP/scheduled.log"
           # The decision is worth seeing even when it decided to do nothing.
           { echo '## Scheduled review'; echo '```'; cat "$RUNNER_TEMP/scheduled.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
