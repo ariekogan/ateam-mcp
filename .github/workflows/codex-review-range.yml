@@ -64,9 +64,16 @@ jobs:
       # claiming the workflow differed from the default branch. It did not.
       - name: Make local tooling visible (self-hosted runners)
         run: |
+          # APPEND, never prepend. GITHUB_PATH puts entries at the FRONT, so adding
+          # /usr/local/bin there shadows the Node that setup-node just pinned — the
+          # job would silently run whatever node the host happens to have. Appending
+          # to PATH via GITHUB_ENV keeps the pinned toolchain first and still finds
+          # gh, which is the only tool actually missing on a self-hosted runner.
+          EXTRA=""
           for d in /opt/homebrew/bin /usr/local/bin; do
-            [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"
+            [ -d "$d" ] && EXTRA="${EXTRA}:${d}"
           done
+          [ -n "$EXTRA" ] && echo "PATH=${PATH}${EXTRA}" >> "$GITHUB_ENV"
           true
 
 
@@ -82,6 +89,18 @@ jobs:
             ''|*[!0-9a-fA-F]*) echo "::error::from_sha must be a hex commit sha (got '${FROM_SHA}')"; exit 1 ;;
           esac
           [ ${#FROM_SHA} -ge 7 ] || { echo "::error::from_sha too short: '${FROM_SHA}'"; exit 1; }
+
+      # to_sha reaches git and several run: bodies exactly as from_sha does, and was
+      # the one dispatch input never checked. Same treatment: a hex object name or
+      # nothing at all.
+      - name: Validate to_sha
+        env: { TO_SHA_IN: '${{ inputs.to_sha }}' }
+        run: |
+          case "${TO_SHA_IN:-}" in
+            '') echo "to_sha not supplied — will default to the dispatched ref" ;;
+            *[!0-9a-fA-F]*) echo "::error::to_sha must be a hex commit sha (got '${TO_SHA_IN}')"; exit 1 ;;
+            *) [ ${#TO_SHA_IN} -ge 7 ] || { echo "::error::to_sha too short: '${TO_SHA_IN}'"; exit 1; } ;;
+          esac
 
       - name: Validate reviewer input
         env: { REVIEWER: '${{ inputs.reviewer }}' }

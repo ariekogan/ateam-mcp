@@ -67,9 +67,12 @@ jobs:
       # claiming the workflow differed from the default branch. It did not.
       - name: Make local tooling visible (self-hosted runners)
         run: |
+          # APPEND (see codex-review-range.yml): prepending shadows the pinned Node.
+          EXTRA=""
           for d in /opt/homebrew/bin /usr/local/bin; do
-            [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"
+            [ -d "$d" ] && EXTRA="${EXTRA}:${d}"
           done
+          [ -n "$EXTRA" ] && echo "PATH=${PATH}${EXTRA}" >> "$GITHUB_ENV"
           true
 
 

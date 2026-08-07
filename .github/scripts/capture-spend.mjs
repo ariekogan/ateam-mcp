@@ -62,18 +62,39 @@ const tokensOf = (json) => {
 };
 
 let usd = null, tokens = null;
-let files = [];
-try {
-  files = fs.readdirSync(DIR).filter((f) => /\.json$/.test(f)).map((f) => path.join(DIR, f));
-} catch { /* nothing to scan */ }
+// Walk subdirectories too: Codex writes its session transcript to
+// CODEX_HOME/sessions/<date>/<id>.jsonl, so a flat readdir of the temp dir found
+// nothing and every Codex run reported "usage not reported".
+function* walk(dir, depth = 0) {
+  if (depth > 5) return;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) yield* walk(full, depth + 1);
+    else if (/\.jsonl?$/.test(e.name)) yield full;
+  }
+}
 
-for (const f of files) {
-  let json;
-  try { json = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { continue; }
-  const u = shallowest(json, USD);
-  const t = tokensOf(json);
-  if (u !== null) usd = usd === null ? u : Math.max(usd, u);
-  if (t !== null) tokens = tokens === null ? t : Math.max(tokens, t);
+// A .jsonl transcript is many events; the usage figures live on individual lines,
+// so parse per line and take the LARGEST — the last cumulative total, not a sum of
+// running totals, which would multiply the real number by the number of turns.
+function readDocs(file) {
+  const raw = (() => { try { return fs.readFileSync(file, 'utf8'); } catch { return ''; } })();
+  if (!raw.trim()) return [];
+  if (/\.jsonl$/.test(file)) {
+    return raw.split('\n').map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  }
+  try { return [JSON.parse(raw)]; } catch { return []; }
+}
+
+for (const f of walk(DIR)) {
+  for (const json of readDocs(f)) {
+    const u = shallowest(json, USD);
+    const t = tokensOf(json);
+    if (u !== null) usd = usd === null ? u : Math.max(usd, u);
+    if (t !== null) tokens = tokens === null ? t : Math.max(tokens, t);
+  }
 }
 
 const parts = [];

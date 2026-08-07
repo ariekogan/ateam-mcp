@@ -27,6 +27,24 @@ MARKER_TAG="codex-reviewed"
 # fail there. Fall back to whatever the repo says its default branch is.
 BRANCH="${REVIEW_BRANCH:-}"
 if [ -z "$BRANCH" ]; then
+  # THE PINNED branch from review-repos.json — the same source the plan and the
+  # scheduler use. Deriving it as "dev if it exists" picked ateam-mcp's abandoned
+  # dev (94 behind main, 0 ahead) while its marker sits on main, so the run refused
+  # itself as a reversed diff. One registry, one answer.
+  BRANCH=$(node -e '
+    const fs=require("fs");
+    const here=process.argv[1], repo=process.argv[2];
+    for (const p of [".github/review-repos.json", here+"/../review-repos.json"]) {
+      try {
+        const e=JSON.parse(fs.readFileSync(p,"utf8")).repos.find(r=>r.repo===repo);
+        if (e && e.branch) { console.log(e.branch); process.exit(0); }
+      } catch {}
+    }
+    process.exit(1);
+  ' "$SCRIPT_DIR" "$REPO" 2>/dev/null || true)
+fi
+if [ -z "$BRANCH" ]; then
+  # Not in the registry: fall back to dev-if-present, then the default branch.
   if git rev-parse -q --verify refs/remotes/origin/dev >/dev/null 2>&1; then
     BRANCH=dev
   else

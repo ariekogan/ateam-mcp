@@ -40,6 +40,7 @@ DECISIONS=$(printf '%s' "$PLAN" | MAX="$MAX_SLICES" node -e '
     if (r.note)               { console.log(`skip\t${r.repo}\t${r.branch}\t${r.note}`); continue; }
     if (r.slices > max)       { console.log(`hold\t${r.repo}\t${r.branch}\t${r.slices} slices > cap ${max} — left for an interactive review`); continue; }
     console.log(`run\t${r.repo}\t${r.branch}\t${r.slices} slice(s), ${r.commits} commit(s)`);
+    // branch travels with the decision so the runner cannot re-derive a different one
   }
 ')
 
@@ -60,7 +61,11 @@ if [ -n "$HELD" ]; then
   printf '%s\n' "$HELD" | sed 's/^/     · /'
 fi
 
-RUN=$(printf '%s\n' "$DECISIONS" | awk -F'\t' '$1=="run"{print $2}')
+# Carry the BRANCH the plan decided on. The runner used to re-derive its own, and a
+# repo whose pinned branch differs from that guess got planned on one branch and
+# reviewed on another — the cap, the cost and the findings would all describe work
+# that was never looked at.
+RUN=$(printf '%s\n' "$DECISIONS" | awk -F'\t' '$1=="run"{print $2"\t"$3}')
 [ -n "$RUN" ] || { echo ""; echo "nothing to review — \$0 spent."; exit 0; }
 
 # Only this repo can be reviewed from this checkout; the runner reads the local
@@ -68,13 +73,19 @@ RUN=$(printf '%s\n' "$DECISIONS" | awk -F'\t' '$1=="run"{print $2}')
 # rather than pretending they were covered.
 THIS=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 rc=0
-printf '%s\n' "$RUN" | while read -r repo; do
+# NOT `printf | while` — a pipeline runs its right-hand side in a SUBSHELL, so `rc`
+# set inside it is discarded and the script exits 0 no matter what happened. For an
+# UNATTENDED job that is the worst possible bug: a failed review reports success and
+# nobody looks. Feed the loop from a here-string so it runs in this shell.
+while IFS=$'\t' read -r repo branch; do
+  [ -n "$repo" ] || continue
   if [ "$repo" = "$THIS" ]; then
     echo ""
-    echo "▶ reviewing $repo"
-    "$SCRIPT_DIR/codex-review-since.sh" "$REVIEWER" || rc=$?
+    echo "▶ reviewing $repo (${branch})"
+    REVIEW_BRANCH="$branch" "$SCRIPT_DIR/codex-review-since.sh" "$REVIEWER" || rc=$?
   else
     echo "  · $repo has work but needs its own checkout — run this script from there"
   fi
-done
+done <<< "$RUN"
+[ "$rc" = "0" ] || echo "::error::the review did not complete (exit $rc) — see the log above"
 exit $rc
