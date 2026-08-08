@@ -29,7 +29,16 @@ for a in "$@"; do
 done
 MAX_SLICES="${MAX_SLICES:-3}"
 
-PLAN=$(node "$SCRIPT_DIR/review-plan.mjs" "$REVIEWER" --json)
+# Plan for THIS repo only. Inside Actions the token is scoped to its own repo, so
+# every other row came back "repo/branch unreachable" — an alarming note for a
+# non-problem, since each repo runs its own scheduler and reviews only itself.
+# Outside Actions (a hand run) the full table is still what you want.
+THIS_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)
+if [ -n "${GITHUB_ACTIONS:-}" ] && [ -n "$THIS_REPO" ]; then
+  PLAN=$(node "$SCRIPT_DIR/review-plan.mjs" "$REVIEWER" --json --repo "$THIS_REPO")
+else
+  PLAN=$(node "$SCRIPT_DIR/review-plan.mjs" "$REVIEWER" --json)
+fi
 
 # Decide per repo from the SAME numbers the human table shows.
 DECISIONS=$(printf '%s' "$PLAN" | MAX="$MAX_SLICES" node -e '
