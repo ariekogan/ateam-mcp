@@ -65,7 +65,10 @@ case "$ACTION" in
 esac
 case "$REVIEWER" in codex|claude) ;; *) echo "reviewer must be codex|claude"; exit 1;; esac
 
-git fetch origin --tags --quiet
+# --force because the MARKER TAG IS SUPPOSED TO MOVE. Without it git refuses with
+# "would clobber existing tag" and, under set -e, the whole script dies silently —
+# no output, exit 0, looking exactly like "nothing to review".
+git fetch origin --tags --force --quiet
 HEAD_SHA=$(git rev-parse "origin/${BRANCH}")
 MARKER=$(git rev-parse -q --verify "refs/tags/${MARKER_TAG}^{commit}" 2>/dev/null || true)
 # THE baseline is the LAST REVIEW (the codex-reviewed tag) — everything we did
