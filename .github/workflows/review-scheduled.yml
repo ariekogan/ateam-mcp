@@ -27,7 +27,7 @@ on:
         description: "Skip a repo needing more slices than this"
         required: false
         type: string
-        default: "3"
+        default: "8"
       dry:
         description: "Decide and report, spend nothing"
         required: false
@@ -97,7 +97,11 @@ jobs:
           # it, so a crafted value runs as a command — the standard Actions script
           # injection. This file's sibling was fixed for exactly this; the scheduler
           # reintroduced it.
-          MAX_SLICES: ${{ inputs.max_slices || '3' }}
+          # Manual dispatch > repo variable > default. A cap of 3 stalled overnight:
+          # a night of work is ~5 slices, so the scheduler declined every run and
+          # reviewed nothing. 8 covers an unattended night while still refusing a
+          # genuinely huge backlog, and SCHEDULED_MAX_SLICES changes it with no push.
+          MAX_SLICES: ${{ inputs.max_slices || vars.SCHEDULED_MAX_SLICES || '8' }}
           IN_REVIEWER: ${{ inputs.reviewer }}
           VAR_REVIEWER: ${{ vars.SCHEDULED_REVIEWER }}
           IN_DRY: ${{ inputs.dry }}
