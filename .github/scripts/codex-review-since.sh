@@ -145,6 +145,23 @@ EOF
 # Always finish at HEAD.
 case " $BOUNDS " in *" $HEAD_SHA "*) ;; *) BOUNDS="$BOUNDS $HEAD_SHA";; esac
 set -- $BOUNDS
+
+# THE CAP, enforced where slices actually exist. The scheduler decides run-or-hold
+# from an ESTIMATE (total insertions / chunk size); the real count comes from
+# walking commit boundaries and can be several times larger — a run planned as 3
+# slices split into 11. A cap the spender does not enforce is not a cap, so honour
+# it here: review the first N slices and leave the rest for the next run. Nothing
+# is lost, because the marker is banked after each slice.
+if [ -n "${MAX_SLICES:-}" ] && [ "$#" -gt "$MAX_SLICES" ]; then
+  echo "⚠️  ${#} slices exceeds the cap of ${MAX_SLICES} — reviewing the first ${MAX_SLICES}."
+  echo "   The rest is picked up by the next run; the marker advances as each slice completes."
+  CAPPED=""; i=0
+  for b in "$@"; do
+    i=$((i+1)); [ "$i" -le "$MAX_SLICES" ] || break
+    CAPPED="$CAPPED $b"
+  done
+  set -- $CAPPED
+fi
 TOTAL=$#
 
 echo "reviewer: $REVIEWER"

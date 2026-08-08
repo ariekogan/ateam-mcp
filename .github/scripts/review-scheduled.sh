@@ -91,7 +91,10 @@ while IFS=$'\t' read -r repo branch; do
   if [ "$repo" = "$THIS" ]; then
     echo ""
     echo "▶ reviewing $repo (${branch})"
-    REVIEW_BRANCH="$branch" "$SCRIPT_DIR/codex-review-since.sh" "$REVIEWER" || rc=$?
+    # Hand the cap DOWN. The decision above used an estimate; only the runner
+    # knows the real slice count, so it is the one that must honour the limit.
+    REVIEW_BRANCH="$branch" MAX_SLICES="$MAX_SLICES" \
+      "$SCRIPT_DIR/codex-review-since.sh" "$REVIEWER" || rc=$?
   else
     echo "  · $repo has work but needs its own checkout — run this script from there"
   fi
