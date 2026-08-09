@@ -43,6 +43,10 @@ FILES=(
   .github/scripts/review-scheduled.sh
   .github/scripts/review.sh
   .github/scripts/review-sync.sh
+  # NO_ABANDONED_CODE is the one rule that is genuinely repo-independent: it is about
+  # how the work happens, not what the repo contains. The other rule files stay
+  # unsynced on purpose — they describe one repo's architecture.
+  .github/review-rules/NO_ABANDONED_CODE.md
 )
 # NOT synced, on purpose: review-areas.json maps THIS repo's paths to areas, and
 # review-rules/ may carry repo-specific rules. Copying those would route findings

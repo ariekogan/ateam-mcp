@@ -20,6 +20,9 @@ const files = execFileSync('git', ['diff', '--name-only', `${FROM}..${TO}`], { e
 const has = (re) => files.some((f) => re.test(f));
 const RULES = [
   ['ARCHITECTURE_BOUNDARIES.md', () => true],
+  // Always selected. Abandoned-approach residue is not tied to a subsystem — it is
+  // produced by the way the work happens, so it can appear in any diff.
+  ['NO_ABANDONED_CODE.md',   () => true],
   ['ADAS_ARCHITECTURE.md',   () => has(/^(apps|connectors|packages)\//)],
   ['SECURITY.md',            () => has(/^(apps\/backend\/(security|middleware|storage|routes)|connectors|apps\/[^/]+\/src\/(server|http|auth))/) || has(/auth|token|secret|tenant/i)],
   ['CONCURRENCY_AND_STATE.md', () => has(/^apps\/backend\/(worker|storage|ai|utils)\//) || has(/^apps\/(acs|trigger-runner)\//)],
