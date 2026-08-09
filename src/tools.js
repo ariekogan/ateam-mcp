@@ -26,6 +26,7 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_github_patch", "ateam_github_write", "ateam_github_push",
   "ateam_github_promote", "ateam_github_rollback",
   "ateam_test_skill", "ateam_test_pipeline", "ateam_test_connector", "ateam_test_notification",
+  "ateam_verify_surface",
 ]);
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 
@@ -1936,6 +1937,35 @@ export const tools = [
   // ═══════════════════════════════════════════════════════════════════
 
   {
+    name: "ateam_verify_surface",
+    core: true,
+    description:
+      "PROVE a connector ui_plugin actually renders WITH DATA — the required evidence that a user-visible " +
+      "UI fix is done. A plugin fetches its data over postMessage from its parent window, so opening its " +
+      "iframe alone shows the empty state and 'confirms' the very bug you're checking. This opens the plugin " +
+      "in the REAL host surface in headless Chromium, records every MCP tool call it makes, and returns " +
+      "{ ok, verdict, visible_text, calls, failures }. It distinguishes 'invented tool name' / 'right tool, " +
+      "no data' / 'plugin never asked'. FAIL-CLOSED: a browser-mcp outage returns ok:false verdict:'inconclusive' " +
+      "(never a soft pass). Run AFTER a UI/data fix; quote visible_text in your report. Requires authentication.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution id." },
+        plugin_id: {
+          type: "string",
+          description: "The ui_plugin id to probe, e.g. 'mcp:accounting-mcp:spending-dashboard'.",
+        },
+        expect: {
+          type: "object",
+          description: "Optional assertion: { tools: ['memory.get', ...] } — each MUST be called by the plugin, else ok:false.",
+          properties: { tools: { type: "array", items: { type: "string" } } },
+        },
+        actor_id: { type: "string", description: "Optional actor to render as; defaults to the solution's context actor." },
+      },
+      required: ["solution_id", "plugin_id"],
+    },
+  },
+  {
     name: "ateam_redeploy",
     core: true,
     description:
@@ -2052,6 +2082,7 @@ const TENANT_TOOLS = new Set([
   "ateam_test_skill",
   "ateam_test_notification",
   "ateam_test_pipeline",
+  "ateam_verify_surface",
   "ateam_test_voice",
   "ateam_test_status",
   "ateam_test_abort",
@@ -2588,7 +2619,7 @@ const handlers = {
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Version", description: "Every deploy auto-pushes to main on GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
         { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch, then redeploy with ateam_build_and_run (auto-pulls from GitHub). NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
-        { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. Diagnose with logs and metrics.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
       ],
     },
@@ -3949,6 +3980,20 @@ const handlers = {
           }
         : undefined,
     };
+  },
+
+  ateam_verify_surface: async ({ solution_id, plugin_id, expect, actor_id }, sid) => {
+    if (!solution_id) return { ok: false, error: "solution_id required" };
+    if (!plugin_id) return { ok: false, error: "plugin_id required" };
+    const body = {};
+    if (expect) body.expect = expect;
+    if (actor_id) body.actor_id = actor_id;
+    // Forwards to the skill-validator, which runs Core's ui.surfaceProbe via /mcp.
+    // 60s: navigate + settle + warm-retry inside Core, plus the hop.
+    return await post(
+      `/deploy/solutions/${solution_id}/plugins/${encodeURIComponent(plugin_id)}/verify-surface`,
+      body, sid, { timeoutMs: 60000 }
+    );
   },
 
   ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id }, sid) => {
