@@ -155,14 +155,22 @@ set -- $BOUNDS
 # slices split into 11. A cap the spender does not enforce is not a cap, so honour
 # it here: review the first N slices and leave the rest for the next run. Nothing
 # is lost, because the marker is banked after each slice.
+#
+# The truncation MUST land on BOUNDS, not just on "$@". The slice loop below walks
+# $BOUNDS, so capping only the positional parameters left the count and the warning
+# capped while every slice was still reviewed and paid for — a cap that announced
+# itself and did nothing, which is worse than no cap at all.
+CAPPED_AT=""
 if [ -n "${MAX_SLICES:-}" ] && [ "$#" -gt "$MAX_SLICES" ]; then
   echo "⚠️  ${#} slices exceeds the cap of ${MAX_SLICES} — reviewing the first ${MAX_SLICES}."
   echo "   The rest is picked up by the next run; the marker advances as each slice completes."
+  CAPPED_AT="$#"
   CAPPED=""; i=0
   for b in "$@"; do
     i=$((i+1)); [ "$i" -le "$MAX_SLICES" ] || break
     CAPPED="$CAPPED $b"
   done
+  BOUNDS="$CAPPED"
   set -- $CAPPED
 fi
 TOTAL=$#
@@ -254,7 +262,9 @@ if [ -f /tmp/codex-last-findings.json ]; then
   fi
 fi
 i=0; slice_from="$FROM"; FAILED=0
-for b in $BOUNDS; do
+# Iterate "$@" — the SAME list TOTAL was counted from, and the one the cap rewrote.
+# Walking $BOUNDS here instead is what let a capped run review every slice anyway.
+for b in "$@"; do
   i=$((i+1))
   if ! run_slice "$slice_from" "$b" "$i"; then FAILED=1; break; fi
   slice_from="$b"
@@ -280,6 +290,15 @@ node -e '
     if(bits.length) console.log("💲 TOTAL for this review: "+bits.join(" · ")); } catch {}
 ' 2>/dev/null || true
 node "$SCRIPT_DIR/review-accumulator.mjs" complete || true
-echo "✅ all ${TOTAL} slice(s) reviewed and banked (marker at $(git rev-parse --short "$HEAD_SHA"))."
+# Report the marker where it ACTUALLY ended up, not HEAD. Under a cap the run stops
+# short of HEAD on purpose, and claiming "all slices reviewed, marker at HEAD" told
+# you the range was covered when part of it had never been looked at.
+MARKER_NOW=$(git rev-parse --short "$(git rev-parse "refs/tags/${MARKER_TAG}")")
+if [ -n "$CAPPED_AT" ]; then
+  echo "✅ ${TOTAL} of ${CAPPED_AT} slice(s) reviewed and banked (marker at ${MARKER_NOW})."
+  echo "   ⚠️  capped — $(( CAPPED_AT - TOTAL )) slice(s) up to $(git rev-parse --short "$HEAD_SHA") are NOT reviewed yet; re-run to continue."
+else
+  echo "✅ all ${TOTAL} slice(s) reviewed and banked (marker at ${MARKER_NOW})."
+fi
 echo "   findings: /tmp/codex-last-findings.json"
 echo "   dispatch:  node .github/scripts/codex-findings.mjs --file /tmp/codex-last-findings.json"
