@@ -1966,6 +1966,37 @@ export const tools = [
     },
   },
   {
+    name: "ateam_connector_logs",
+    core: true,
+    description:
+      "Read what a connector process actually PRINTED to stderr. This is the only place a connector's " +
+      "internal failure is visible: a tool that catches its own error still returns ok:true, and the widget " +
+      "then renders an empty state that looks like real data.\n\n" +
+      "Real case (2026-08-11): a dashboard connector's ledger.getData got 401 Authentication required from " +
+      "Core, swallowed it, returned an empty ledger, and displayed 0.00 everywhere — while the upload said " +
+      "ok, the tool said ok:true, and the surface probe said surface_ok. The word 'Authentication' appeared " +
+      "ONLY here.\n\n" +
+      "USE IT whenever a tool succeeds but the data is empty, wrong, or zero — that combination is the " +
+      "signature of a swallowed error, and 'the call returned ok' is not evidence it worked. Pass the " +
+      "returned `cursor` back as `since` to read only what is new since your last look, so you can bracket " +
+      "an action and see exactly what it printed. Only stdio (solution) connectors stream stderr through " +
+      "Core; a platform/HTTP connector answers ok:false with a reason.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        connector_id: { type: "string", description: "The connector ID (e.g. 'accounting-dashboard-mcp')" },
+        since: {
+          type: "number",
+          description: "Cursor from a previous call — returns only lines printed after it. Omit for the whole retained tail.",
+        },
+        limit: { type: "number", description: "Max lines (default 100, max 300)" },
+        errors_only: { type: "boolean", description: "Keep only lines that read as errors (401/failed/exception/refused/…)" },
+      },
+      required: ["solution_id", "connector_id"],
+    },
+  },
+  {
     name: "ateam_redeploy",
     core: true,
     description:
@@ -2078,6 +2109,7 @@ const TENANT_TOOLS = new Set([
   "ateam_list_solutions",
   "ateam_get_solution",
   "ateam_get_execution_logs",
+  "ateam_connector_logs",
   "ateam_conversation",
   "ateam_test_skill",
   "ateam_test_notification",
@@ -2619,7 +2651,7 @@ const handlers = {
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Version", description: "Every deploy auto-pushes to main on GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
         { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch, then redeploy with ateam_build_and_run (auto-pulls from GitHub). NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
-        { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
       ],
     },
@@ -2681,7 +2713,7 @@ const handlers = {
     },
     advanced_tools: {
       _note: "These tools are available but hidden from the default tool list. Call them by name when you need fine-grained control.",
-      debugging: ["ateam_get_execution_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"],
+      debugging: ["ateam_get_execution_logs", "ateam_connector_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"],
       manual_lifecycle: ["ateam_validate_skill", "ateam_validate_solution", "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector", "ateam_update", "ateam_redeploy"],
       async_testing: ["ateam_test_status", "ateam_test_abort"],
       other: ["ateam_upload_connector_files", "ateam_solution_chat"],
@@ -3980,6 +4012,20 @@ const handlers = {
           }
         : undefined,
     };
+  },
+
+  ateam_connector_logs: async ({ solution_id, connector_id, since, limit, errors_only }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    if (!connector_id) throw new Error("connector_id required");
+    const qs = new URLSearchParams();
+    if (since) qs.set("since", String(since));
+    if (limit) qs.set("limit", String(limit));
+    if (errors_only === true) qs.set("errors_only", "true");
+    const qsStr = qs.toString() ? `?${qs}` : "";
+    return get(
+      `/deploy/solutions/${solution_id}/connectors/${encodeURIComponent(connector_id)}/logs${qsStr}`,
+      sid
+    );
   },
 
   ateam_verify_surface: async ({ solution_id, plugin_id, expect, actor_id }, sid) => {
