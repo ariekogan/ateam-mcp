@@ -4036,10 +4036,26 @@ const handlers = {
     if (actor_id) body.actor_id = actor_id;
     // Forwards to the skill-validator, which runs Core's ui.surfaceProbe via /mcp.
     // 60s: navigate + settle + warm-retry inside Core, plus the hop.
-    return await post(
-      `/deploy/solutions/${solution_id}/plugins/${encodeURIComponent(plugin_id)}/verify-surface`,
-      body, sid, { timeoutMs: 60000 }
-    );
+    try {
+      return await post(
+        `/deploy/solutions/${solution_id}/plugins/${encodeURIComponent(plugin_id)}/verify-surface`,
+        body, sid, { timeoutMs: 60000 }
+      );
+    } catch (err) {
+      // A FAILING surface is this tool's whole job, not a transport error. The
+      // route maps a negative verdict to 422 (503 for inconclusive), which the
+      // generic error path turned into "returned 422" — hiding the failures that
+      // say WHY the screen is broken, and leaving the caller as blind as before
+      // it ran the probe. Hand the verdict back as a result instead of throwing.
+      const m = /returned (4\d\d|503)\b[\s\S]*?— (\{[\s\S]*)$/.exec(err?.message || "");
+      if (m) {
+        try {
+          const parsed = JSON.parse(m[2].replace(/\n?Hint: [\s\S]*$/, "").trim());
+          if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) return parsed;
+        } catch { /* not the probe's body — fall through */ }
+      }
+      throw err;
+    }
   },
 
   ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id }, sid) => {

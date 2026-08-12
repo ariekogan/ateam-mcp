@@ -461,7 +461,21 @@ function formatError(method, path, status, body, baseUrl) {
   }
 
   const hint = hints[status] || "";
-  const detail = typeof body === "string" && body.length > 0 && body.length < 2000 ? body : "";
+  // A JSON error body used to be dropped entirely — only a string body became
+  // `detail`. So an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe
+  // returns 422 + the failures that explain why the surface is broken) reached
+  // the caller as a bare "returned 422", throwing away the very thing it was
+  // asked to produce. Serialize objects too, capped the same way.
+  let detail = "";
+  if (typeof body === "string") {
+    if (body.length > 0 && body.length < 2000) detail = body;
+  } else if (body && typeof body === "object") {
+    try {
+      const s = JSON.stringify(body);
+      if (s.length < 2000) detail = s;
+      else detail = s.slice(0, 2000) + "… (truncated)";
+    } catch { /* non-serializable — leave detail empty */ }
+  }
 
   // Always show the FULL URL actually hit — ateam-mcp is a PUBLIC MCP with a
   // configurable base (prod default, dev/self-host overrides), so a bare
