@@ -467,14 +467,14 @@ function formatError(method, path, status, body, baseUrl) {
   // the caller as a bare "returned 422", throwing away the very thing it was
   // asked to produce. Serialize objects too, capped the same way.
   let detail = "";
-  if (typeof body === "string") {
-    if (body.length > 0 && body.length < 2000) detail = body;
-  } else if (body && typeof body === "object") {
-    try {
-      const s = JSON.stringify(body);
-      if (s.length < 2000) detail = s;
-      else detail = s.slice(0, 2000) + "… (truncated)";
-    } catch { /* non-serializable — leave detail empty */ }
+  const asText = typeof body === "string"
+    ? body
+    : (body && typeof body === "object" ? (() => { try { return JSON.stringify(body); } catch { return ""; } })() : "");
+  if (asText.length > 0) {
+    // Previously a body of 2000+ chars was dropped ENTIRELY, so the richer the
+    // error the less the caller was told — a 422 carrying the full diagnosis
+    // arrived as a bare status code. Truncate instead of discarding.
+    detail = asText.length < 2000 ? asText : asText.slice(0, 2000) + "… (truncated)";
   }
 
   // Always show the FULL URL actually hit — ateam-mcp is a PUBLIC MCP with a
@@ -539,6 +539,12 @@ async function request(method, path, body, sessionId, opts = {}) {
         // on this to NOT scaffold-clobber an existing skill on a read error.
         const e = new Error(formatError(method, path, res.status, text, baseUrl));
         e.status = res.status;
+        // Keep the RAW body on the error. formatError truncates for humans, and
+        // an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe's 422
+        // carries the failures explaining why a surface is broken) is exactly the
+        // case where the body matters more than the status. A caller that knows
+        // how to read its own error shape should not have to scrape a message.
+        e.body = text;
         throw e;
       }
 

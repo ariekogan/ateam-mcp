@@ -4047,10 +4047,9 @@ const handlers = {
       // generic error path turned into "returned 422" — hiding the failures that
       // say WHY the screen is broken, and leaving the caller as blind as before
       // it ran the probe. Hand the verdict back as a result instead of throwing.
-      const m = /returned (4\d\d|503)\b[\s\S]*?— (\{[\s\S]*)$/.exec(err?.message || "");
-      if (m) {
+      if (typeof err?.body === "string" && err.body) {
         try {
-          const parsed = JSON.parse(m[2].replace(/\n?Hint: [\s\S]*$/, "").trim());
+          const parsed = JSON.parse(err.body);
           if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) return parsed;
         } catch { /* not the probe's body — fall through */ }
       }
