@@ -2168,6 +2168,20 @@ function _scaffoldConnectorFiles({ connectorId, displayName, uiCapable }) {
 //
 // Fill in your real tools below (see TOOLS + the tools/call dispatch). The
 // JSON-RPC framing, actor isolation, stdio loop${uiCapable ? ", and ui-dist plugin discovery" : ""} are template-provided.
+//
+// ⚠️ NEVER SWALLOW A FAILURE. If something this tool depends on fails — a fetch,
+// a platform call, a store read — RETURN THE ERROR. Do not catch it and answer
+// with empty data:
+//
+//   BAD:   try { rows = await load(); } catch { rows = []; }   // renders 0.00 forever
+//   GOOD:  try { rows = await load(); }
+//          catch (e) { return toText({ ok: false, error: String(e.message || e) }); }
+//
+// A tool that returns ok:true with an empty result when its dependency is broken
+// is INDISTINGUISHABLE from one that genuinely has no data — to the widget, to
+// the person reading the screen, and to the agent trying to fix it. That exact
+// shape cost a full day: a connector caught a 401, returned an empty ledger, and
+// the dashboard showed 0.00 while every check reported success.
 ${uiCapable ? `
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
