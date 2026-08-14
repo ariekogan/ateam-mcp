@@ -29,6 +29,7 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_verify_surface",
 ]);
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
+import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 
 // ─── Async deploy helper ────────────────────────────────────────────
 //
@@ -5216,6 +5217,10 @@ function summarizeLargeResult(result, toolName) {
   return JSON.stringify(result, null, 2).slice(0, MAX_RESPONSE_CHARS);
 }
 
+// Failure classification (isError + a machine-readable code, WITHOUT parsing
+// English) lives in ./mcpFailure.js — imported at the top — so the rule is
+// unit-testable in isolation (mcpFailure.test.js).
+
 // ─── Dispatcher ─────────────────────────────────────────────────────
 
 export async function handleToolCall(name, args, sessionId) {
@@ -5259,6 +5264,7 @@ export async function handleToolCall(name, args, sessionId) {
         ].join("\n"),
       }],
       isError: true,
+      structuredContent: { ok: false, code: "UNAUTHENTICATED" },
     };
   }
 
@@ -5315,13 +5321,28 @@ export async function handleToolCall(name, args, sessionId) {
       } catch { /* non-fatal — unauthed sessions or API blips shouldn't break bootstrap */ }
     }
 
+    const text = formatResult(result, name);
+    if (isLogicalFailure(result)) {
+      // Logical failure RETURNED (not thrown) — e.g. { ok:false, message:"…
+      // Authentication required" } or an upstream 200-with-auth-text. Flag it
+      // so a caller detects it from isError/code, not by reading the prose.
+      // The sentence stays in content[].text for the reasoning loop.
+      const code = deriveErrorCode(result.message || result.error || text, result.code);
+      return {
+        content: [{ type: "text", text }],
+        isError: true,
+        structuredContent: { ok: false, code },
+      };
+    }
     return {
-      content: [{ type: "text", text: formatResult(result, name) }],
+      content: [{ type: "text", text }],
     };
   } catch (err) {
+    const code = deriveErrorCode(err.message, err.code);
     return {
       content: [{ type: "text", text: err.message }],
       isError: true,
+      structuredContent: { ok: false, code },
     };
   }
 }
