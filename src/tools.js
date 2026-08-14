@@ -795,7 +795,8 @@ export const tools = [
       "- Add a tool: updates: { \"tools_push\": [{ name: \"conn.tool\", description: \"...\", inputs: [...], output: {...} }] }\n" +
       "- Change intent: updates: { \"intents.supported_update\": [{ id: \"i1\", description: \"new desc\" }] }\n" +
       "- CREATE a new skill: target='skill', skill_id='my-new-skill', updates: { \"problem.statement\": \"...\", \"role.persona\": \"...\" } — auto-scaffolded and added to solution topology.\n\n" +
-      "PREVIEW BEFORE WRITING: pass dry_run:true to see the diff (arrays_merged, arrays_replaced, dropped_ids, added_ids) without applying. Use this before any destructive-looking edit.",
+      "PREVIEW BEFORE WRITING: pass dry_run:true to see the diff (arrays_merged, arrays_replaced, dropped_ids, added_ids) without applying. Use this before any destructive-looking edit.\n\n" +
+      "VERDICT (skill target): the response carries a NON-BLOCKING `validation` block { skill_id, valid, ready_to_export, error_count, incomplete_sections[], unresolved_refs } — the patch always saves even if the def is now invalid, so CHECK valid: false and fix incomplete_sections before relying on it (build_and_run will refuse to deploy an invalid skill). error_count can include auto-import connector-tool artifacts, so act on incomplete_sections first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3831,6 +3832,46 @@ const handlers = {
       } catch { /* advisory — never downgrade a successful patch on the health check */ }
     }
 
+    // Phase 5: validation verdict (skill target only). NON-BLOCKING — "silent is
+    // the bug": a patch that leaves the definition invalid used to return ok:true
+    // with NO verdict, so an agent (or a persona routing here as the "cheapest
+    // correct tool") never saw it went red, and an invalid def slipped toward
+    // Core (build_and_run refuses on errors, but the patch path reported nothing).
+    // Report the verdict keyed by skill_id; never block. error_count can be
+    // inflated by auto-imported connector tools (INVALID_TOOL_INPUTS /
+    // MISSING_TOOL_OUTPUT fire on every solution because Core resolves their
+    // contract at deploy, not the author) — so lead with the author-facing
+    // signal: which sections are still incomplete, plus any unresolved refs.
+    let validation = null;
+    if (target === "skill" && skill_id) {
+      try {
+        const vr = await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}/validation`, sid);
+        const v = vr?.validation || vr || {};
+        const incomplete_sections = Object.entries(v.sections || {})
+          .filter(([, s]) => s && s.complete === false)
+          .map(([name]) => name);
+        const unresolved = Object.entries(v.unresolved_refs || {}).filter(([, n]) => Number(n) > 0);
+        validation = {
+          skill_id,
+          valid: v.valid === true,
+          ready_to_export: v.ready_to_export === true,
+          error_count: v.error_count ?? null,
+          warning_count: v.warning_count ?? null,
+          ...(incomplete_sections.length && { incomplete_sections }),
+          ...(unresolved.length && { unresolved_refs: Object.fromEntries(unresolved) }),
+          ...(v.error_count > 0 && {
+            _note: `error_count can include auto-import connector-tool artifacts — INVALID_TOOL_INPUTS / MISSING_TOOL_OUTPUT fire on every solution because Core resolves an auto-imported tool's contract at deploy, not the author. Act on incomplete_sections${unresolved.length ? " + unresolved_refs" : ""} first.`,
+          }),
+          ...(v.valid === false && {
+            _verdict: `Skill "${skill_id}" is INVALID — the patch was still saved + redeployed (non-blocking), but build_and_run will REFUSE to deploy while errors stand. Fix the above, then re-check.`,
+          }),
+        };
+      } catch { /* advisory — a validation hiccup never downgrades a saved patch */ }
+    }
+    const validationStatus = (validation && validation.valid === false)
+      ? ` ⚠️ Skill "${skill_id}" is INVALID (${validation.error_count ?? "?"} error(s)) — see validation (non-blocking; build_and_run will refuse until fixed).`
+      : "";
+
     return {
       ok: true,
       solution_id,
@@ -3860,13 +3901,14 @@ const handlers = {
       }),
       ...(isNewSkill && { created_skill: skill_id }),
       ...(redeployResult && { redeploy: redeployResult }),
+      ...(validation && { validation }),
       ...(widget_health && { widget_health }),
       ...(test_result && { test_result }),
-      _status: redeployOk
+      _status: (redeployOk
         ? (widget_health && !widget_health.ok
             ? `✅ Patched on ${store} + redeployed. ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
             : `✅ Patched on ${store} + redeployed.`)
-        : `⚠️ Patched on ${store} ✅ but redeploy timed out. Run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')',
+        : `⚠️ Patched on ${store} ✅ but redeploy timed out. Run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
         : 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
