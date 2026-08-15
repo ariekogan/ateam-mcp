@@ -3091,8 +3091,23 @@ const handlers = {
         // The pull-bundle endpoint returns mcp_store (files) and solution.platform_connectors
         // (declarations) but not a top-level connectors[] array. The validator/deploy
         // pipeline expects one, so build it from the mcp_store we just pulled.
+        //
+        // ROBUSTNESS: mcp_store is normally keyed by CONNECTOR ID, but a bad/older
+        // pull-bundle can key it by the full `connectors/<id>/<file>` path — in
+        // which case the old `map(id => ...)` registered ONE connector PER FILE with
+        // the path as its id (observed 2026-08-15: db.connectors got
+        // connectors/expense-tracker-mcp/server.js etc. as rows). Collapse either
+        // shape to the connector id and dedupe, so a mis-keyed mcp_store can never
+        // manufacture file-path connectors. (Core also rejects "/"-bearing ids at
+        // its boundary as defense-in-depth.)
         if (!connectors?.length && Object.keys(effectiveMcpStore).length > 0) {
-          connectors = Object.keys(effectiveMcpStore).map((id) => ({
+          const connIds = [...new Set(
+            Object.keys(effectiveMcpStore).map((k) => {
+              const m = String(k).match(/^connectors\/([^/]+)\//);
+              return m ? m[1] : k;
+            })
+          )];
+          connectors = connIds.map((id) => ({
             id,
             name: id,
             transport: "stdio",
