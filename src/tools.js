@@ -1324,7 +1324,10 @@ export const tools = [
   },
   {
     name: "ateam_get_execution_logs",
-    core: false,
+    // Advertised (was core:false): these are the RUNTIME DIAGNOSTICS a caller needs
+    // mid-run, but a connector-wildcard grant expands over ADVERTISED tools only, so
+    // hiding them made them ungrantable — invisible to every agent that needed them.
+    core: true,
     description:
       "Get execution logs for a solution — recent jobs with step traces, tool calls, errors, and timing. Essential for debugging what actually happened during skill execution. (Advanced.)",
     inputSchema: {
@@ -1540,7 +1543,10 @@ export const tools = [
   },
   {
     name: "ateam_get_metrics",
-    core: false,
+    // Advertised (was core:false): these are the RUNTIME DIAGNOSTICS a caller needs
+    // mid-run, but a connector-wildcard grant expands over ADVERTISED tools only, so
+    // hiding them made them ungrantable — invisible to every agent that needed them.
+    core: true,
     description:
       "Get execution metrics — timing, tool stats, bottlenecks, signals, and recommendations. (Advanced.)",
     inputSchema: {
@@ -4178,12 +4184,9 @@ const handlers = {
     while (Date.now() - startedAt < totalTimeoutMs) {
       const qs = new URLSearchParams();
       qs.set("skillSlug", skill_id);
-      const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(rootJobId)}/chain?${qs}`, {
-        method: "GET",
-        headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.test_skill_chain" },
-        signal: AbortSignal.timeout(15_000),
-      }).catch(err => ({ ok: false, _err: err.message }));
-      const data = res.ok === false && res._err ? { ok: false, error: res._err } : await res.json().catch(() => ({ ok: false, error: "non-json chain response" }));
+      // Builder proxy, not ADAS_CORE_URL (docker-internal; see ateam_chain_status).
+      const data = await get(`/deploy/jobs/${encodeURIComponent(rootJobId)}/chain?${qs}`, sid)
+        .catch(err => ({ ok: false, error: err.message }));
       lastChain = data;
       const jobs = Array.isArray(data?.chainJobsList) ? data.chainJobsList : Array.isArray(data?.chainJobs) ? data.chainJobs : null;
       if (jobs && jobs.length > 0 && jobs.every(j => isTerminal(j.status))) {
@@ -4337,15 +4340,11 @@ const handlers = {
     const creds = getCredentials(sid);
     const apiKey = creds?.apiKey;
     if (!apiKey) return { ...single, chain: { ok: false, error: "include_chain requires api-key auth (call ateam_auth)" } };
-    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
     const qs = new URLSearchParams();
     if (skill_id) qs.set("skillSlug", skill_id);
-    const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(job_id)}/chain?${qs}`, {
-      method: "GET",
-      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.test_status_chain" },
-      signal: AbortSignal.timeout(15_000),
-    }).catch(err => ({ ok: false, _err: err.message }));
-    const chain = res.ok === false && res._err ? { ok: false, error: res._err } : await res.json().catch(() => ({ ok: false, error: "non-json chain response" }));
+    // Builder proxy, not ADAS_CORE_URL (docker-internal; see ateam_chain_status).
+    const chain = await get(`/deploy/jobs/${encodeURIComponent(job_id)}/chain?${qs}`, sid)
+      .catch(err => ({ ok: false, error: err.message }));
     return { ...single, chain };
   },
 
@@ -4354,21 +4353,12 @@ const handlers = {
     const creds = getCredentials(sid);
     const apiKey = creds?.apiKey;
     if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
-    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
+    // Via the Builder proxy (see ateam_chain_status) — Core's hostname is
+    // docker-internal and unreachable from a desktop/laptop MCP process.
     const qs = new URLSearchParams();
     if (skill_slug) qs.set("skillSlug", skill_slug);
-    const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(job_id)}/chain?${qs}`, {
-      method: "GET",
-      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.get_chain" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
-    if (!res.ok) {
-      throw new Error(`Core /api/job/${job_id}/chain returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
-    }
-    return data;
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return await get(`/deploy/jobs/${encodeURIComponent(job_id)}/chain${suffix}`, sid);
   },
 
   // SLIM chain status — the chip-quick poll. Hits Core /api/job/:id/status
@@ -4380,21 +4370,26 @@ const handlers = {
   ateam_chain_status: async ({ chain_id, job_id }, sid) => {
     const id = chain_id || job_id;
     if (!id) throw new Error("chain_id required");
-    const creds = getCredentials(sid);
-    const apiKey = creds?.apiKey;
-    if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
-    const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
-    const res = await fetch(`${coreUrl}/api/job/${encodeURIComponent(id)}/status`, {
-      method: "GET",
-      headers: { "x-api-key": apiKey, "X-ADAS-SERVICE": "ateam-mcp.chain_status" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 400) }; }
-    if (!res.ok) {
-      throw new Error(`Core /api/job/${id}/status returned ${res.status}: ${data.error || JSON.stringify(data).slice(0, 200)}`);
-    }
+    // Routed through the BUILDER proxy (/deploy/jobs/:id/status), not
+    // ADAS_CORE_URL directly. Core is the only holder of job state, but its
+    // hostname is docker-internal — every laptop MCP session got a bare "fetch
+    // failed" that read as "job not found" (2026-08-15: a full day spent reading
+    // Mongo by hand to answer "is this run alive?"). Same reason ateam_verify
+    // proxies. `get()` also carries the session's auth/tenant headers.
+    const data = await get(`/deploy/jobs/${encodeURIComponent(id)}/status`, sid);
+    // LAST ACTIVITY — the running-vs-corpse discriminator. `status:"running"` is
+    // true for a healthy build AND a dead one; the only way to tell them apart
+    // was querying llm_traces for the newest timestamp. Core bumps job.lastUpdate
+    // in the same setStatus() call that writes job.subStatus, so the timestamp
+    // and "what it was doing" move together — one cheap read, no tree walk, so
+    // this stays safe to poll. idle_seconds alone needs interpreting (a live
+    // build can sit minutes inside one provider call), which is why
+    // activity_source ships with it: "idle 180s — in provider call" is a state
+    // you can act on; "idle 180s" is a number you have to guess about.
+    const lastActivityAt = data.lastUpdate ?? data.last_update ?? null;
+    const idleSeconds = lastActivityAt
+      ? Math.max(0, Math.round((Date.now() - new Date(lastActivityAt).getTime()) / 1000))
+      : null;
     // Surface the chain-aggregate truth as the primary fields; keep the raw
     // slim job under `job` for callers that want per-job detail.
     return {
@@ -4404,6 +4399,9 @@ const handlers = {
       pending_question: data.pendingQuestion || null,
       result: data.result ?? null,
       progress: data.progress || null,
+      last_activity_at: lastActivityAt,
+      idle_seconds: idleSeconds,
+      activity_source: data.subStatus || null,
       job: data,
     };
   },
