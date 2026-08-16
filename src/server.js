@@ -10,7 +10,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { tools, coreTools, handleToolCall } from "./tools.js";
+import { tools, coreTools, handleToolCall, MCP_VERSION } from "./tools.js";
 
 /**
  * @param {string} sessionId — identifier for credential isolation.
@@ -18,7 +18,11 @@ import { tools, coreTools, handleToolCall } from "./tools.js";
  */
 export function createServer(sessionId = "stdio") {
   const server = new Server(
-    { name: "ateam-mcp", version: "0.3.0" },
+    // Read the REAL version from package.json. This was hardcoded "0.3.0" while
+    // the package shipped 0.4.x — so the MCP handshake advertised a version that
+    // had been wrong for dozens of releases, and "which build am I talking to?"
+    // could not be answered from the protocol at all.
+    { name: "ateam-mcp", version: MCP_VERSION },
     {
       capabilities: { tools: {} },
       instructions: [

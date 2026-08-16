@@ -31,6 +31,18 @@ const STAMP_WHERE_TOOLS = new Set([
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 
+// The RUNNING version, read from package.json — never hardcoded. "Deployed" means
+// three different things here (the mac1 container, npm, and each developer's local
+// checkout+process), and a stale local PROCESS is indistinguishable from a broken
+// fix without this. Surfaced in the MCP handshake and in ateam_bootstrap so
+// "which build am I talking to?" is a five-second check, not a three-message
+// round-trip (2026-08-16).
+import { createRequire as _createRequire } from "node:module";
+export const MCP_VERSION = (() => {
+  try { return _createRequire(import.meta.url)("../package.json").version; }
+  catch { return "unknown"; }
+})();
+
 // ─── Async deploy helper ────────────────────────────────────────────
 //
 // All long-running deploy endpoints (build_and_run, redeploy, github_pull)
@@ -450,9 +462,9 @@ export const tools = [
       properties: {
         topic: {
           type: "string",
-          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector"],
+          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "monitoring"],
           description:
-            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget.",
+            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
         section: {
           type: "string",
@@ -1356,6 +1368,10 @@ export const tools = [
   {
     name: "ateam_test_status",
     core: true,
+    // Monitoring-safe for ONE test job (bounded), but include_chain:true pulls the
+    // full tree — that call is NOT safe to loop.
+    monitoring: { safe: true, cost: "cheap", latency_ms_p95: 500, output: "bounded", poll_interval_s: 2,
+      note: "safe:false when include_chain:true (that fetches the full tree)." },
     description:
       "Poll the progress of an async skill test. Returns iteration count, tool call steps, status (running/completed/failed), and result when done.\n\n" +
       "Set include_chain:true to ALSO include the full chain tree (every job in the chain, rooted at this job_id, with parent/child linkage). Use when this job dispatched askAnySkill subcalls and you want a single snapshot of the whole multi-skill state instead of polling each child job_id separately.",
@@ -1386,6 +1402,10 @@ export const tools = [
   {
     name: "ateam_get_chain",
     core: true,
+    // NOT monitoring-safe: returns the FULL job tree — output grows with the run
+    // (a 200-step job returns 200 steps), which is the property that silently
+    // degrades. Use once at the end; poll ateam_chain_status instead.
+    monitoring: { safe: false, cost: "heavy", output: "grows_with_run", use_instead: "ateam_chain_status" },
     description:
       "Inspect the full chain tree for any job — rooted at the given job_id, walking down through every handoff and askAnySkill subcall.\n\n" +
       "Use when a chain has already run and you want to analyze the structure: which skill called which, how deep the call tree went, which tool inside which job invoked which sub-tool. The two main shapes:\n" +
@@ -1411,6 +1431,17 @@ export const tools = [
   {
     name: "ateam_chain_status",
     core: true,
+    // MONITORING-SAFE — the one tool built for a poll loop. See MONITORING_CONTRACT.
+    // cheap: one status read, no tree walk, no LLM. bounded: the response does NOT
+    // grow with the run (a 200-step job returns the same shape as a 2-step one).
+    monitoring: {
+      safe: true,
+      cost: "cheap",
+      latency_ms_p95: 500,
+      output: "bounded",
+      poll_interval_s: 2,
+      note: "Returns last_activity_at / idle_seconds / activity_source. A LARGE idle_seconds does NOT mean dead — on this platform a healthy build sits minutes inside a single provider call. Read activity_source (what it was doing) with it; never apply an 'idle > N ⇒ dead' rule.",
+    },
     description:
       "SLIM chain status — the chip-quick poll. Given a chain_id (from ateam_conversation), returns the WHOLE-CHAIN aggregate status cheaply: chain_status + chain_done (true only when the ENTIRE chain — root job + every handoff + askAnySkill subcall — is terminal), plus pending_question, result, and a short progress line.\n\n" +
       "This is what you poll on a loop after ateam_conversation — NOT ateam_get_chain (that returns the full tree; too heavy for periodic polling). A single job can finish while the chain is still running, so poll chain_done, not a job's status.\n\n" +
@@ -1543,6 +1574,7 @@ export const tools = [
   },
   {
     name: "ateam_get_metrics",
+    monitoring: { safe: true, cost: "cheap", latency_ms_p95: 1000, output: "bounded", poll_interval_s: 30 },
     // Advertised (was core:false): these are the RUNTIME DIAGNOSTICS a caller needs
     // mid-run, but a connector-wildcard grant expands over ADVERTISED tools only, so
     // hiding them made them ungrantable — invisible to every agent that needed them.
@@ -1571,6 +1603,9 @@ export const tools = [
   {
     name: "ateam_verify",
     core: true,
+    // Real end-state check — probes connectors/widgets/skills. Correct but SLOW;
+    // for a run in flight poll ateam_chain_status and call this once at the end.
+    monitoring: { safe: false, cost: "heavy", output: "bounded", use_instead: "ateam_chain_status" },
     description:
       "ONE call that returns the REAL runtime end-state of a solution — connectors connected + tools discovered, every declared widget actually rendering, skills deployed — with the EXACT failing gaps. Use this instead of guess-and-check after a deploy/patch: it tells you the truth (what's actually live) and names precisely what's broken, not a generic warning. Reliable from any connection (routes through the Builder, not a direct Core call).",
     inputSchema: {
@@ -1976,6 +2011,8 @@ export const tools = [
   {
     name: "ateam_connector_logs",
     core: true,
+    // Bounded by the caller's line limit, but it reads container logs — poll slowly.
+    monitoring: { safe: true, cost: "moderate", latency_ms_p95: 3000, output: "bounded", poll_interval_s: 30 },
     description:
       "Read what a connector process actually PRINTED to stderr. This is the only place a connector's " +
       "internal failure is visible: a tool that catches its own error still returns ok:true, and the widget " +
@@ -2027,6 +2064,8 @@ export const tools = [
   {
     name: "ateam_status_all",
     core: true,
+    // Safe but not cheap-per-second: health across ALL solutions. Poll sparingly.
+    monitoring: { safe: true, cost: "moderate", latency_ms_p95: 3000, output: "bounded", poll_interval_s: 30 },
     description:
       "Show GitHub sync status for ALL tenants and solutions in one call. Requires master key authentication. Returns a summary table of every tenant's solutions with their GitHub sync state.",
     inputSchema: {
@@ -2060,6 +2099,23 @@ export const tools = [
  * Advanced tools are still callable but not advertised.
  */
 export const coreTools = tools.filter(t => t.core !== false);
+
+// MONITORING CONTRACT — machine-filterable answer to "what may I poll on a loop?"
+// The knowledge used to exist only as prose, scattered and contradictory across
+// tool descriptions ("too heavy to loop on" in one, "poll every ~2s" in another,
+// different words, different tools), so a caller had to read paragraphs carefully
+// to learn which call was safe in a loop. Now it is a field.
+//   safe            — may be called repeatedly in a poll loop
+//   cost            — cheap | moderate | heavy
+//   output          — "bounded" means bounded IN THE RUN'S SIZE, not merely small
+//                     today. The silent-degradation failure is a tool that is
+//                     concise on a 5-step job and returns 200 steps on a 200-step
+//                     job; that is output:"grows_with_run", never safe.
+//   poll_interval_s — the interval the tool is designed for
+// A tool with NO monitoring field is UNCLASSIFIED — treat as unsafe to poll.
+export const monitoringTools = tools
+  .filter(t => t.monitoring?.safe === true)
+  .map(t => ({ name: t.name, ...t.monitoring }));
 
 // ─── Tool handlers ──────────────────────────────────────────────────
 
@@ -2612,6 +2668,11 @@ module.exports.default = plugin;
 
 const handlers = {
   ateam_bootstrap: async () => ({
+    runtime: {
+      ateam_mcp_version: MCP_VERSION,
+      base_url: getBaseUrl(),
+      _note: "The version of the ateam-mcp process actually serving this call, and the API it talks to. If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
+    },
     platform_positioning: {
       name: "A-Team",
       category: "AI Team Solution Platform",
@@ -2977,6 +3038,25 @@ const handlers = {
   },
 
   ateam_get_spec: async ({ topic, section, search }, sid) => {
+    // Served LOCALLY (no round-trip): the monitoring contract is a property of
+    // THIS ateam-mcp build, so it must answer even when the API is unreachable —
+    // that is exactly when a caller is asking "what can I poll to find out?".
+    if (topic === "monitoring") {
+      return {
+        ateam_mcp_version: MCP_VERSION,
+        safe_to_poll: monitoringTools,
+        not_safe_to_poll: tools
+          .filter(t => t.monitoring?.safe === false)
+          .map(t => ({ name: t.name, cost: t.monitoring.cost, output: t.monitoring.output, use_instead: t.monitoring.use_instead })),
+        unclassified_are_unsafe: true,
+        rules: [
+          "output:'bounded' means bounded IN THE RUN'S SIZE — not merely small today. A tool that returns 200 steps for a 200-step job is grows_with_run and is never poll-safe.",
+          "A tool with no monitoring field is UNCLASSIFIED — treat it as unsafe to poll.",
+          "NEVER apply an 'idle_seconds > N ⇒ dead' rule. On this platform a healthy build regularly sits minutes inside a single provider call; read activity_source alongside it.",
+        ],
+        watching_a_run: "Poll ateam_chain_status (every ~2s, or ~30s for a long build) and read chain_done + last_activity_at/idle_seconds/activity_source. Call ateam_get_chain ONCE at the end for the full tree.",
+      };
+    }
     let path = SPEC_PATHS[topic];
     const params = new URLSearchParams();
     if (section) params.set('section', section);
