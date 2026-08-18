@@ -1912,7 +1912,7 @@ export const tools = [
       "SHIP DEV TO PROD. Merges the `dev` branch into `main` and auto-tags the new main HEAD as safe-YYYY-MM-DD-NNN. " +
       "Use after testing your dev work, when you're ready to deploy changes to production.\n\n" +
       "Workflow: 1) ateam_github_patch (writes to dev) → 2) ateam_github_promote (merges dev→main) → 3) ateam_build_and_run (deploys main).\n\n" +
-      "Pass dry_run:true to see what's about to ship without merging. On merge conflict the call returns 409 — resolve manually on GitHub (open a PR or use the web UI), then retry.",
+      "Pass dry_run:true to see what's about to ship without merging.\n\nON 409 MERGE CONFLICT: main holds commits dev never received. Call ateam_github_sync_from_main(solution_id) to merge main into dev, then promote again. Only if THAT also returns 409 did both sides edit the same lines — that one needs a human (open a PR on GitHub).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1931,6 +1931,31 @@ export const tools = [
         skip_tag: {
           type: "boolean",
           description: "If true: merge without creating an auto-tag. Default: false (auto-tag enabled).",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_github_sync_from_main",
+    core: true,
+    description:
+      "BRING `dev` UP TO DATE WITH `main` — merges main into dev. The mirror of ateam_github_promote.\n\n" +
+      "USE THIS WHEN PROMOTE RETURNS 409. promote only ships dev→main, so the moment anything lands on main directly — a hotfix, a manual edit, an ateam_github_rollback, or a write that mis-targeted the branch — dev falls behind and can never be promoted again. Without this tool that divergence is unfixable from A-Team: the only exits are the GitHub web UI or a raw API call.\n\n" +
+      "Workflow on a 409: 1) ateam_github_diff (confirm status:'diverged') → 2) ateam_github_sync_from_main → 3) ateam_github_promote.\n\n" +
+      "Pass dry_run:true FIRST to see exactly which commits and files would come into dev without changing anything.\n\n" +
+      "This is a real merge, not a force: if main and dev edited the SAME lines it returns 409 too, and that one genuinely needs a human (open a PR).",
+    monitoring: { safe: true, cost: "low", latency_ms_p95: 2500, output: "bounded" },
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        dry_run: {
+          type: "boolean",
+          description: "If true: show the commits + files that would merge into dev, change nothing. Default: false. Call this first.",
         },
       },
       required: ["solution_id"],
@@ -4801,6 +4826,9 @@ const handlers = {
 
   ateam_github_promote: async ({ solution_id, label, dry_run, skip_tag }, sid) =>
     post(`/deploy/solutions/${solution_id}/promote`, { label, dry_run, skip_tag }, sid),
+
+  ateam_github_sync_from_main: async ({ solution_id, dry_run }, sid) =>
+    post(`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid),
 
   ateam_github_rollback: async ({ solution_id, target, tag }, sid) =>
     // Accept both `target` (new spec) and `tag` (legacy callers)
