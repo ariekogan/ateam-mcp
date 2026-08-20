@@ -2362,7 +2362,21 @@ async function handle(req) {
 
   if (method === "tools/call") {
     const name = params?.name;
-    const args = params?.arguments || {};
+    // CALLER CONTEXT COMES FROM THE ENVELOPE FIRST.
+    //
+    // Core sends identity two ways: as _adas_* ARGUMENTS, and on params._meta
+    // beside the arguments object. The argument channel is fragile — a server drops
+    // arguments a tool did not declare, so a tool whose inputSchema omits
+    // _adas_actor loses it silently and only per-user WRITES fail, while reads
+    // keep working. The envelope cannot be stripped: it is not part of the
+    // validated argument object.
+    //
+    // This server reads params directly (no SDK zod validation), so _meta is
+    // simply available — no wrapper, no callback plumbing. Merge it UNDER args
+    // so an explicitly declared argument still wins, which keeps a delegation
+    // tool's own actor_id PARAMETER untouched: caller identity is transport,
+    // subject identity is payload, and they must not collide.
+    const args = { ...(params?._meta || {}), ...(params?.arguments || {}) };
     try {
 ${uiCapable ? `      // ── UI registry plumbing (no actor required) ──
       if (name === "ui.listPlugins") {
