@@ -2376,7 +2376,19 @@ async function handle(req) {
     // so an explicitly declared argument still wins, which keeps a delegation
     // tool's own actor_id PARAMETER untouched: caller identity is transport,
     // subject identity is payload, and they must not collide.
-    const args = { ...(params?._meta || {}), ...(params?.arguments || {}) };
+    //
+    // ONLY the _adas_ prefix. _meta is the MCP envelope's OWN namespace, not
+    // ours — the spec puts progressToken in there, and clients that request
+    // progress send it on every call. Spreading the whole envelope would hand a
+    // transport token to tools as a user argument: schemas with
+    // additionalProperties:false would start rejecting previously-valid calls,
+    // tools that log or persist their arguments would record it as user data,
+    // and a future _meta key colliding with a real parameter name would
+    // overwrite it. Read the namespace we own; do not treat the envelope as input.
+    const ctx = Object.fromEntries(
+      Object.entries(params?._meta || {}).filter(([k]) => k.startsWith("_adas_")),
+    );
+    const args = { ...ctx, ...(params?.arguments || {}) };
     try {
 ${uiCapable ? `      // ── UI registry plumbing (no actor required) ──
       if (name === "ui.listPlugins") {
