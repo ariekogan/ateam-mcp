@@ -2287,7 +2287,22 @@ function toText(data) { return { content: [{ type: "text", text: JSON.stringify(
 // into the call args; refuse to operate without it (prevents cross-actor leaks).
 function getActorId(args) {
   const id = args?._adas_actor;
-  if (!id) throw new Error("${connectorId}: no actor context — _adas_actor missing.");
+  // Name BOTH causes. "actor context missing" reads as "Core did not send it",
+  // and that misreading cost a full day on 2026-08-20: Core HAD injected it and
+  // the connector's own schema validation stripped it, because that one tool's
+  // inputSchema omitted _adas_actor. An MCP server drops arguments a tool did
+  // not declare, so the field vanishes silently — and only on the tools that
+  // forgot it, which is why read tools kept working and the first write failed.
+  if (!id) {
+    throw new Error(
+      "${connectorId}: no actor context — _adas_actor missing. TWO possible causes: " +
+      "(1) this tool's inputSchema does not DECLARE _adas_actor, so MCP stripped it " +
+      "before your handler ran — add it to inputSchema.properties (see toolSchemas() " +
+      "below, every data tool must spread ...actor); or " +
+      "(2) the caller is not actor-scoped — ateam_test_connector runs as _system_service, " +
+      "so use ateam_test_skill or a real conversation to exercise per-user tools."
+    );
+  }
   return id;
 }
 ${uiCapable ? `
@@ -2317,6 +2332,13 @@ function discoverPlugins() {
 // ── Tool definitions ── Core reads this list. A tool named "ui.listPlugins"
 // is how Core knows this connector is UI-capable.
 function toolSchemas() {
+  // MUST be spread into the inputSchema.properties of EVERY per-actor tool.
+  // Not decoration: MCP strips arguments a tool did not declare, so a tool that
+  // omits these gets them removed before the handler runs and getActorId()
+  // throws — while the tools that DID declare them keep working. The result is
+  // a connector that looks healthy (deploys, lists tools, answers reads) and
+  // fails on the first write. Do not "fix" that with a default actor id: one
+  // shared actor pools every user's data.
   const actor = { _adas_actor: { type: "string" }, _adas_tenant: { type: "string" } };
   return [
     {
