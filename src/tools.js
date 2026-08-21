@@ -512,6 +512,19 @@ export const tools = [
   {
     name: "ateam_design_advisor",
     core: true,
+    // MEASURED, not estimated. 6 successful calls against dev on 2026-08-21,
+    // distinct goals, spaced to avoid provider rate-limiting:
+    //   19048 21123 23359 23739 24462 24699 ms  (median 23.7s, max 24.7s)
+    // It is ONE LLM call over the capability catalog, so the cost is provider
+    // latency and there is no meaningful warm path to under-report.
+    //
+    // WHY IT MATTERS: Core derives its timeout from this (p95 x 4, floored at
+    // 30s). Undeclared, the advisor sat under a 30s default while taking ~25s —
+    // one bad provider spike from failing, and it failed exactly that way on
+    // 2026-08-21 ("HTTP connector timeout after 30000ms"). It is also the FIRST
+    // call a building agent makes and it carries the storage decision, so when
+    // it times out the run proceeds with no capability guidance at all.
+    monitoring: { safe: true, cost: "normal", latency_ms_p95: 25000, output: "bounded" },
     description:
       "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the /spec topic to read next (via ateam_get_spec) and the tool to wire it. Also returns 'missing' hints (capabilities your goal implies but the design hasn't wired) and lifecycle hints (e.g. connect GitHub when the project will iterate). ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call; consult it as often as you like as the design evolves.",
     inputSchema: {
@@ -5060,7 +5073,7 @@ const handlers = {
     if (!tool) throw new Error("tool required — the tool that misled you");
     if (!error) throw new Error("error required — quote it VERBATIM, do not paraphrase");
     return await post(
-      `/solutions/${solution_id}/lessons`,
+      `/deploy/solutions/${solution_id}/lessons`,
       { tool, error, workaround, worked, kind },
       sid,
     );
@@ -5069,7 +5082,7 @@ const handlers = {
   ateam_get_lessons: async ({ solution_id, limit }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
     const qs = Number.isFinite(limit) ? `?limit=${limit}` : "";
-    return await get(`/solutions/${solution_id}/lessons${qs}`, sid);
+    return await get(`/deploy/solutions/${solution_id}/lessons${qs}`, sid);
   },
 
   ateam_show_solution_minimal: async ({ solution_id }, sid) => {
