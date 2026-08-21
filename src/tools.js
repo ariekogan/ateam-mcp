@@ -1018,6 +1018,59 @@ export const tools = [
   },
 
   {
+    name: "ateam_log_lesson",
+    core: true,
+    description:
+      "Record ONE lesson this run learned, so the NEXT run does not relearn it. " +
+      "A building agent starts every run empty — it does not know which tool " +
+      "misled the last run or the workaround that got past it. Log a lesson the " +
+      "moment a tool misleads you AND you find a way through.\n\n" +
+      "APPEND-ONLY. You cannot edit or delete earlier lessons, and you do not " +
+      "supply the timestamp, job or actor — the server stamps those.\n\n" +
+      "LOG ONLY WHAT YOU OBSERVED. Quote the error VERBATIM; never paraphrase it " +
+      "and never write a theory about platform internals. A wrong lesson is worse " +
+      "than no lesson, because the next run cannot check it and will act on it.\n\n" +
+      "Use kind='misleading_success' when a call REPORTED success while the thing " +
+      "you wanted did not happen — that class is the most expensive to rediscover " +
+      "and it is invisible to a failures-only log.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution this lesson belongs to" },
+        tool: { type: "string", description: "The tool that misled you, e.g. \"ateam_build_and_run\"" },
+        error: { type: "string", description: "The VERBATIM error or failed_steps fragment. Not a paraphrase." },
+        workaround: { type: "string", description: "What you did instead (optional)" },
+        worked: { type: "boolean", description: "Did the workaround work? Omit if you never found out — 'unknown' is a real answer" },
+        kind: {
+          type: "string",
+          enum: ["failure", "surprise", "misleading_success"],
+          description: "failure = it errored; surprise = it worked but not as documented; misleading_success = it REPORTED success while the intended effect did not happen",
+        },
+      },
+      required: ["solution_id", "tool", "error"],
+    },
+  },
+
+  {
+    name: "ateam_get_lessons",
+    core: true,
+    description:
+      "Read what EARLIER runs on this solution learned — newest first, bounded. " +
+      "Call this during orientation, BEFORE planning: it is the only thing that " +
+      "carries context across runs, and it is cheap. Each entry says which tool " +
+      "misled a previous run, the verbatim error, what was tried instead, and " +
+      "whether that worked. An empty list is a real answer (nothing learned yet).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        limit: { type: "number", description: "Max entries, newest first (default 20)" },
+      },
+      required: ["solution_id"],
+    },
+  },
+
+  {
     name: "ateam_create_connector",
     core: true,
     description:
@@ -5000,6 +5053,23 @@ const handlers = {
       engine: typeof skill.engine === "string" ? skill.engine : (skill.engine ? "<explicit-object>" : null),
       _hint: "This is the MINIMAL view (Phase 9 strip). Use ateam_get_solution(view:'skills', skill_id) for the full schema.",
     };
+  },
+
+  ateam_log_lesson: async ({ solution_id, tool, error, workaround, worked, kind }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    if (!tool) throw new Error("tool required — the tool that misled you");
+    if (!error) throw new Error("error required — quote it VERBATIM, do not paraphrase");
+    return await post(
+      `/solutions/${solution_id}/lessons`,
+      { tool, error, workaround, worked, kind },
+      sid,
+    );
+  },
+
+  ateam_get_lessons: async ({ solution_id, limit }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    const qs = Number.isFinite(limit) ? `?limit=${limit}` : "";
+    return await get(`/solutions/${solution_id}/lessons${qs}`, sid);
   },
 
   ateam_show_solution_minimal: async ({ solution_id }, sid) => {
