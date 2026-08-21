@@ -3167,13 +3167,30 @@ const handlers = {
       const base = getBaseUrl(sessionId) || "";
       const wellFormedKey = parseApiKey(api_key).isValid;
       const triedProd = /(?:^|\/\/)api\.ateam-ai\.com/.test(base);
-      const hint = wellFormedKey && triedProd
-        ? ` This is a well-formed tenant key ("adas_${resolvedTenant}_…") but ${base} rejected it — if it's a DEV key, retry: ateam_auth(api_key, url:"https://dev-api.ateam-ai.com").`
-        : ` (tried ${base || "the default base"})`;
+      // THE HEADLINE MUST NOT CONTRADICT THE HINT. The upstream message is
+      // "Invalid or unconfigured API key" — which for a well-formed key tried
+      // against the WRONG ENVIRONMENT is false: the key is fine, the target is
+      // wrong. Leading with it sent the reader to get a replacement key they
+      // did not need. The hint below already said the right thing and rescued a
+      // session on 2026-08-21, but only because someone read past the first
+      // line. Lead with the likely cause; keep the upstream text as detail.
+      if (wellFormedKey && triedProd) {
+        return {
+          ok: false,
+          tenant: resolvedTenant,
+          env_mismatch_suspected: true,
+          message:
+            `WRONG ENVIRONMENT, most likely — not a bad key. "adas_${resolvedTenant}_…" is a well-formed tenant key, ` +
+            `and it was tried against PROD (${base}), which is the default. A DEV tenant's key is rejected there. ` +
+            `Retry as: ateam_auth(api_key, url:"https://dev-api.ateam-ai.com"). ` +
+            `Only if that also fails is the key itself the problem (get one at https://mcp.ateam-ai.com/get-api-key). ` +
+            `Upstream said: ${err.message}`,
+        };
+      }
       return {
         ok: false,
         tenant: resolvedTenant,
-        message: `Authentication failed: ${err.message}.${hint} The user can get a valid API key at https://mcp.ateam-ai.com/get-api-key`,
+        message: `Authentication failed: ${err.message} (tried ${base || "the default base"}). The user can get a valid API key at https://mcp.ateam-ai.com/get-api-key`,
       };
     }
   },
