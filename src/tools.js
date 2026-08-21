@@ -2248,6 +2248,16 @@ const EXAMPLE_PATHS = {
 // baked into MCP config (e.g., ADAS_TENANT + ADAS_API_KEY in ~/.claude.json).
 // Any tool that touches tenant-specific data (solutions, skills, logs, tests) is here.
 const TENANT_TOOLS = new Set([
+  // Lessons are tenant-specific data — a solution's own failure history. They
+  // were MISSING from this set when the tools shipped (2026-08-21), which is a
+  // bug on two counts: they ran without the explicit-auth requirement every
+  // other tenant-scoped tool has, and in master mode `switchTenant` never fired
+  // for them, so a caller passing `tenant` could read or write ANOTHER
+  // tenant's lessons. Tenant isolation is the one boundary this platform
+  // treats as absolute.
+  "ateam_log_lesson",
+  "ateam_get_lessons",
+
   // Write operations
   "ateam_build_and_run",
   "ateam_patch",
