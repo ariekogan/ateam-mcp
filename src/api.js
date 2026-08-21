@@ -317,8 +317,20 @@ function apiToAppUrl(baseUrl) {
 export function getWhere(sessionId) {
   let tenant = null;
   try { tenant = getCredentials(sessionId)?.tenant || null; } catch { /* unauthed */ }
-  const apiBase = getBaseUrl(sessionId);
-  const appUrl = apiToAppUrl(apiBase);
+  // PLATFORM INTERNALS NEVER REACH THE AGENT. This used to return
+  // `app_url` plus a `_note` telling the agent to "view it at
+  // http://skill-builder-backend" — an internal compose service name. The
+  // agent cannot reach it, cannot act on it, and cannot show it to a user;
+  // it resolves nowhere outside Docker. Worse than useless: an
+  // actionable-looking instruction that leads nowhere.
+  //
+  // Only a PUBLIC url is worth returning, so we return one only when the
+  // resolved host actually looks public. Otherwise `_where` is just the
+  // tenant, which is the part that is solution-scoped and that the agent
+  // genuinely needs. (Arie, 2026-08-21, reading a raw error panel.)
+  const appUrl = apiToAppUrl(getBaseUrl(sessionId));
+  const isPublic = /^https?:\/\/[^/]*\./.test(appUrl || "") && !/^https?:\/\/(localhost|127\.|\[?::1)/i.test(appUrl || "");
+  if (!isPublic) return tenant ? { tenant } : {};
   return {
     tenant,
     app_url: appUrl,

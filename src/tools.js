@@ -1785,6 +1785,7 @@ export const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        branch: { type: "string", description: "Branch to read/write (alias for `ref`). Declared so MCP does not strip it — an undeclared argument is dropped silently, which made a branch:\"dev\" read return `main` with no error." },
         solution_id: {
           type: "string",
           description: "The solution ID",
@@ -1814,6 +1815,7 @@ export const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        branch: { type: "string", description: "Branch to read/write (alias for `ref`). Declared so MCP does not strip it — an undeclared argument is dropped silently, which made a branch:\"dev\" read return `main` with no error." },
         solution_id: {
           type: "string",
           description: "The solution ID",
@@ -3382,11 +3384,23 @@ const handlers = {
       validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
+      // A DEAD SOCKET IS NOT A FORMAT ERROR. "fetch failed" / ECONNREFUSED /
+      // ETIMEDOUT / socket hang up mean the deploy service was unreachable —
+      // telling the agent to go re-read the solution spec sends it to fix
+      // something that is not broken, at the cost of several turns. Observed
+      // 2026-08-21 (job_aehopl8z): the backend had been restarted mid-run and
+      // the agent burned turns on get_spec and spec_search chasing a phantom
+      // format problem. The two diagnoses are opposites; pick by the cause.
+      const transport = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|network|aborted/i
+        .test(err.message || "");
       return {
         ok: false,
         phase: "validation",
         error: err.message,
-        message: "Validation call failed. Check your solution/skill format against the spec (ateam_get_spec topic='solution').",
+        retryable: transport,
+        message: transport
+          ? "The deploy service was UNREACHABLE — this is a transport failure, not a problem with your solution. Do NOT re-read the spec or change your definition. Wait a few seconds and RETRY the same call; if it keeps failing, the backend is down or was restarted mid-run."
+          : "Validation call failed. Check your solution/skill format against the spec (ateam_get_spec topic='solution').",
       };
     }
 
@@ -4902,9 +4916,16 @@ const handlers = {
   ateam_github_status: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/github/status`, sid),
 
-  ateam_github_read: async ({ solution_id, path: filePath, ref }, sid) => {
+  ateam_github_read: async ({ solution_id, path: filePath, ref, branch }, sid) => {
+    // `branch` is an ALIAS for `ref`. The underlying API param is literally
+    // called `branch`, so an agent passing branch:"dev" is being reasonable —
+    // and because the schema did not declare it, MCP STRIPPED it and the read
+    // silently returned `main`. On a tenant whose main and dev had diverged by
+    // 67 commits, that answered a different question than the one asked, with
+    // no error. (2026-08-21, job_aehopl8z.)
+    const wanted = ref || branch;
     const qs = new URLSearchParams({ path: filePath });
-    if (ref) qs.set('branch', ref);
+    if (wanted) qs.set('branch', wanted);
     const result = await get(`/deploy/solutions/${solution_id}/github/read?${qs.toString()}`, sid);
     // Additive only — never reshape `result`, callers depend on the raw payload.
     const rep = _representationFor(filePath, result?.content, solution_id);
@@ -4913,8 +4934,9 @@ const handlers = {
       : result;
   },
 
-  ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref }, sid),
+  ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref, branch }, sid) =>
+    // `branch` is an alias for `ref` — see ateam_github_read.
+    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch }, sid),
 
   ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) =>
     post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid),
