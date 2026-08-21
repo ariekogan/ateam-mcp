@@ -5527,7 +5527,20 @@ export async function handleToolCall(name, args, sessionId) {
           "",
           hasEnvVars
             ? "Environment variables (ADAS_API_KEY) were detected, but they are not sufficient for tenant-aware operations. You must call ateam_auth explicitly to confirm which tenant you intend to use."
-            : "No authentication found.",
+            // "No authentication found." was TRUE and pointed at the WRONG CAUSE.
+            // Auth is held in this process's memory and does NOT survive a
+            // restart, so a container rebuild silently logs out every connected
+            // session — and the message read like a first-time setup problem,
+            // sending the reader to go get an API key they already had.
+            // 2026-08-21: a Builder deploy logged out a live session mid-work
+            // and cost a human round-trip to diagnose. State both causes; the
+            // second is the likelier one for a session that was working a
+            // moment ago.
+            : "No authentication found in this process. TWO CAUSES, and the second is easy to miss:\n" +
+              "  (a) this session never authenticated, or\n" +
+              "  (b) THE MCP SERVER RESTARTED. Auth lives in memory and does not survive a restart, so a\n" +
+              "      container rebuild or redeploy logs out every connected session with no warning.\n" +
+              "If your tools were working minutes ago, it is (b) — nothing is misconfigured, just re-run ateam_auth.",
           "",
           "Please ask the user to:",
           "1. Get their API key at: https://mcp.ateam-ai.com/get-api-key",
