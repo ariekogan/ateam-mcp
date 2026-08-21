@@ -460,7 +460,16 @@ function formatError(method, path, status, body, baseUrl) {
     ].join("\n");
   }
 
-  const hint = hints[status] || "";
+  // A GENERIC HINT MUST NOT CONTRADICT A SPECIFIC ONE. When the body already
+  // carries its own `code` + `hint`, the endpoint has diagnosed the failure
+  // precisely — appending the status-level guess produces two hints pointing
+  // opposite ways, and the reader follows the wrong one. Observed 2026-08-21
+  // (job_aehopl8z): a patch whose search string did not match came back with
+  // the endpoint's correct "re-read the file and copy the exact bytes"
+  // followed by "Check the solution_id … use ateam_list_solutions", and the
+  // agent went hunting for a missing solution three times.
+  const hasSpecificHint = /"code"\s*:/.test(bodyStr) && /"hint"\s*:/.test(bodyStr);
+  const hint = hasSpecificHint ? "" : (hints[status] || "");
   // A JSON error body used to be dropped entirely — only a string body became
   // `detail`. So an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe
   // returns 422 + the failures that explain why the surface is broken) reached
