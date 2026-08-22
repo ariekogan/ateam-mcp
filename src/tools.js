@@ -1430,6 +1430,14 @@ export const tools = [
           type: "string",
           description: "Optional: get detailed trace for a specific job ID",
         },
+        chain_id: {
+          type: "string",
+          description: "The CHAIN id — what ateam_conversation returns and ateam_chain_status takes. Prefer this: it is the id you actually hold. Resolved to the underlying job for you.",
+        },
+        actor_id: {
+          type: "string",
+          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Use the same actor_id you passed to ateam_conversation.",
+        },
         limit: {
           type: "number",
           description: "Max jobs to return (default: 10, max: 50)",
@@ -4324,10 +4332,33 @@ const handlers = {
 
   // ─── Developer Tools ────────────────────────────────────────────
 
-  ateam_get_execution_logs: async ({ solution_id, skill_id, job_id, limit }, sid) => {
+  ateam_get_execution_logs: async ({ solution_id, skill_id, job_id, chain_id, actor_id, limit }, sid) => {
+    // CALLERS HOLD A CHAIN ID, NOT A JOB ID. ateam_conversation returns
+    // chain_id, ateam_chain_status takes chain_id — but this tool wanted the
+    // inner job id, which nobody ever sees. Accept the chain id and resolve it
+    // through the LIST form, which already returns chainId per job. No new
+    // mechanism: the mapping is in data we were already fetching.
+    let resolvedJobId = job_id;
+    if (!resolvedJobId && chain_id) {
+      const listed = await get(`/deploy/solutions/${solution_id}/logs?limit=50`, sid);
+      const match = (listed?.jobs || []).find((j) => j?.chainId === chain_id || j?.id === chain_id);
+      if (!match) {
+        return {
+          ok: false,
+          error: `No job found for chain "${chain_id}" in solution "${solution_id}".`,
+          hint: "The chain may belong to another solution, or be older than the last 50 jobs. Call this tool without chain_id/job_id to list what exists.",
+        };
+      }
+      resolvedJobId = match.id;
+    }
+
     const qs = new URLSearchParams();
     if (skill_id) qs.set("skill_id", skill_id);
-    if (job_id) qs.set("job_id", job_id);
+    if (resolvedJobId) qs.set("job_id", resolvedJobId);
+    // A job belongs to an ACTOR and Core enforces that on the detail endpoint.
+    // Without it every job_id lookup is refused — including for a job this same
+    // call just listed. The tenant key alone is nobody.
+    if (actor_id) qs.set("actor_id", actor_id);
     if (limit) qs.set("limit", String(limit));
     const qsStr = qs.toString() ? `?${qs}` : "";
     return get(`/deploy/solutions/${solution_id}/logs${qsStr}`, sid);
