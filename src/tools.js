@@ -1500,8 +1500,8 @@ export const tools = [
     description:
       "Inspect the full chain tree — the whole run rooted at chain_id, walking down through every handoff and askAnySkill subcall.\n\n" +
       "Use when a chain has already run and you want to analyze the structure: which skill called which, how deep the call tree went, which tool inside which job invoked which sub-tool. The two main shapes:\n" +
-      "  • response.chain.chainJobs[] — one entry per job in the chain. Fields: jobId, skill, status, iteration, depth (0 = root, +1 per askAnySkill subcall hop), relation ('root' | 'subcall' | 'handoff'), parentJobId, parentSkill, goal.\n" +
-      "  • response.chain.executionSteps[] — every tool call across all chain jobs, tagged with _skill, _jobId, _depth (= job depth), _relation, _parentSkill, _parentJobId, _toolDepth (tool-in-tool nesting via opId/parentOpId).\n\n" +
+      "  • response.data.chainJobs[] — one entry per job in the chain. Fields: jobId, skill, status, iteration, depth (0 = root, +1 per askAnySkill subcall hop), relation ('root' | 'subcall' | 'handoff'), parentJobId, parentSkill, goal.\n" +
+      "  • response.data.executionSteps[] — every tool call across all chain jobs, tagged with _skill, _jobId, _depth (= job depth), _relation, _parentSkill, _parentJobId, _toolDepth (tool-in-tool nesting via opId/parentOpId).\n\n" +
       "Differs from ateam_test_status by purpose: status is for live polling of a job you just kicked off; get_chain is for post-hoc tree analysis (debugging multi-skill flows, regression testing, comparing two runs).\n\n" +
       "Auth: forwards your authed api_key. Tenant scoped by the key itself. Actor scoping: you can only inspect chains rooted at jobs your actor has access to.",
     inputSchema: {
@@ -2881,6 +2881,30 @@ module.exports.default = plugin;
   return files;
 }
 
+
+
+// WHERE THE CHAIN ACTUALLY LIVES IN THE RESPONSE.
+//
+// The agent API answers {ok, success, data:{...}}, so the tree is at
+// data.chainJobs / data.executionSteps — NOT at chain.chainJobs, which is what
+// ateam_get_chain's own description has been telling readers (and what I wrote
+// the chain-aware tools against). Reading the wrong path does not throw: it
+// yields job_count 0, step_count 0, ok:true — a GREEN, EMPTY answer, which is
+// the single most misleading result this platform can produce and the thing its
+// own docs warn about. Verified against a live 2-skill chain
+// (auto-orchestrator -> staff-scheduling): 2 jobs, 3 steps.
+//
+// Accepts every wrapping rather than betting on one, so a shape change degrades
+// to "still finds it" instead of "silently reports an empty run".
+function chainTreeOf(resp) {
+  const c = resp?.data || resp?.chain || resp || {};
+  const inner = c.chain || c;
+  return {
+    jobs: inner.chainJobs || c.chainJobs || [],
+    steps: inner.executionSteps || c.executionSteps || [],
+    skillChain: inner.skillChain || c.skillChain || [],
+  };
+}
 
 const handlers = {
   ateam_bootstrap: async () => ({
@@ -4398,8 +4422,7 @@ const handlers = {
     // step across the whole tree — the actual "what ran". (2026-08-22.)
     if (!job_id && chain_id) {
       const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
-      const jobs = chain?.chain?.chainJobs || [];
-      const steps = chain?.chain?.executionSteps || [];
+      const { jobs, steps } = chainTreeOf(chain);
       return {
         ok: true,
         scope: "chain",
@@ -4874,7 +4897,7 @@ const handlers = {
     // each one, rather than quietly doing a fraction of what it claims.
     if (chain_id && !job_id) {
       const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
-      const jobs = chain?.chain?.chainJobs || [];
+      const { jobs } = chainTreeOf(chain);
       if (!jobs.length) {
         return { ok: false, scope: "chain", chain_id, error: `No jobs found for chain "${chain_id}".`,
                  hint: "The chain may belong to another solution or another actor. ateam_get_execution_logs(chain_id) shows what is visible to you." };
@@ -4998,7 +5021,7 @@ const handlers = {
     // never by silently reporting the root and calling that the chain.
     if (!job_id && chain_id) {
       const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
-      const jobs = chain?.chain?.chainJobs || [];
+      const { jobs } = chainTreeOf(chain);
       const CAP = 10;
       const measured = jobs.slice(0, CAP);
       const per_job = [];
