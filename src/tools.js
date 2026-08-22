@@ -4303,6 +4303,18 @@ const handlers = {
     post("/deploy/connector", { connector }, sid),
 
   ateam_upload_connector_files: async ({ connector_id, files }, sid) => {
+    // A MISSING ARGUMENT MUST NAME ITSELF. Omitting `files` crashed with
+    // "files is not iterable" — a stack-trace phrase that names a JS type
+    // problem, not the thing the caller has to change, and it reads like the
+    // tool is broken rather than the call. Same for a non-array.
+    if (!Array.isArray(files) || files.length === 0) {
+      throw new Error(
+        `ateam_upload_connector_files needs files: an ARRAY of { path, content } (content_base64 or url also accepted). ` +
+        `Got ${files === undefined ? "nothing" : JSON.stringify(files).slice(0, 60)}. ` +
+        `To upload a connector already in the repo, use ateam_upload_connector(connector_id, github:true) instead.`,
+      );
+    }
+    if (!connector_id) throw new Error("ateam_upload_connector_files needs connector_id — the connector these files belong to.");
     // Resolve content_base64 and url into plain content before sending to backend
     const resolved = [];
     for (const file of files) {
@@ -4697,10 +4709,34 @@ const handlers = {
     };
   },
 
-  ateam_test_pipeline: async ({ solution_id, skill_id, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test-pipeline`, { message }, sid, { timeoutMs: 30_000 }),
+  ateam_test_pipeline: async ({ solution_id, skill_id, message }, sid) => {
+    // NEVER INTERPOLATE undefined INTO A PATH. Omitting skill_id produced a
+    // request to /skills/undefined/test-pipeline, so the server answered about
+    // a skill literally named "undefined" — the caller then hunts a routing
+    // problem instead of reading "you forgot skill_id".
+    if (!skill_id) {
+      throw new Error(
+        `ateam_test_pipeline needs skill_id — it tests ONE skill's intent pipeline. ` +
+        `List them with ateam_get_solution(view:"skills"). To send a message without choosing a skill, use ateam_conversation (it auto-routes).`,
+      );
+    }
+    if (!message) throw new Error("ateam_test_pipeline needs message — the utterance to run through the pipeline.");
+    return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test-pipeline`, { message }, sid, { timeoutMs: 30_000 });
+  },
 
   ateam_test_voice: async ({ solution_id, messages, phone_number, skill_slug, timeout_ms }, sid) => {
+    // Without this, omitting `messages` died on messages.length with
+    // "Cannot read properties of undefined (reading 'length')" — an internal
+    // crash where the caller needed one sentence about the argument. Note it
+    // is messageS (a turn array), which is easy to miss next to every other
+    // test tool taking a single `message`.
+    if (!Array.isArray(messages) || messages.length === 0) {
+      throw new Error(
+        `ateam_test_voice needs messages: an ARRAY of caller turns, e.g. ["book me an appointment", "tomorrow at 3"]. ` +
+        `Got ${messages === undefined ? "nothing" : JSON.stringify(messages).slice(0, 60)}. ` +
+        `(It is "messages", plural — unlike ateam_test_skill/ateam_conversation, which take a single message.)`,
+      );
+    }
     const body = { messages };
     if (phone_number) body.phone_number = phone_number;
     if (skill_slug) body.skill_slug = skill_slug;

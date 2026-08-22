@@ -487,6 +487,29 @@ function formatError(method, path, status, body, baseUrl) {
     503: "A-Team API is temporarily unavailable. Try again in a minute.",
   };
 
+  // A 500 THAT NAMES A MISSING CONFIGURATION IS NOT "TRY AGAIN IN A MINUTE".
+  //
+  // /chat answered 500 {"message":"OPENAI_API_KEY is not set"} and this table
+  // labelled it "the platform may be temporarily unavailable — try again in a
+  // minute". Every part is wrong: nothing is unavailable, a minute changes
+  // nothing, and the fix is to set a key. An agent obeying that hint burns its
+  // retries on a condition that cannot clear on its own. The body already said
+  // so; only the hint disagreed. (2026-08-22, found by sweeping every tool.)
+  if (status >= 500) {
+    // `body` is what this function receives; asText is derived further down, so
+    // read the body directly here rather than a variable that is not yet in scope.
+    const bodyText = typeof body === "string"
+      ? body
+      : (() => { try { return JSON.stringify(body || ""); } catch { return ""; } })();
+    const m = /\b([A-Z][A-Z0-9_]{3,})\s+is not set\b|\bmissing (?:env|environment) (?:var|variable)\s+([A-Z0-9_]+)/i.exec(bodyText);
+    if (m) {
+      const name = m[1] || m[2];
+      hints[status] =
+        `CONFIGURATION, not an outage: the server reports ${name} is not set. Retrying will not help and nothing is down — ` +
+        `this needs ${name} configured on the A-Team backend serving ${baseUrl || "this API"}. Other tools are unaffected.`;
+    }
+  }
+
   // Special-case: GitHub App not connected for this tenant. This is the wall a
   // user hits the first time they iterate on CONNECTOR CODE (github_patch /
   // github_write / github_push / build_and_run auto-pull). The raw
