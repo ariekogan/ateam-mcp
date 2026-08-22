@@ -1038,8 +1038,15 @@ export const tools = [
       "A building agent starts every run empty — it does not know which tool " +
       "misled the last run or the workaround that got past it. Log a lesson the " +
       "moment a tool misleads you AND you find a way through.\n\n" +
-      "APPEND-ONLY. You cannot edit or delete earlier lessons, and you do not " +
-      "supply the timestamp, job or actor — the server stamps those.\n\n" +
+      "APPEND-ONLY. You cannot edit or delete earlier lessons, and you do not supply " +
+      "the timestamp — the server stamps it, so it cannot be forged.\n\n" +
+      "PROVENANCE CAVEAT, stated because the earlier wording over-promised: `job_id` " +
+      "and `actor` are recorded ONLY when the caller supplies x-adas-job-id / " +
+      "x-adas-actor-id. An agent calling this tool does not, so those fields are " +
+      "usually null — a lesson cannot currently be traced back to the run that " +
+      "produced it, and the file cannot tell 'three runs hit this' from 'one run hit " +
+      "it three times'. Do not put a job id in `error` to compensate; keep that field " +
+      "verbatim.\n\n" +
       "LOG ONLY WHAT YOU OBSERVED. Quote the error VERBATIM; never paraphrase it " +
       "and never write a theory about platform internals. A wrong lesson is worse " +
       "than no lesson, because the next run cannot check it and will act on it.\n\n" +
