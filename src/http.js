@@ -31,6 +31,22 @@ import {
 import { mountOAuth } from "./oauth.js";
 import { connectGithubPage } from "./pages.js";
 
+// Read once at import: the version of the code in THIS process, and when it
+// started. See the /health handler for why both matter.
+const PKG_VERSION = await (async () => {
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const here = dirname(fileURLToPath(import.meta.url));
+    return JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")).version || "unknown";
+  } catch {
+    // Never let a liveness probe fail over its own labelling.
+    return "unknown";
+  }
+})();
+const STARTED_AT = new Date().toISOString();
+
 // Active sessions
 const transports = {};
 
@@ -213,10 +229,28 @@ export function startHttpServer(port = 3100) {
   }
 
   // ─── Health check ─────────────────────────────────────────────
+  //
+  // version + startedAt are the whole point of this probe, not decoration.
+  //
+  // Without them every field here was TRUE while the agent served seven-day-old
+  // code: ok, service, transport and sessions all reported correctly, and not
+  // one of them could reveal that the process had been running since Aug 15
+  // across ~10 publishes. A liveness probe that cannot answer "is this the code
+  // I shipped?" is the truthful-but-useless shape — and a stale server that
+  // ANSWERS is worse than one that is down, because its errors describe bugs
+  // that were already fixed. (2026-08-22: it returned a 401 from a code path
+  // deleted in 2ff2a34, and a session went debugging a system that was correct.)
+  //
+  // version comes from the package.json NEXT TO THIS FILE, read at import, so it
+  // describes the code actually loaded — not what npm has, and not what a
+  // container was built with.
   app.get("/health", (_req, res) => {
     res.json({
       ok: true,
       service: "ateam-mcp",
+      version: PKG_VERSION,
+      startedAt: STARTED_AT,
+      uptime_s: Math.round(process.uptime()),
       transport: "http",
       sessions: getSessionStats(),
     });
