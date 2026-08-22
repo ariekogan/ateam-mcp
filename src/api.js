@@ -198,7 +198,24 @@ export function touchSession(sessionId, { toolName, solutionId, skillId, actorId
   // the Builder applies realActorId() before forwarding, so a generated
   // test_<ts>_<rand> thread key is dropped rather than sent to Core (which 401s on
   // an actor it cannot find). An explicit actor_id on a call still wins. (2026-08-22.)
-  if (actorId) session.context.actorId = String(actorId);
+  // ONLY A REAL ACTOR. ateam_conversation mints a throwaway THREAD key
+  // (test_<ts>_<rand>) for anonymous use and returns it as actor_id — the docs
+  // tell callers to pass it back for multi-turn. It is not an actor Core can
+  // resolve, and Core 401s the WHOLE REQUEST on an actor it cannot find.
+  //
+  // I shipped this without the filter and broke ateam_chain_status — the tool
+  // every agent polls in a loop — for a chain the same session had just
+  // started: 403 "Access denied" became 401 "Authentication required". The
+  // commit claimed it was safe because "the Builder applies realActorId()
+  // first", which is true only of the two routes I had touched, not of the
+  // status/chain pipes. Asserting a safety property that holds locally and
+  // assuming it holds everywhere is how the header reached Core unfiltered.
+  //
+  // So the rule lives at the SOURCE too, matching the Builder's
+  // GENERATED_THREAD_ACTOR_RE exactly. (2026-08-22.)
+  if (actorId && !/^test_\d+_[a-z0-9]+$/i.test(String(actorId))) {
+    session.context.actorId = String(actorId);
+  }
 }
 
 /**
