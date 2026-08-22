@@ -173,7 +173,7 @@ export function isExplicitlyAuthenticated(sessionId) {
  * Record activity on a session — called on every tool call.
  * Keeps the session alive and updates context for smarter UX.
  */
-export function touchSession(sessionId, { toolName, solutionId, skillId } = {}) {
+export function touchSession(sessionId, { toolName, solutionId, skillId, actorId } = {}) {
   const session = sessions.get(sessionId);
   if (!session) return;
 
@@ -183,6 +183,22 @@ export function touchSession(sessionId, { toolName, solutionId, skillId } = {}) 
   if (toolName) session.context.lastToolName = toolName;
   if (solutionId) session.context.activeSolutionId = solutionId;
   if (skillId) session.context.lastSkillId = skillId;
+  // THE ACTOR IS SESSION STATE, NOT A PER-CALL ARGUMENT.
+  //
+  // A job belongs to an ACTOR, and Core enforces that on every per-job read.
+  // The tenant API key is roleless — it identifies a tenant, i.e. NOBODY — so
+  // without an actor a caller is refused reads of jobs it kicked off itself and
+  // just listed. Threading actor_id through each tool made five of six job-facing
+  // tools forget it (get_chain, chain_status, test_status, test_abort,
+  // get_metrics) — and get_chain's own description PROMISED actor scoping its
+  // schema could not express. Remembering it here means no tool can forget.
+  //
+  // Learned from whatever the caller last supplied, and from ateam_conversation's
+  // reply, which is where an actor id comes from in the first place. Safe to keep:
+  // the Builder applies realActorId() before forwarding, so a generated
+  // test_<ts>_<rand> thread key is dropped rather than sent to Core (which 401s on
+  // an actor it cannot find). An explicit actor_id on a call still wins. (2026-08-22.)
+  if (actorId) session.context.actorId = String(actorId);
 }
 
 /**
@@ -420,6 +436,7 @@ function headers(sessionId) {
     const h = { "Content-Type": "application/json" };
     h["x-adas-token"] = session.masterKey;
     h["X-ADAS-TENANT"] = session.tenant;
+    if (session.context?.actorId) h["X-ADAS-ACTOR-ID"] = session.context.actorId;
     return h;
   }
 
@@ -428,6 +445,11 @@ function headers(sessionId) {
   const h = { "Content-Type": "application/json" };
   if (tenant) h["X-ADAS-TENANT"] = tenant;
   if (apiKey) h["X-API-KEY"] = apiKey;
+  // The acting actor rides with the tenant on EVERY call — see touchSession.
+  // The tenant says WHICH account; the actor says WHO, and per-job reads need
+  // both. Adds no authority: Core resolves the actor INSIDE the authenticated
+  // tenant and 401s if it is not there.
+  if (session?.context?.actorId) h["X-ADAS-ACTOR-ID"] = session.context.actorId;
   return h;
 }
 

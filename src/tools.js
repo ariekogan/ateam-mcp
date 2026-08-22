@@ -1454,11 +1454,21 @@ export const tools = [
     monitoring: { safe: true, cost: "cheap", latency_ms_p95: 500, output: "bounded", poll_interval_s: 2,
       note: "safe:false when include_chain:true (that fetches the full tree)." },
     description:
-      "Poll the progress of an async skill test. Returns iteration count, tool call steps, status (running/completed/failed), and result when done.\n\n" +
+      "Poll the progress of an async test. Pass chain_id for the WHOLE run (recommended — the root job finishing does NOT mean the run finished; a handoff may still be going). Pass job_id to poll one job alone: iteration count, tool call steps, status, and result when done.\n\n" +
       "Set include_chain:true to ALSO include the full chain tree (every job in the chain, rooted at this job_id, with parent/child linkage). Use when this job dispatched askAnySkill subcalls and you want a single snapshot of the whole multi-skill state instead of polling each child job_id separately.",
     inputSchema: {
       type: "object",
       properties: {
+        chain_id: {
+          type: "string",
+          description:
+            "THE EXECUTION'S IDENTITY — what ateam_conversation returns and what you actually hold. A chain is the whole run: root job + every handoff + every askAnySkill subcall. Prefer this.",
+        },
+        actor_id: {
+          type: "string",
+          description:
+            "Optional. WHO is asking. A job belongs to an actor and Core enforces that on per-job reads, so a tenant key alone is refused. Usually unnecessary — the session remembers the actor from ateam_conversation/ateam_test_skill. Pass it to inspect a job run by a DIFFERENT actor (e.g. a real user's).",
+        },
         solution_id: {
           type: "string",
           description: "The solution ID",
@@ -1469,7 +1479,7 @@ export const tools = [
         },
         job_id: {
           type: "string",
-          description: "The job ID returned by ateam_test_skill",
+          description: "ONE job inside the chain, when you want that job alone. Omit and pass chain_id for the whole run — a root job can be 'completed' while a handoff is still running.",
         },
         include_chain: {
           type: "boolean",
@@ -1477,7 +1487,7 @@ export const tools = [
             "If true, includes response.chain — the full chain tree rooted at this job_id (chainJobs[] with parentJobId/relation/depth, executionSteps[] with tool-nesting). Costs one extra Core call. Default false (back-compat).",
         },
       },
-      required: ["solution_id", "skill_id", "job_id"],
+      required: ["solution_id"],
     },
   },
   {
@@ -1488,7 +1498,7 @@ export const tools = [
     // degrades. Use once at the end; poll ateam_chain_status instead.
     monitoring: { safe: false, cost: "heavy", output: "grows_with_run", use_instead: "ateam_chain_status" },
     description:
-      "Inspect the full chain tree for any job — rooted at the given job_id, walking down through every handoff and askAnySkill subcall.\n\n" +
+      "Inspect the full chain tree — the whole run rooted at chain_id, walking down through every handoff and askAnySkill subcall.\n\n" +
       "Use when a chain has already run and you want to analyze the structure: which skill called which, how deep the call tree went, which tool inside which job invoked which sub-tool. The two main shapes:\n" +
       "  • response.chain.chainJobs[] — one entry per job in the chain. Fields: jobId, skill, status, iteration, depth (0 = root, +1 per askAnySkill subcall hop), relation ('root' | 'subcall' | 'handoff'), parentJobId, parentSkill, goal.\n" +
       "  • response.chain.executionSteps[] — every tool call across all chain jobs, tagged with _skill, _jobId, _depth (= job depth), _relation, _parentSkill, _parentJobId, _toolDepth (tool-in-tool nesting via opId/parentOpId).\n\n" +
@@ -1497,16 +1507,26 @@ export const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        chain_id: {
+          type: "string",
+          description:
+            "THE EXECUTION'S IDENTITY — what ateam_conversation returns and what you actually hold. A chain is the whole run: root job + every handoff + every askAnySkill subcall. Prefer this.",
+        },
+        actor_id: {
+          type: "string",
+          description:
+            "Optional. WHO is asking. A job belongs to an actor and Core enforces that on per-job reads, so a tenant key alone is refused. Usually unnecessary — the session remembers the actor from ateam_conversation/ateam_test_skill. Pass it to inspect a job run by a DIFFERENT actor (e.g. a real user's).",
+        },
         job_id: {
           type: "string",
-          description: "The root job ID of the chain to inspect (or any job inside the chain — Core walks up to the root).",
+          description: "Alias for chain_id. Any job inside the chain works — Core walks up to the root — but you rarely hold one; prefer chain_id.",
         },
         skill_slug: {
           type: "string",
           description: "Optional. The skill slug for the job — speeds up the lookup when the job isn't in memory and must be loaded from storage. Omit if you don't have it; lookup still works but does an extra round-trip.",
         },
       },
-      required: ["job_id"],
+      required: [],
     },
   },
   {
@@ -1530,9 +1550,18 @@ export const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        actor_id: {
+          type: "string",
+          description:
+            "Optional. WHO is asking. A job belongs to an actor and Core enforces that on per-job reads, so a tenant key alone is refused. Usually unnecessary — the session remembers the actor from ateam_conversation/ateam_test_skill. Pass it to inspect a job run by a DIFFERENT actor (e.g. a real user's).",
+        },
         chain_id: {
           type: "string",
           description: "The chain id returned by ateam_conversation (the conversation's identity). Any job id in the chain also works — Core resolves the chain aggregate.",
+        },
+        job_id: {
+          type: "string",
+          description: "Alias for chain_id — any job in the chain resolves to the chain aggregate. The handler has always accepted it; without this declaration MCP stripped it before the handler could see it.",
         },
       },
       required: ["chain_id"],
@@ -1581,10 +1610,20 @@ export const tools = [
     name: "ateam_test_abort",
     core: true,
     description:
-      "Abort a running skill test. Stops the job execution at the next iteration boundary. (Advanced.)",
+      "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Stops at the next iteration boundary. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
+        chain_id: {
+          type: "string",
+          description:
+            "THE EXECUTION'S IDENTITY — what ateam_conversation returns and what you actually hold. A chain is the whole run: root job + every handoff + every askAnySkill subcall. Prefer this.",
+        },
+        actor_id: {
+          type: "string",
+          description:
+            "Optional. WHO is asking. A job belongs to an actor and Core enforces that on per-job reads, so a tenant key alone is refused. Usually unnecessary — the session remembers the actor from ateam_conversation/ateam_test_skill. Pass it to inspect a job run by a DIFFERENT actor (e.g. a real user's).",
+        },
         solution_id: {
           type: "string",
           description: "The solution ID",
@@ -1595,10 +1634,10 @@ export const tools = [
         },
         job_id: {
           type: "string",
-          description: "The job ID to abort",
+          description: "Abort ONE job only. Prefer chain_id: aborting the root leaves handoffs running while reporting the test aborted.",
         },
       },
-      required: ["solution_id", "skill_id", "job_id"],
+      required: ["solution_id"],
     },
   },
   {
@@ -1665,6 +1704,11 @@ export const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        actor_id: {
+          type: "string",
+          description:
+            "Optional. WHO is asking. A job belongs to an actor and Core enforces that on per-job reads, so a tenant key alone is refused. Usually unnecessary — the session remembers the actor from ateam_conversation/ateam_test_skill. Pass it to inspect a job run by a DIFFERENT actor (e.g. a real user's).",
+        },
         solution_id: {
           type: "string",
           description: "The solution ID",
@@ -1672,6 +1716,11 @@ export const tools = [
         job_id: {
           type: "string",
           description: "Optional: deep analysis for a specific job",
+        },
+        chain_id: {
+          type: "string",
+          description:
+            "Optional: deep analysis for the job behind a CHAIN id — what ateam_conversation returns and what you actually hold. Resolved to the job for you.",
         },
         skill_id: {
           type: "string",
@@ -2831,6 +2880,7 @@ module.exports.default = plugin;
 
   return files;
 }
+
 
 const handlers = {
   ateam_bootstrap: async () => ({
@@ -4332,33 +4382,43 @@ const handlers = {
 
   // ─── Developer Tools ────────────────────────────────────────────
 
-  ateam_get_execution_logs: async ({ solution_id, skill_id, job_id, chain_id, actor_id, limit }, sid) => {
-    // CALLERS HOLD A CHAIN ID, NOT A JOB ID. ateam_conversation returns
-    // chain_id, ateam_chain_status takes chain_id — but this tool wanted the
-    // inner job id, which nobody ever sees. Accept the chain id and resolve it
-    // through the LIST form, which already returns chainId per job. No new
-    // mechanism: the mapping is in data we were already fetching.
-    let resolvedJobId = job_id;
-    if (!resolvedJobId && chain_id) {
-      const listed = await get(`/deploy/solutions/${solution_id}/logs?limit=50`, sid);
-      const match = (listed?.jobs || []).find((j) => j?.chainId === chain_id || j?.id === chain_id);
-      if (!match) {
-        return {
-          ok: false,
-          error: `No job found for chain "${chain_id}" in solution "${solution_id}".`,
-          hint: "The chain may belong to another solution, or be older than the last 50 jobs. Call this tool without chain_id/job_id to list what exists.",
-        };
-      }
-      resolvedJobId = match.id;
+  ateam_get_execution_logs: async ({ solution_id, skill_id, job_id, chain_id, limit }, sid) => {
+    // A CHAIN IS NOT A JOB — DO NOT RESOLVE ONE DOWN TO THE OTHER.
+    //
+    // Callers hold a chain id (ateam_conversation returns chain_id;
+    // ateam_chain_status takes chain_id) while this tool spoke only job_id, the
+    // inner id nobody ever sees. The tempting fix — look the chain up in the
+    // list and pass its root job on — is WRONG in the direction the system moved:
+    // a chain is root job + every handoff + every askAnySkill subcall, so it
+    // would return ONE job's trace under the name of the whole chain. A partial
+    // trace that calls itself complete is worse than a refusal: it makes the
+    // handoff you are hunting look like it never happened.
+    //
+    // So a chain id goes to the CHAIN endpoint, which returns every job and every
+    // step across the whole tree — the actual "what ran". (2026-08-22.)
+    if (!job_id && chain_id) {
+      const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
+      const jobs = chain?.chain?.chainJobs || [];
+      const steps = chain?.chain?.executionSteps || [];
+      return {
+        ok: true,
+        scope: "chain",
+        chain_id,
+        solution_id,
+        job_count: jobs.length,
+        step_count: steps.length,
+        jobs,
+        steps,
+        _note: `FULL CHAIN: ${jobs.length} job(s) — root + handoffs + subcalls — and ${steps.length} tool call(s) across all of them. Each step carries _skill/_jobId/_depth/_relation so you can see WHICH skill made it. For one job alone, pass job_id.`,
+      };
     }
 
     const qs = new URLSearchParams();
     if (skill_id) qs.set("skill_id", skill_id);
-    if (resolvedJobId) qs.set("job_id", resolvedJobId);
-    // A job belongs to an ACTOR and Core enforces that on the detail endpoint.
-    // Without it every job_id lookup is refused — including for a job this same
-    // call just listed. The tenant key alone is nobody.
-    if (actor_id) qs.set("actor_id", actor_id);
+    if (job_id) qs.set("job_id", job_id);
+    // actor_id is NOT set here. It rides X-ADAS-ACTOR-ID for every tool, from
+    // the session (api.js headers/touchSession) — this tool having its own
+    // private path was how the other five ended up with none at all.
     if (limit) qs.set("limit", String(limit));
     const qsStr = qs.toString() ? `?${qs}` : "";
     return get(`/deploy/solutions/${solution_id}/logs${qsStr}`, sid);
@@ -4628,7 +4688,23 @@ const handlers = {
     return post(`/deploy/voice-test`, body, sid, { timeoutMs: timeoutTotal });
   },
 
-  ateam_test_status: async ({ solution_id, skill_id, job_id, include_chain }, sid) => {
+  ateam_test_status: async ({ solution_id, skill_id, job_id, chain_id, include_chain }, sid) => {
+    // Given a CHAIN id, answer about the chain. The per-skill test endpoint below
+    // is per-job and needs a skill — neither of which a caller holding a chain id
+    // has. Routing a chain id there would report the root job's status as if it
+    // were the run's, and a root can be "completed" while a handoff is still
+    // going. Whole-chain status is what "is it done?" actually means.
+    if (chain_id && !job_id) {
+      const data = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/status`, sid);
+      return { ok: true, scope: "chain", chain_id, ...data };
+    }
+
+    if (!job_id) {
+      throw new Error("Pass chain_id (the whole run — recommended) or job_id. ateam_conversation returns chain_id.");
+    }
+    if (!skill_id) {
+      throw new Error(`job_id "${job_id}" needs skill_id too — the per-job endpoint is scoped by skill. Pass chain_id instead to poll the whole run without knowing which skill ran it.`);
+    }
     // Existing single-job snapshot via Builder (unchanged shape for back-compat).
     const single = await get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
     if (!include_chain) return single;
@@ -4646,8 +4722,14 @@ const handlers = {
     return { ...single, chain };
   },
 
-  ateam_get_chain: async ({ job_id, skill_slug }, sid) => {
-    if (!job_id) throw new Error("job_id required");
+  ateam_get_chain: async ({ chain_id, job_id, skill_slug }, sid) => {
+    // CHAIN IS THE UNIT. Core resolves either id to the same chain (it walks up
+    // to the root), so the tool takes the id the caller actually holds — the
+    // chain id from ateam_conversation — and treats job_id as an alias for the
+    // rarer case of holding an inner id. Same `chain_id || job_id` shape as
+    // ateam_chain_status, so the two poll/inspect tools take the same argument.
+    const id = chain_id || job_id;
+    if (!id) throw new Error("chain_id required (job_id accepted as an alias)");
     const creds = getCredentials(sid);
     const apiKey = creds?.apiKey;
     if (!apiKey) throw new Error("No api_key in session — call ateam_auth(api_key) first.");
@@ -4656,7 +4738,7 @@ const handlers = {
     const qs = new URLSearchParams();
     if (skill_slug) qs.set("skillSlug", skill_slug);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return await get(`/deploy/jobs/${encodeURIComponent(job_id)}/chain${suffix}`, sid);
+    return await get(`/deploy/jobs/${encodeURIComponent(id)}/chain${suffix}`, sid);
   },
 
   // SLIM chain status — the chip-quick poll. Hits Core /api/job/:id/status
@@ -4784,8 +4866,45 @@ const handlers = {
     return { ok: true, generated_at: new Date().toISOString(), counts, widgets: filtered };
   },
 
-  ateam_test_abort: async ({ solution_id, skill_id, job_id }, sid) =>
-    del(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid),
+  ateam_test_abort: async ({ solution_id, skill_id, job_id, chain_id }, sid) => {
+    // ABORTING THE ROOT DOES NOT ABORT THE RUN. A chain is root + handoffs +
+    // subcalls, each its own job; killing the root leaves the handoff running,
+    // still burning tokens, still writing — while the caller has been told the
+    // test was aborted. So a chain id aborts every job in the chain and REPORTS
+    // each one, rather than quietly doing a fraction of what it claims.
+    if (chain_id && !job_id) {
+      const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
+      const jobs = chain?.chain?.chainJobs || [];
+      if (!jobs.length) {
+        return { ok: false, scope: "chain", chain_id, error: `No jobs found for chain "${chain_id}".`,
+                 hint: "The chain may belong to another solution or another actor. ateam_get_execution_logs(chain_id) shows what is visible to you." };
+      }
+      const aborted = [];
+      for (const j of jobs) {
+        const slug = j.skill || skill_id;
+        try {
+          await del(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(slug)}/test/${encodeURIComponent(j.jobId)}`, sid);
+          aborted.push({ job_id: j.jobId, skill: slug, relation: j.relation, aborted: true });
+        } catch (err) {
+          // A job that was ALREADY finished cannot be aborted — that is not a
+          // failure of the abort, but it must still be visible.
+          aborted.push({ job_id: j.jobId, skill: slug, relation: j.relation, aborted: false, error: err.message });
+        }
+      }
+      return {
+        ok: aborted.some((a) => a.aborted),
+        scope: "chain",
+        chain_id,
+        job_count: jobs.length,
+        aborted_count: aborted.filter((a) => a.aborted).length,
+        jobs: aborted,
+      };
+    }
+    if (!job_id || !skill_id) {
+      throw new Error("Pass chain_id to abort the whole run, or job_id + skill_id to abort one job.");
+    }
+    return del(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
+  },
 
   ateam_get_connector_source: async ({ solution_id, connector_id, path }, sid) => {
     const data = await get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
@@ -4873,7 +4992,38 @@ const handlers = {
     };
   },
 
-  ateam_get_metrics: async ({ solution_id, job_id, skill_id }, sid) => {
+  ateam_get_metrics: async ({ solution_id, job_id, chain_id, skill_id }, sid) => {
+    // Same rule as ateam_get_execution_logs: a chain is not a job. Core's
+    // insight is per-job, so a chain is measured by measuring EVERY job in it —
+    // never by silently reporting the root and calling that the chain.
+    if (!job_id && chain_id) {
+      const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
+      const jobs = chain?.chain?.chainJobs || [];
+      const CAP = 10;
+      const measured = jobs.slice(0, CAP);
+      const per_job = [];
+      for (const j of measured) {
+        try {
+          const m = await get(`/deploy/solutions/${solution_id}/metrics?job_id=${encodeURIComponent(j.jobId)}`, sid);
+          per_job.push({ job_id: j.jobId, skill: j.skill, relation: j.relation, depth: j.depth, metrics: m });
+        } catch (err) {
+          // One unreadable job must not hide the rest — say which failed and why.
+          per_job.push({ job_id: j.jobId, skill: j.skill, relation: j.relation, depth: j.depth, error: err.message });
+        }
+      }
+      return {
+        ok: true,
+        scope: "chain",
+        chain_id,
+        solution_id,
+        job_count: jobs.length,
+        measured: per_job.length,
+        // NO SILENT CAPS: if the chain is bigger than we measured, say so here
+        // rather than let the caller read a partial roll-up as the whole chain.
+        truncated: jobs.length > CAP ? `chain has ${jobs.length} jobs; measured the first ${CAP}` : null,
+        per_job,
+      };
+    }
     const qs = new URLSearchParams();
     if (job_id) qs.set("job_id", job_id);
     if (skill_id) qs.set("skill_id", skill_id);
@@ -5576,6 +5726,10 @@ export async function handleToolCall(name, args, sessionId) {
     toolName: name,
     solutionId: args?.solution_id,
     skillId: args?.skill_id,
+    // Remember WHO is acting, so every later per-job read carries it. See the
+    // long note in api.js touchSession: threading actor_id per tool left five of
+    // six job-facing tools unable to express it at all.
+    actorId: args?.actor_id,
   });
 
   // Check auth for tenant-aware operations — requires explicit ateam_auth call.
@@ -5627,6 +5781,15 @@ export async function handleToolCall(name, args, sessionId) {
 
   try {
     const result = await handler(args, sessionId);
+
+    // An actor id is BORN here: ateam_conversation/ateam_test_skill mint one and
+    // return it, and the docs tell callers to pass it back for multi-turn. Learn
+    // it on the way out so the follow-up ateam_get_execution_logs /
+    // ateam_get_metrics on that very job is not refused for not knowing who ran
+    // it — the single most common dead end when debugging a run.
+    if (result && typeof result === "object" && result.actor_id) {
+      touchSession(sessionId, { actorId: result.actor_id });
+    }
 
     // Stamp WHERE this landed (tenant + app URL) on mutating-tool results, so
     // any client — desktop, mobile, cloud agent — can tell the user where to
