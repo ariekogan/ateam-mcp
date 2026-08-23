@@ -972,7 +972,8 @@ export const tools = [
     description:
       "⚠️ CASCADING — any skill whose engine.bootstrap_tools or tools[] name a tool from this connector will FAIL its next execution. " +
       "Stops and deletes the connector from A-Team Core; drops references from the solution definition (grants, platform_connectors, ui_plugins ids starting `mcp:<connector-id>:*`) and skill definitions (connectors array); cleans up mcp-store files. " +
-      "GitHub source is preserved — a follow-up `ateam_build_and_run(github:true)` can resurrect. " +
+      "ALSO REMOVES THE SOURCE: `connectors/<id>/` is deleted from the repo (main AND dev) in the same call, so the delete is DURABLE. " +
+      "This CHANGED on 2026-08-23 — it used to preserve the source and name `ateam_build_and_run(github:true)` as a way to resurrect. That made a delete undo itself on a later publish, and only in some states, since connectors[] is synthesized from mcp_store keys ONLY when it is empty. If you want the code kept, copy it out (ateam_get_connector_source) BEFORE deleting. If the repo removal fails the response says so under `github` — Core is clean but the source is still there. " +
       "REQUIRES `confirm:true`.",
     inputSchema: {
       type: "object",
