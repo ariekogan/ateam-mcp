@@ -1032,6 +1032,57 @@ export const tools = [
   },
 
   {
+    name: "ateam_log_progress",
+    core: true,
+    description:
+      "Record that a build STEP is done, so a later run does not redo it. Write it AS IT HAPPENS, never at the end — the runs that most need a journal are the ones the clock kills.\n\n" +
+      "WHY: a continuation cannot otherwise tell what the previous run achieved, so it re-runs the whole orientation (bootstrap, get_workflows, list_solutions, get_solution, get_spec, get_examples, github_read) to re-derive from documents what was already established — and re-inflates its prompt into the region where provider latency collapses. Measured across 13 runs: stalls track PROMPT SIZE (~60k), not turn count. ateam_get_progress is ONE call instead of nine.\n\n" +
+      "status — three values, and the third is the point:\n" +
+      "  built     — the artefact exists (files written, committed)\n" +
+      "  deployed  — the platform accepted it\n" +
+      "  verified  — YOU CALLED IT AND GOT REAL DATA BACK\n\n" +
+      "`verified` REQUIRES verified_by, and a deploy response is not verification. `connected` and `tools > 0` are tools/list facts: a clinic connector showed 9 tools while every storage call returned 401. A journal that stops at `deployed` records that build as finished.\n\n" +
+      "Re-log the same step as it advances (built → deployed → verified) — latest wins, no update path. If a step REGRESSES, re-log it at the lower status: silence must not read as \"still fine\".",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        step: {
+          type: "string",
+          description: "STABLE slug a later run can MATCH rather than enumerate: 'connector:<id>', 'skill:<id>', 'widget:<name>', 'seed:<what>'. Keep it identical across runs — a renamed step reads as a new one.",
+        },
+        status: {
+          type: "string",
+          enum: ["built", "deployed", "verified"],
+          description: "built = artefact exists · deployed = platform accepted it · verified = you called it and got real data back",
+        },
+        detail: { type: "string", description: "One line of what exists — e.g. '10 tools, 8 seeded appointments'." },
+        verified_by: {
+          type: "string",
+          description: "REQUIRED when status is 'verified': the literal call that proved it and what came back, e.g. 'ateam_test_connector(clinic-data-mcp, appointments.list_all) → 23 rows'. Storing the evidence beside the claim is what makes the journal auditable instead of self-reported.",
+        },
+      },
+      required: ["solution_id", "step", "status"],
+    },
+  },
+  {
+    name: "ateam_get_progress",
+    core: true,
+    description:
+      "What this build has already ACHIEVED — read it FIRST when continuing a run, before any orientation call. Returns the CURRENT status per step (latest entry wins) plus recent history.\n\n" +
+      "Then build only the steps that are ABSENT or not yet `verified`.\n\n" +
+      "ABSENT IS NOT \"NOTHING WAS DONE\" — the journal may predate a step, or a run may have died before writing. It is a fast path, not a new source of truth: check before rebuilding something expensive.\n\n" +
+      "Complements ateam_get_lessons, which records what BROKE. This records what WORKS.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        limit: { type: "number", description: "History entries to return (default 60). `steps` is always complete." },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
     name: "ateam_log_lesson",
     core: true,
     description:
@@ -2321,6 +2372,8 @@ const TENANT_TOOLS = new Set([
   // tenant's lessons. Tenant isolation is the one boundary this platform
   // treats as absolute.
   "ateam_log_lesson",
+  "ateam_log_progress",
+  "ateam_get_progress",
   "ateam_get_lessons",
 
   // Write operations
@@ -5374,6 +5427,23 @@ const handlers = {
       { tool, error, workaround, worked, kind },
       sid,
     );
+  },
+
+  ateam_log_progress: async ({ solution_id, step, status, detail, verified_by }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    if (!step) throw new Error("step required — a STABLE slug a later run can match on, e.g. \"connector:clinic-data-mcp\"");
+    if (!status) throw new Error("status required — built | deployed | verified");
+    return await post(
+      `/deploy/solutions/${solution_id}/progress`,
+      { step, status, detail, verified_by },
+      sid,
+    );
+  },
+
+  ateam_get_progress: async ({ solution_id, limit }, sid) => {
+    if (!solution_id) throw new Error("solution_id required");
+    const qs = Number.isFinite(limit) ? `?limit=${limit}` : "";
+    return await get(`/deploy/solutions/${solution_id}/progress${qs}`, sid);
   },
 
   ateam_get_lessons: async ({ solution_id, limit }, sid) => {
