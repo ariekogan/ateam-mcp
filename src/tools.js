@@ -239,20 +239,52 @@ function _widgetHasRender(r) {
 //
 // Detected here rather than left to a person noticing an empty panel, and
 // reported with the repair attached — a signal the reasoning engine can act on.
-function _widgetProtocolProblems(html) {
+export function _widgetProtocolProblems(html) {
   if (typeof html !== "string" || !html.includes("postMessage")) return [];
+
+  // STRUCTURE, NOT TOKENS. The first version matched /correlationId/ anywhere in
+  // the file, so a correct widget with an unrelated local named correlationId was
+  // reported broken — and `fix_with` would then steer an agent into editing
+  // working code. Reviewer was right to reject it. Each check below anchors to
+  // the actual send or receive shape.
   const problems = [];
-  if (/["']tool\.call["']/.test(html)) {
-    problems.push('sends type:"tool.call" — the host has NEVER accepted it (silent 15s timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
+
+  // Only look at what is POSTED to the host: postMessage(...) argument objects.
+  const sends = [...html.matchAll(/postMessage\s*\(\s*\{[\s\S]{0,400}/g)].map((m) => m[0]);
+  const sendBlob = sends.join("\n");
+  const isPluginSend = /source\s*:\s*["']adas-plugin["']/.test(sendBlob);
+
+  if (isPluginSend) {
+    if (/type\s*:\s*["']tool\.call["']/.test(sendBlob)) {
+      problems.push('sends message.type:"tool.call" — the host has NEVER accepted it, at any version (silent timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
+    } else if (!/action\s*:\s*["']mcp-call["']/.test(sendBlob)) {
+      // type:"mcp-call" is the near-miss worth naming separately: right name,
+      // wrong key. The host matches on message.action and ignores message.type.
+      if (/type\s*:\s*["']mcp-call["']/.test(sendBlob)) {
+        problems.push('sends message.TYPE:"mcp-call" — the host matches on message.ACTION for sends, so this is ignored. Use message:{action:"mcp-call",payload:{...}}.');
+      } else {
+        problems.push('never sends action:"mcp-call" — the host ignores the message entirely.');
+      }
+    }
+    // correlationId only counts as a defect where it carries the request id.
+    if (/payload\s*:\s*\{[^}]*correlationId/.test(sendBlob) || /correlationId\s*:\s*correlationId/.test(sendBlob)) {
+      problems.push('sends the request id as correlationId — the host echoes payload.requestId, so responses never match the pending request and every call times out even when the host answered.');
+    }
   }
-  if (/correlationId/.test(html)) {
-    problems.push('keys responses on correlationId — the host echoes payload.requestId, so the pending request is never matched and every call times out even when the host answered.');
+
+  // RECEIVE side: only flag reading correlationId OFF THE HOST PAYLOAD.
+  if (/payload\s*(\?\.|\.)\s*correlationId/.test(html) ||
+      /payload\s*&&\s*[\w$.]*payload\.correlationId/.test(html) ||
+      /\{\s*correlationId[^}]*\}\s*=\s*[\w$.]*payload/.test(html)) {
+    problems.push('reads payload.correlationId from the host response — the host sends payload.requestId, so the pending request is never matched.');
   }
-  if (/postMessage/.test(html) && !/["']mcp-call["']/.test(html)) {
-    problems.push('never sends action:"mcp-call" — the host ignores the message entirely.');
+  if (/type\s*===?\s*["']tool\.response["']/.test(html)) {
+    problems.push('listens for message.type:"tool.response" — the host replies with "mcp-result".');
   }
+
   return problems;
 }
+
 
 async function verifyWidgetHealth(solution_id, sid) {
   // 1. Declared plugins — solution.ui_plugins[]
