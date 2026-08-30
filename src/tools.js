@@ -239,47 +239,75 @@ function _widgetHasRender(r) {
 //
 // Detected here rather than left to a person noticing an empty panel, and
 // reported with the repair attached — a signal the reasoning engine can act on.
+// Extract the FULL argument object of each postMessage(...) call by matching
+// braces, so every call is judged on its own text. The previous version took a
+// fixed 400-character window and concatenated all of them: a send object longer
+// than the window was inspected in part, and `source:"adas-plugin"` in one call
+// could make an unrelated postMessage elsewhere on the page be judged as the
+// ADAS protocol. Both were rejected in review, correctly — an approximate
+// boundary is not a structural one.
+function _postMessageObjects(html) {
+  const out = [];
+  const re = /postMessage\s*\(\s*\{/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const open = html.indexOf("{", m.index);
+    let depth = 0, i = open, inStr = null, esc = false;
+    for (; i < html.length; i++) {
+      const c = html[i];
+      if (inStr) {
+        if (esc) { esc = false; continue; }
+        if (c === "\\") { esc = true; continue; }
+        if (c === inStr) inStr = null;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") { inStr = c; continue; }
+      if (c === "{") depth++;
+      else if (c === "}") { depth--; if (depth === 0) { i++; break; } }
+    }
+    // Unbalanced (minified truncation, template weirdness) → skip rather than
+    // guess. A message we cannot delimit is one we must not judge.
+    if (depth === 0) out.push(html.slice(open, i));
+    re.lastIndex = Math.max(re.lastIndex, i);
+  }
+  return out;
+}
+
 export function _widgetProtocolProblems(html) {
   if (typeof html !== "string" || !html.includes("postMessage")) return [];
 
-  // STRUCTURE, NOT TOKENS. The first version matched /correlationId/ anywhere in
-  // the file, so a correct widget with an unrelated local named correlationId was
-  // reported broken — and `fix_with` would then steer an agent into editing
-  // working code. Reviewer was right to reject it. Each check below anchors to
-  // the actual send or receive shape.
   const problems = [];
+  const seen = new Set();
+  const add = (p) => { if (!seen.has(p)) { seen.add(p); problems.push(p); } };
 
-  // Only look at what is POSTED to the host: postMessage(...) argument objects.
-  const sends = [...html.matchAll(/postMessage\s*\(\s*\{[\s\S]{0,400}/g)].map((m) => m[0]);
-  const sendBlob = sends.join("\n");
-  const isPluginSend = /source\s*:\s*["']adas-plugin["']/.test(sendBlob);
+  // Judge each host-directed send INDEPENDENTLY. A page may legitimately
+  // postMessage to other targets; only objects that identify themselves as the
+  // ADAS plugin channel are the protocol.
+  for (const obj of _postMessageObjects(html)) {
+    if (!/source\s*:\s*["']adas-plugin["']/.test(obj)) continue;
 
-  if (isPluginSend) {
-    if (/type\s*:\s*["']tool\.call["']/.test(sendBlob)) {
-      problems.push('sends message.type:"tool.call" — the host has NEVER accepted it, at any version (silent timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
-    } else if (!/action\s*:\s*["']mcp-call["']/.test(sendBlob)) {
-      // type:"mcp-call" is the near-miss worth naming separately: right name,
-      // wrong key. The host matches on message.action and ignores message.type.
-      if (/type\s*:\s*["']mcp-call["']/.test(sendBlob)) {
-        problems.push('sends message.TYPE:"mcp-call" — the host matches on message.ACTION for sends, so this is ignored. Use message:{action:"mcp-call",payload:{...}}.');
+    if (/type\s*:\s*["']tool\.call["']/.test(obj)) {
+      add('sends message.type:"tool.call" — the host has NEVER accepted it, at any version (silent timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
+    } else if (!/action\s*:\s*["']mcp-call["']/.test(obj)) {
+      if (/type\s*:\s*["']mcp-call["']/.test(obj)) {
+        add('sends message.TYPE:"mcp-call" — the host matches on message.ACTION for sends, so this is ignored. Use message:{action:"mcp-call",payload:{...}}.');
       } else {
-        problems.push('never sends action:"mcp-call" — the host ignores the message entirely.');
+        add('never sends action:"mcp-call" — the host ignores the message entirely.');
       }
     }
-    // correlationId only counts as a defect where it carries the request id.
-    if (/payload\s*:\s*\{[^}]*correlationId/.test(sendBlob) || /correlationId\s*:\s*correlationId/.test(sendBlob)) {
-      problems.push('sends the request id as correlationId — the host echoes payload.requestId, so responses never match the pending request and every call times out even when the host answered.');
+    if (/payload\s*:\s*\{[^}]*correlationId/.test(obj) || /correlationId\s*:\s*correlationId/.test(obj)) {
+      add('sends the request id as correlationId — the host echoes payload.requestId, so responses never match the pending request and every call times out even when the host answered.');
     }
   }
 
-  // RECEIVE side: only flag reading correlationId OFF THE HOST PAYLOAD.
+  // RECEIVE side: only reading correlationId OFF THE HOST PAYLOAD counts.
   if (/payload\s*(\?\.|\.)\s*correlationId/.test(html) ||
       /payload\s*&&\s*[\w$.]*payload\.correlationId/.test(html) ||
       /\{\s*correlationId[^}]*\}\s*=\s*[\w$.]*payload/.test(html)) {
-    problems.push('reads payload.correlationId from the host response — the host sends payload.requestId, so the pending request is never matched.');
+    add('reads payload.correlationId from the host response — the host sends payload.requestId, so the pending request is never matched.');
   }
   if (/type\s*===?\s*["']tool\.response["']/.test(html)) {
-    problems.push('listens for message.type:"tool.response" — the host replies with "mcp-result".');
+    add('listens for message.type:"tool.response" — the host replies with "mcp-result".');
   }
 
   return problems;

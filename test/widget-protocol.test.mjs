@@ -101,5 +101,60 @@ const SENDS_CORRELATION = WRAP(`
 check("sending correlationId in the payload is flagged",
   _widgetProtocolProblems(SENDS_CORRELATION).some((p) => p.includes("request id as correlationId")));
 
+
+// ─── Per-message isolation (GPT review, round 2) ─────────────────────────────
+// The previous implementation concatenated a 400-char window of EVERY
+// postMessage into one blob. Two consequences it was rejected for:
+//   1. source:"adas-plugin" in one call made unrelated calls judged as protocol
+//   2. a send object longer than the window was inspected only in part
+console.log("per-message isolation");
+
+// A correct ADAS send, PLUS an unrelated postMessage that happens to contain
+// the old protocol words. Only the ADAS one is the protocol.
+const MIXED = WRAP(`
+  window.parent.postMessage({source:"adas-plugin",message:{action:"mcp-call",
+    payload:{requestId:r,connectorId:"c",tool:t,args:a}}},"*");
+  analyticsFrame.postMessage({source:"vendor-sdk",message:{type:"tool.call",correlationId:x}},"*");
+  if(m.type==="mcp-result"){pend.get(m.payload.requestId);}
+`);
+check("a foreign postMessage with tool.call does NOT contaminate a valid widget",
+  _widgetProtocolProblems(MIXED).length === 0);
+
+// The reverse: a broken ADAS send must still be caught when a VALID-looking
+// foreign message sits next to it.
+const MIXED_BROKEN = WRAP(`
+  otherFrame.postMessage({source:"vendor-sdk",message:{action:"mcp-call",payload:{requestId:1}}},"*");
+  window.parent.postMessage({source:"adas-plugin",message:{type:"tool.call",toolName:t,correlationId:c}},"*");
+`);
+check("a broken ADAS send is still caught beside a valid foreign message",
+  _widgetProtocolProblems(MIXED_BROKEN).some((p) => p.includes('"tool.call"')));
+
+// An object far longer than the old 400-character window, with the defect at
+// the END — the case the truncation could not see.
+const padding = Array.from({ length: 40 }, (_, i) => `field${i}:"${"x".repeat(20)}"`).join(",");
+const LONG_OBJECT = WRAP(`
+  window.parent.postMessage({source:"adas-plugin",${padding},
+    message:{type:"tool.call",toolName:t,args:a,correlationId:c}},"*");
+`);
+check("defect beyond 400 chars into the object is still found (no window)",
+  _widgetProtocolProblems(LONG_OBJECT).some((p) => p.includes('"tool.call"')));
+
+// Nested braces and strings containing braces must not end extraction early.
+const NESTED = WRAP(`
+  window.parent.postMessage({source:"adas-plugin",note:"a } inside a string",
+    message:{action:"mcp-call",payload:{requestId:r,connectorId:"c",tool:t,args:{deep:{deeper:{x:1}}}}}},"*");
+  if(m.type==="mcp-result"){pend.get(m.payload.requestId);}
+`);
+check("braces inside strings and nested objects do not break extraction",
+  _widgetProtocolProblems(NESTED).length === 0);
+
+// Each defect reported once even across several bad sends.
+const TWO_BAD = WRAP(`
+  window.parent.postMessage({source:"adas-plugin",message:{type:"tool.call",toolName:"a"}},"*");
+  window.parent.postMessage({source:"adas-plugin",message:{type:"tool.call",toolName:"b"}},"*");
+`);
+check("duplicate findings are collapsed",
+  _widgetProtocolProblems(TWO_BAD).filter((p) => p.includes('"tool.call"')).length === 1);
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
