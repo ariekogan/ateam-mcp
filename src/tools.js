@@ -223,6 +223,37 @@ function _widgetHasRender(r) {
   return true; // unknown mode — don't false-positive on a custom render
 }
 
+
+// ── WIDGET POSTMESSAGE PROTOCOL: the failure that RENDERS FINE ────────────────
+//
+// A widget using the wrong postMessage shape draws its chrome, calls the host,
+// and hangs until its own timeout. Nothing errors: the connector is healthy,
+// tools/list is correct, the plugin "renders", and only the DATA is missing.
+// A clinic dashboard shipped that way and was reported as working (2026-08-29).
+//
+// The host matches action === "mcp-call" with payload.requestId. Three shapes
+// are fatal on their own, and a widget can get two right and still hang:
+//   type:"tool.call"        — never existed in the host, at any version
+//   correlationId           — the host echoes requestId; the pending map misses
+//   type:"mcp-call" on SEND — send is matched on message.action, not .type
+//
+// Detected here rather than left to a person noticing an empty panel, and
+// reported with the repair attached — a signal the reasoning engine can act on.
+function _widgetProtocolProblems(html) {
+  if (typeof html !== "string" || !html.includes("postMessage")) return [];
+  const problems = [];
+  if (/["']tool\.call["']/.test(html)) {
+    problems.push('sends type:"tool.call" — the host has NEVER accepted it (silent 15s timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
+  }
+  if (/correlationId/.test(html)) {
+    problems.push('keys responses on correlationId — the host echoes payload.requestId, so the pending request is never matched and every call times out even when the host answered.');
+  }
+  if (/postMessage/.test(html) && !/["']mcp-call["']/.test(html)) {
+    problems.push('never sends action:"mcp-call" — the host ignores the message entirely.');
+  }
+  return problems;
+}
+
 async function verifyWidgetHealth(solution_id, sid) {
   // 1. Declared plugins — solution.ui_plugins[]
   let declared = [];
@@ -289,6 +320,36 @@ async function verifyWidgetHealth(solution_id, sid) {
     }
     return { id: id || "(missing)", discovered: !!found, render_ok, problems };
   });
+
+  // 4. PROTOCOL CHECK on the served HTML. Steps 1-3 prove a widget is declared,
+  //    discovered and renderable — none of which catches a widget that renders
+  //    and then silently times out on every call.
+  //    Read the SOURCE we serve rather than fetching the rendered iframe: the
+  //    source is what a fix would edit, and it needs no browser or signed URL.
+  //    Plugin ids are `mcp:<connector>:<name>`, so one source read per connector
+  //    covers all of its widgets.
+  const connectorsSeen = new Map();   // connectorId -> [{path, content}]
+  for (const p of plugins) {
+    const connectorId = String(p.id || "").startsWith("mcp:") ? String(p.id).split(":")[1] : null;
+    if (!connectorId) continue;
+    if (!connectorsSeen.has(connectorId)) {
+      try {
+        const src = await get(`/deploy/solutions/${solution_id}/connectors/${connectorId}/source`, sid);
+        connectorsSeen.set(connectorId, Array.isArray(src?.files) ? src.files : []);
+      } catch {
+        connectorsSeen.set(connectorId, []);   // unreadable source is not a verdict
+      }
+    }
+    const html = (connectorsSeen.get(connectorId) || [])
+      .filter((f) => /ui-dist\/.*\.html$/.test(f?.path || ""))
+      .map((f) => f?.content || "")
+      .join("\n");
+    const protoProblems = _widgetProtocolProblems(html);
+    if (protoProblems.length) {
+      p.problems.push(...protoProblems);
+      p.fix_with = `Fix the widget's postMessage code and redeploy: ateam_github_patch(solution_id, "connectors/${connectorId}/ui-dist/<widget>/index.html", ...) then ateam_upload_connector(solution_id, "${connectorId}", github:true). The exact working shape is in ateam_get_examples(type:"ui-plugin-iframe").`;
+    }
+  }
 
   const unhealthy = plugins.filter((p) => p.problems.length);
   return {
