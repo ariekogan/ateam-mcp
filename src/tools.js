@@ -5347,10 +5347,78 @@ const handlers = {
       gaps.push(`solution health unavailable: ${e.message}`);
     }
 
+    // 4. SMOKE CALL — actually invoke a tool the SOLUTION depends on.
+    //
+    // Everything above is tools/list-level: `connected`, `tools > 0`, "renders",
+    // "deployed". All of it stayed green on a clinic connector that answered
+    // tools/list correctly and returned 401 on EVERY storage call, because its
+    // generated client put a PAT in the shared-secret header. The build shipped,
+    // reported healthy, and failed the first time a user touched it. The only
+    // check that could have caught it is calling something.
+    //
+    // Tool names come from the SKILLS, not the connector: the connector
+    // endpoints expose a count and a description but no name (verified live —
+    // /connectors/<id>/tools returns 7 objects that are all {description:""}),
+    // and the tools a skill declares are the ones that actually have to work.
+    // Testing those is a better question than testing an arbitrary one.
+    out.smoke = [];
+    try {
+      const wanted = new Map();   // toolName -> connectorId (first skill that declares it)
+      for (const sk of Array.isArray(out.skills) ? out.skills : []) {
+        if (!sk?.id) continue;
+        const def = await get(`/deploy/solutions/${solution_id}/skills/${sk.id}`, sid).catch(() => null);
+        for (const t of (def?.skill?.tools || def?.tools || [])) {
+          const name = typeof t === "string" ? t : t?.name;
+          if (!name || wanted.has(name)) continue;
+          const conn = (typeof t === "object" && (t?.source?.connector || t?.source?.id)) || null;
+          wanted.set(name, conn);
+        }
+      }
+
+      // READ-SHAPED ONLY. A smoke test must never book an appointment or delete a
+      // row to prove a connector is alive, so a write-shaped name is skipped and
+      // SAID to be skipped rather than quietly passed over.
+      const readish = [...wanted.keys()].filter((n) => /(^|[._])(list|get|today|available|health|status|ping|info|search)([._]|$)/i.test(n));
+      const perConnector = new Map();
+      for (const name of readish) {
+        const conn = wanted.get(name) || (Array.isArray(out.connectors) && out.connectors[0]?.id) || null;
+        if (!conn || perConnector.has(conn)) continue;
+        perConnector.set(conn, name);
+      }
+
+      for (const c of Array.isArray(out.connectors) ? out.connectors : []) {
+        // DELIBERATELY NOT GATED ON c.connected. Connectors are LAZY — one idles
+        // back to sleep between step 1 and here, and the /call endpoint wakes it
+        // on demand. Skipping a sleeping connector would make this check silently
+        // untestable exactly when it is most needed, and "asleep" is not an
+        // answer to "do its calls work?". The call itself is the verdict.
+        const pick = perConnector.get(c.id);
+        if (!pick) {
+          out.smoke.push({ connector: c.id, called: null, note: "no read-shaped tool declared by any skill — NOT smoke-tested" });
+          gaps.push(`connector '${c.id}' was not smoke-tested (no read-shaped tool declared by a skill); tools/list working does NOT prove its calls succeed`);
+          continue;
+        }
+        try {
+          const r = await post(`/deploy/solutions/${solution_id}/connectors/${c.id}/call`, { tool: pick, args: {} }, sid);
+          const failed = r?.ok === false;
+          out.smoke.push({ connector: c.id, called: pick, ok: !failed, ...(failed && { error: String(r?.error || "").slice(0, 200) }) });
+          if (failed) {
+            gaps.push(`connector '${c.id}' lists ${c.tools} tool(s) but CALLING ${pick} failed: ${String(r?.error || "").slice(0, 160)} — tools/list works and real calls do not`);
+          }
+        } catch (e) {
+          out.smoke.push({ connector: c.id, called: pick, ok: false, error: e.message.slice(0, 200) });
+          gaps.push(`connector '${c.id}' smoke call ${pick} errored: ${e.message.slice(0, 160)}`);
+        }
+      }
+    } catch (e) {
+      out.smoke = { error: e.message };
+      gaps.push(`smoke check could not run: ${e.message}`);
+    }
+
     out.gaps = gaps;
     out.ok = gaps.length === 0;
     out._status = out.ok
-      ? "✅ Verified live — connectors connected, widgets render, skills deployed."
+      ? "✅ Verified live — connectors connected AND answering real calls, widgets render, skills deployed."
       : `⚠️ ${gaps.length} gap(s): ${gaps.slice(0, 5).join("; ")}${gaps.length > 5 ? " …" : ""}`;
     return out;
   },
