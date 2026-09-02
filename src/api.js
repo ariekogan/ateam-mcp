@@ -173,6 +173,27 @@ export function isExplicitlyAuthenticated(sessionId) {
  * Record activity on a session — called on every tool call.
  * Keeps the session alive and updates context for smarter UX.
  */
+/**
+ * Forget the session's bound actor.
+ *
+ * A session binds an actor from args or from a run-starting tool's result, and
+ * NOTHING ever unbound it — so a session that bound a bad value ("dev", a
+ * branch name a caller mistook for an actor) sent it on every later request
+ * forever, each one 401-ing with `Actor "dev" not found`. Restricting where a
+ * bind may come from narrows the entrance; it does not open an exit.
+ *
+ * Called when Core tells us the actor does not exist. Self-healing beats a
+ * hint telling a human to re-authenticate a key that was never the problem.
+ */
+export function clearSessionActor(sessionId, reason = "") {
+  const session = sessionId ? sessions.get(sessionId) : null;
+  if (!session?.context?.actorId) return false;
+  const had = session.context.actorId;
+  delete session.context.actorId;
+  console.warn(`[Auth] Unbound session actor "${had}"${reason ? ` — ${reason}` : ""}. Later calls act as the tenant until an actor is passed again.`);
+  return true;
+}
+
 export function touchSession(sessionId, { toolName, solutionId, skillId, actorId } = {}) {
   const session = sessions.get(sessionId);
   if (!session) return;
@@ -641,6 +662,15 @@ async function request(method, path, body, sessionId, opts = {}) {
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
+        // SELF-HEAL A BAD ACTOR BINDING. Core saying `Actor "X" not found` is
+        // proof the session is carrying an actor that does not exist, and every
+        // subsequent request would send it again. Restricting where a bind may
+        // come from narrows the entrance; this is the exit. Unbinding costs
+        // nothing when the actor was genuinely wrong, and the next call simply
+        // acts as the tenant until a real actor is passed.
+        if (res.status === 401 && /Actor\s+\\?"?[^"\\,}]+\\?"?\s+not found|unknown actor/i.test(text)) {
+          clearSessionActor(sessionId, `Core rejected it on ${method} ${path}`);
+        }
         // Attach the HTTP status so callers can distinguish a genuine 404
         // (resource absent) from a transient/5xx failure. ateam_patch relies
         // on this to NOT scaffold-clobber an existing skill on a read error.
