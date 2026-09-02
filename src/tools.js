@@ -19,6 +19,17 @@ import {
 // (tenant + the app URL to view the change). ateam-mcp is a PUBLIC MCP used
 // from non-desktop clients too, so the location must live IN the tool result
 // — not only in a desktop plugin's SKILL.md. Read-only/global tools skip it.
+// Tools that START a run and therefore MINT the actor that ran it. Only these
+// may rebind the session's actor — see the call site for what accepting it from
+// any result cost.
+const ACTOR_MINTING_TOOLS = new Set([
+  "ateam_conversation",
+  "ateam_test_skill",
+  "ateam_solution_chat",
+  "ateam_test_pipeline",
+  "ateam_test_voice",
+]);
+
 const STAMP_WHERE_TOOLS = new Set([
   "ateam_build_and_run", "ateam_patch", "ateam_upload_connector", "ateam_redeploy",
   "ateam_create_skill", "ateam_create_connector", "ateam_create_plugin",
@@ -6129,7 +6140,19 @@ export async function handleToolCall(name, args, sessionId) {
     // it on the way out so the follow-up ateam_get_execution_logs /
     // ateam_get_metrics on that very job is not refused for not knowing who ran
     // it — the single most common dead end when debugging a run.
-    if (result && typeof result === "object" && result.actor_id) {
+    //
+    // ONLY FROM TOOLS THAT ACTUALLY MINT ONE. This used to accept `actor_id` off
+    // ANY tool's result, so a single unrelated payload carrying that field
+    // silently repointed the whole session — observed on a clean e2e where every
+    // later call 401'd with `Actor "dev" not found`, from an agent that had
+    // never sent an actor at all. A session that binds to a non-existent actor
+    // never recovers on its own, because nothing ever unbinds it.
+    //
+    // The generated-thread-key filter in api.js does not help here: it rejects
+    // test_<ts>_<rand>, and a short literal like "dev" walks straight past it.
+    // An allow-list of minting tools is the honest boundary — "who ran this job"
+    // is knowledge only the tools that START a job possess.
+    if (result && typeof result === "object" && result.actor_id && ACTOR_MINTING_TOOLS.has(name)) {
       touchSession(sessionId, { actorId: result.actor_id });
     }
 

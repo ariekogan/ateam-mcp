@@ -487,6 +487,30 @@ function formatError(method, path, status, body, baseUrl) {
     503: "A-Team API is temporarily unavailable. Try again in a minute.",
   };
 
+  // A 401 IS NOT ALWAYS AN AUTH PROBLEM, AND SAYING SO COSTS A RUN.
+  //
+  // The table below attaches "your API key may be invalid or expired — get a
+  // new key and call ateam_auth" to EVERY 401, by status code, never by cause.
+  // Core also returns 401 for `Actor "X" not found`, where the key is perfectly
+  // valid and the actor is the problem. A PROD agent believed that hint this
+  // morning, stopped, and asked the admin to paste an API key — for an error
+  // that had nothing to do with keys. An error naming the wrong remedy does not
+  // just fail; it sends someone competent in the wrong direction.
+  if (status === 401) {
+    const t = typeof body === "string"
+      ? body
+      : (() => { try { return JSON.stringify(body || ""); } catch { return ""; } })();
+    const m = /Actor\s+\\?"([^"\\]+)\\?"\s+not found|unknown actor\s+\\?"?([^"\\,}]+)/i.exec(t);
+    if (m) {
+      const who = (m[1] || m[2] || "").trim();
+      hints[401] =
+        `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
+        `Re-authenticating will not help. Either pass a real actor id (the one ateam_conversation returned for the thread), ` +
+        `or omit the actor entirely to act as the tenant. If you never sent an actor, the session is bound to a stale one: ` +
+        `call ateam_auth again to reset the session binding.`;
+    }
+  }
+
   // A 500 THAT NAMES A MISSING CONFIGURATION IS NOT "TRY AGAIN IN A MINUTE".
   //
   // /chat answered 500 {"message":"OPENAI_API_KEY is not set"} and this table
