@@ -4966,7 +4966,25 @@ const handlers = {
       throw new Error("Pass chain_id (the whole run — recommended) or job_id. ateam_conversation returns chain_id.");
     }
     if (!skill_id) {
-      throw new Error(`job_id "${job_id}" needs skill_id too — the per-job endpoint is scoped by skill. Pass chain_id instead to poll the whole run without knowing which skill ran it.`);
+      // ASK FOR NOTHING THE TOOL CAN WORK OUT ITSELF. This used to throw
+      // "job_id needs skill_id too — pass chain_id instead". The message was
+      // accurate and well-written, and it was reached by FAILING FIRST, every
+      // time: 4 occurrences on 4 different job ids in a single clean e2e, each
+      // one a wasted turn. A good error still costs a round trip.
+      //
+      // /deploy/jobs/:id/status resolves ANY job id — it is the same endpoint
+      // the chain path above already uses — so a job id without a skill needs no
+      // skill at all. `scope` says which question was answered, because "this
+      // job" and "the whole run" genuinely differ: a root job can read completed
+      // while a handoff is still running.
+      const data = await get(`/deploy/jobs/${encodeURIComponent(job_id)}/status`, sid);
+      return {
+        ok: true,
+        scope: "job",
+        job_id,
+        ...data,
+        _note: `Answered for THIS JOB. For the whole run — including handoffs a root job does not cover — pass chain_id instead${data?.chainId ? ` (this job's chain is "${data.chainId}")` : ""}.`,
+      };
     }
     // Existing single-job snapshot via Builder (unchanged shape for back-compat).
     const single = await get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
