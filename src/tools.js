@@ -594,9 +594,9 @@ export const tools = [
       properties: {
         topic: {
           type: "string",
-          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "monitoring"],
+          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "monitoring"],
           description:
-            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
+            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
         section: {
           type: "string",
@@ -2497,6 +2497,10 @@ const SPEC_PATHS = {
   "sub-agent": "/spec/sub-agent",
   "consumer-roles": "/spec/consumer-roles",
   "mobile-connector": "/spec/mobile-connector",
+  // GENERATED from the mobile SDK's own contract + status doc, not written by
+  // hand: the hand-written version drifted in 19 days and a builder designed
+  // away from a capability that had shipped.
+  "device-capabilities": "/spec/device-capabilities",
 };
 
 const EXAMPLE_PATHS = {
