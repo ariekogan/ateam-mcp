@@ -594,9 +594,9 @@ export const tools = [
       properties: {
         topic: {
           type: "string",
-          enum: ["overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "monitoring"],
+          enum: ["capabilities", "overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "monitoring"],
           description:
-            "What to fetch: 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
+            "What to fetch: 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
         section: {
           type: "string",
@@ -2501,6 +2501,12 @@ const SPEC_PATHS = {
   // hand: the hand-written version drifted in 19 days and a builder designed
   // away from a capability that had shipped.
   "device-capabilities": "/spec/device-capabilities",
+  // THE FRONT DOOR. Every other topic is named after one of OUR artifacts;
+  // this one is named after what a solution DOES ("can I see? can I talk with
+  // them? do I know where they are?"). It holds no capability facts of its own
+  // — device answers are computed from the generated matrix — so it points
+  // without being able to go stale.
+  capabilities: "/spec/capabilities",
 };
 
 const EXAMPLE_PATHS = {
@@ -3127,6 +3133,7 @@ const handlers = {
       summary: "A-Team is a platform for building governed AI Teams as complete operational solutions.",
     },
     design_advisor: {
+      _first_call: "ateam_get_spec(topic:'capabilities') — the capability index, organised by what a solution DOES ('can I see? can I talk with them out loud? do I know where they are and that they are moving? can I act while they sleep? can I remember each user? can I show them something?'). Read it BEFORE the advisor: it needs no auth, no tenant and no LLM, so it cannot be down, and it is the only entry point you can find by thinking about YOUR problem rather than our vocabulary. Every other spec topic is named after one of our build artifacts.",
       _important: "BEFORE and WHILE you design any skill/solution you MUST consult ateam_design_advisor. You do NOT know which platform capabilities exist or when to use them — the advisor does. Describe your goal to it and it returns pointers to the right capabilities (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill handoff, GitHub, …) with the /spec topic to read next and the tool to wire each. It's advisory — you decide and own the design — but skipping it means you'll miss capabilities the platform already provides.",
       how: "ateam_design_advisor({ goal: '<what you are building, in your words>', design_state: {} }). Re-call it as the design evolves (pass the current design_state) to get 'what's still missing' hints. Then ateam_get_spec(topic) for any capability it points you to. For anything deeper — details, examples, or topics outside the capability list — ateam_spec_search({ query: '<how do I…>' }) does a semantic search over the FULL spec docs.",
       // A MANDATE WITH NO FALLBACK IS A SINGLE POINT OF FAILURE, and it failed:
@@ -3136,7 +3143,9 @@ const handlers = {
       // and concluded a capability was absent that had shipped. Name the other
       // doors here, at the point where the obligation is stated.
       if_the_advisor_does_not_answer:
-        "It is not the only door and you are NOT stuck. ateam_get_spec(topic:'device-capabilities') is the GENERATED " +
+        "It is not the only door and you are NOT stuck. ateam_get_spec(topic:'capabilities') is the question-shaped " +
+        "capability index — every 'can I …?' with a one-word answer and where to read next, no LLM and no tenant " +
+        "required. ateam_get_spec(topic:'device-capabilities') is the GENERATED " +
         "capability matrix (what the phone can do, per API, with status) and ateam_spec_search({query}) searches the full " +
         "spec corpus — neither has an LLM in the path, so neither fails the way the advisor can. If the advisor answers " +
         "with `truncated: true`, what you got is CORRECT but INCOMPLETE: use it, and treat a capability's absence as " +

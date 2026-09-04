@@ -79,6 +79,16 @@ check(
 // a builder is back to reading whichever topic happens to mention the camera.
 check("the generated device capability matrix is reachable", enumValues.includes("device-capabilities"));
 
+// The question-shaped index is the ONE topic a newcomer can find by thinking
+// about their own problem rather than our vocabulary. If it stops being
+// offered, an agent is back to guessing which artifact doc mentions a camera —
+// which is what the 2026-09-04 acceptance run did, badly.
+check("the capability index is reachable", enumValues.includes("capabilities"));
+check("  and bootstrap names it as the FIRST call",
+  /_first_call[\s\S]{0,200}topic:'capabilities'/.test(SRC));
+check("  and the advisor's fallback names it too",
+  /if_the_advisor_does_not_answer[\s\S]{0,300}topic:'capabilities'/.test(SRC));
+
 // ── A 404 from /spec must not blame a solution ──────────────────────────────
 // The generic 404 hint says "check the solution_id or skill_id". /spec takes
 // neither, so asking for a topic a deployment has not shipped yet — which is
