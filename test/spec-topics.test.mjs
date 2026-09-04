@@ -18,6 +18,7 @@
 // Run: node test/spec-topics.test.mjs
 
 import { readFileSync } from "node:fs";
+import { formatError } from "../src/api.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -77,6 +78,33 @@ check(
 // The device matrix is the answer to "can the phone do X". It is reachable, or
 // a builder is back to reading whichever topic happens to mention the camera.
 check("the generated device capability matrix is reachable", enumValues.includes("device-capabilities"));
+
+// ── A 404 from /spec must not blame a solution ──────────────────────────────
+// The generic 404 hint says "check the solution_id or skill_id". /spec takes
+// neither, so asking for a topic a deployment has not shipped yet — which is
+// exactly what happens while a tool is ahead of a backend — sent the reader
+// hunting a solution that was never in the request.
+console.log("404 on a spec path");
+
+const specMsg = formatError("GET", "/spec/device-capabilities", 404, "Cannot GET /spec/device-capabilities", "https://api.ateam-ai.com");
+// Bans the ACTION, not the word. The hint is allowed to say "takes no
+// solution_id" — that is the disclaimer. What it must never do is send the
+// reader off to find one.
+check("does NOT send the reader hunting a solution",
+  !/ateam_list_solutions/i.test(specMsg) && !/Check the solution_id/i.test(specMsg));
+check("names the deployment that answered", specMsg.includes("https://api.ateam-ai.com"));
+check("names the topic that was not served", specMsg.includes("device-capabilities"));
+check("says retrying will not help", /Retrying will not/i.test(specMsg));
+
+// The generic 404 must be UNCHANGED — this is a narrowing, not a replacement.
+const solMsg = formatError("GET", "/solutions/nope", 404, "not found", "https://api.ateam-ai.com");
+check("a real resource 404 still points at solution_id/skill_id",
+  /solution_id/.test(solMsg) && /ateam_list_solutions/.test(solMsg));
+
+// /specification-ish paths must not be swallowed by a sloppy prefix match.
+const otherMsg = formatError("GET", "/specials/x", 404, "not found", "https://api.ateam-ai.com");
+check("a path merely starting with /spec is not treated as a spec topic",
+  /solution_id/.test(otherMsg));
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

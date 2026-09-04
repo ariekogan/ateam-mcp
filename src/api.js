@@ -493,8 +493,11 @@ function headers(sessionId) {
 
 /**
  * Format an API error into a user-friendly message with actionable hints.
+ *
+ * Exported so the hints can be TESTED as behaviour rather than as source text.
+ * A test that greps for the right-looking code passes on code that never runs.
  */
-function formatError(method, path, status, body, baseUrl) {
+export function formatError(method, path, status, body, baseUrl) {
   const hints = {
     400: "Bad request — see the error details above for what to fix.",
     401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call ateam_auth(api_key: \"your_key\").",
@@ -530,6 +533,23 @@ function formatError(method, path, status, body, baseUrl) {
         `or omit the actor entirely to act as the tenant. If you never sent an actor, the session is bound to a stale one: ` +
         `call ateam_auth again to reset the session binding.`;
     }
+  }
+
+  // A 404 ON /spec IS NOT A MISSING SOLUTION.
+  //
+  // The table answers every 404 with "check the solution_id or skill_id".
+  // /spec/* takes neither. Asking for a topic this deployment does not serve —
+  // which happens the moment the tool ships ahead of the backend, as
+  // device-capabilities did on 2026-09-04 — sent the reader looking for a
+  // solution that was never involved. The environment is the whole answer, so
+  // name it: the same call against a newer deployment succeeds.
+  if (status === 404 && /^\/spec(\/|$)/.test(String(path || ""))) {
+    const topic = String(path).replace(/^\/spec\/?/, "") || "(index)";
+    hints[404] =
+      `Nothing to do with solutions — /spec takes no solution_id or skill_id. The A-Team API at ` +
+      `${baseUrl || "this URL"} does not serve the topic "${topic}". Either the topic name is wrong (ateam_get_spec ` +
+      `with topic:"overview" lists what this deployment has), or this backend is OLDER than the tool you are ` +
+      `calling from and the topic has not been deployed here yet. Retrying will not change either.`;
   }
 
   // A 500 THAT NAMES A MISSING CONFIGURATION IS NOT "TRY AGAIN IN A MINUTE".
