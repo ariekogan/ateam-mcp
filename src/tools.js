@@ -3129,6 +3129,18 @@ const handlers = {
     design_advisor: {
       _important: "BEFORE and WHILE you design any skill/solution you MUST consult ateam_design_advisor. You do NOT know which platform capabilities exist or when to use them — the advisor does. Describe your goal to it and it returns pointers to the right capabilities (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill handoff, GitHub, …) with the /spec topic to read next and the tool to wire each. It's advisory — you decide and own the design — but skipping it means you'll miss capabilities the platform already provides.",
       how: "ateam_design_advisor({ goal: '<what you are building, in your words>', design_state: {} }). Re-call it as the design evolves (pass the current design_state) to get 'what's still missing' hints. Then ateam_get_spec(topic) for any capability it points you to. For anything deeper — details, examples, or topics outside the capability list — ateam_spec_search({ query: '<how do I…>' }) does a semantic search over the FULL spec docs.",
+      // A MANDATE WITH NO FALLBACK IS A SINGLE POINT OF FAILURE, and it failed:
+      // on 2026-09-04 the advisor errored three times for one design and the
+      // agent, told to consult it and given nowhere else to go, fell back to
+      // reading whichever spec topic happened to mention the thing it wanted —
+      // and concluded a capability was absent that had shipped. Name the other
+      // doors here, at the point where the obligation is stated.
+      if_the_advisor_does_not_answer:
+        "It is not the only door and you are NOT stuck. ateam_get_spec(topic:'device-capabilities') is the GENERATED " +
+        "capability matrix (what the phone can do, per API, with status) and ateam_spec_search({query}) searches the full " +
+        "spec corpus — neither has an LLM in the path, so neither fails the way the advisor can. If the advisor answers " +
+        "with `truncated: true`, what you got is CORRECT but INCOMPLETE: use it, and treat a capability's absence as " +
+        "UNKNOWN rather than 'no' — re-ask with a narrower goal, or check the two tools above.",
     },
     what_is_a_team: {
       definition: "A Team is a structured multi-role AI system composed of Skills, Connectors, Governance contracts, and Managed Runtime deployment.",
