@@ -84,6 +84,9 @@ check("the generated device capability matrix is reachable", enumValues.includes
 // offered, an agent is back to guessing which artifact doc mentions a camera —
 // which is what the 2026-09-04 acceptance run did, badly.
 check("the capability index is reachable", enumValues.includes("capabilities"));
+// WHETHER without HOW is where the 2026-09-04 build failed: the agent knew the
+// camera existed and still implemented continuous guidance as a photo loop.
+check("the realization catalog is reachable", enumValues.includes("realizations"));
 check("  and bootstrap names it as the FIRST call",
   /_first_call[\s\S]{0,200}topic:'capabilities'/.test(SRC));
 check("  and the advisor's fallback names it too",
