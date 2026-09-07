@@ -3957,12 +3957,28 @@ const handlers = {
       health,
       ...(widget_health && { widget_health }),
       ...(test_result && { test_result }),
-      ...(github_result && !github_result.error && !github_result.skipped && { github: github_result }),
+      // The GitHub outcome is reported WHATEVER it was. Filtering out the error
+      // case left a failed push visible only inside `phases` — which nothing
+      // reads — while _status went on claiming the push succeeded.
+      ...(github_result && { github: github_result }),
       ...(agent_doc_result && !agent_doc_result.error && { agent_doc: agent_doc_result }),
       ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
-      _status: widget_health && !widget_health.ok
-        ? `✅ Deployed to Core + pushed to main. ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
-        : '✅ Deployed to Core + pushed to main.',
+      // _status must describe WHAT HAPPENED. It previously asserted
+      // "pushed to main" unconditionally — when the push failed, when it was
+      // skipped (GitHub disabled, or push_to_github not opted in), and when no
+      // push was attempted at all. Worse, its only variable was widget_health,
+      // an unrelated flag: whether the code reached GitHub could not change the
+      // sentence claiming the code reached GitHub.
+      _status: [
+        '✅ Deployed to Core',
+        github_result?.error ? `⚠️ GitHub push FAILED: ${github_result.error}`
+          : github_result?.skipped ? `⚠️ GitHub push skipped${github_result.reason ? ` (${github_result.reason})` : ''} — Core and GitHub now differ`
+          : github_result ? '+ pushed to main'
+          : '⚠️ no GitHub push attempted — Core and GitHub may differ',
+        ...(widget_health && !widget_health.ok
+          ? [`⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`]
+          : []),
+      ].join(' '),
       _next: 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
     };
   },
