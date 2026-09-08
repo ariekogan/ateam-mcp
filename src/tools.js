@@ -633,9 +633,9 @@ export const tools = [
       properties: {
         type: {
           type: "string",
-          enum: ["skill", "connector", "connector-ui", "solution", "script-cache-skill", "ui-plugin-native", "index"],
+          enum: ["skill", "connector", "connector-ui", "solution", "script-cache-skill", "ui-plugin-native", "ui-plugin-iframe", "device-tools", "index"],
           description:
-            "Example type: 'skill' = Order Support Agent, 'connector' = stdio MCP connector, 'connector-ui' = UI-capable connector, 'solution' = full 3-skill e-commerce solution, 'script-cache-skill' = fat-tool skill with script_cache opt-in (reference implementation of script-level JIT shortcuts — study this before building any browser-automation skill), 'ui-plugin-native' = complete working React Native (mobile) UI plugin (rn-src/index.tsx + esbuild build:rn → rn-bundle, @adas/plugin-sdk, es2015), 'index' = list all available examples",
+            "Example type: 'skill' = Order Support Agent, 'connector' = stdio MCP connector, 'connector-ui' = UI-capable connector, 'solution' = full 3-skill e-commerce solution, 'script-cache-skill' = fat-tool skill with script_cache opt-in (reference implementation of script-level JIT shortcuts — study this before building any browser-automation skill), 'ui-plugin-native' = complete working React Native (mobile) UI plugin (rn-src/index.tsx + esbuild build:rn → rn-bundle, @adas/plugin-sdk, es2015), 'ui-plugin-iframe' = complete working web (iframe) UI plugin with the postMessage protocol, 'device-tools' = a solution's OWN tools that execute ON THE PHONE (runtime:\"device\") — BOTH halves and why they must agree: the plugin-bundle implementation, the connector manifest that declares it (Core cannot introspect a phone, so the manifest is the entire contract), and the skill wiring without which the skill gets none of them. Read this before designing anything that needs a LIVE device reading rather than the last synced one, 'index' = list all available examples",
         },
       },
       required: ["type"],
@@ -2522,6 +2522,8 @@ const EXAMPLE_PATHS = {
   solution: "/spec/examples/solution",
   "script-cache-skill": "/spec/examples/script-cache-skill",
   "ui-plugin-native": "/spec/examples/ui-plugin-native",
+  "ui-plugin-iframe": "/spec/examples/ui-plugin-iframe",
+  "device-tools": "/spec/examples/device-tools",
 };
 
 // Tools that are tenant-aware — require EXPLICIT ateam_auth (env vars alone not enough).
@@ -3559,7 +3561,18 @@ const handlers = {
 
   ateam_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
 
-  ateam_get_examples: async ({ type }, sid) => get(EXAMPLE_PATHS[type], sid),
+  ateam_get_examples: async ({ type }, sid) => {
+    // An unknown type used to reach get(undefined) and fetch the API root, so a
+    // typo answered with something that looked like a valid response. Say what
+    // exists instead — the caller cannot see this map.
+    const path = EXAMPLE_PATHS[type];
+    if (!path) {
+      throw new Error(
+        `Unknown example type "${type}". Available: ${Object.keys(EXAMPLE_PATHS).join(", ")}.`
+      );
+    }
+    return get(path, sid);
+  },
 
   // Design-time capability advisor. Proxies to the Builder's /spec/advisor
   // (LLM over the curated capability catalog). Public endpoint (auth-exempt),
