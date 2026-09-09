@@ -16,6 +16,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { tools, handlers } from "../src/tools.js";
 
 const byName = (n) => tools.find((t) => t.name === n);
@@ -217,5 +218,35 @@ describe("recovery reports its refusal as a decision, not a failure to retry pas
       );
       assert.equal(sentBody.force, false, "a truthy string was forwarded as force:true");
     } finally { global.fetch = origFetch; }
+  });
+});
+
+describe('build_and_run does not restart a phone-side connector', () => {
+  // Phase 2.5 uploads source for every connector that HAS files, and a
+  // runtime:"device" connector does have authored source — the RN bundle. So it
+  // looked like an ordinary connector, the upload 409'd on the merge, and health
+  // then marked it "error": a failed deploy for a connector working as designed.
+  const SRC = readFileSync(new URL('../src/tools.js', import.meta.url), 'utf8');
+  const CODE = SRC.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+
+  test('the restart loop skips connectors declared runtime:"device"', () => {
+    assert.match(CODE, /deviceConnectorIds\.has\(connId\)/,
+      'Phase 2.5 no longer skips device connectors — it will upload the phone bundle and 409');
+  });
+
+  test('and classifies them from the DECLARED connectors, not from Core', () => {
+    // Asking Core would put the classification one outage away from re-breaking:
+    // an unreachable Core turns the phone back into a server.
+    // Just the CLASSIFICATION, not the loop that follows it — the loop legitimately
+    // posts uploads for ordinary connectors, and including it made this assertion
+    // fail on correct code.
+    const block = CODE.slice(CODE.indexOf('const deviceConnectorIds'), CODE.indexOf('if (effectiveMcpStore'));
+    assert.match(block, /\(connectors \|\| \[\]\)/, 'device ids are not derived from the authored connectors[]');
+    assert.doesNotMatch(block, /await (get|post)\(/, 'the restart phase asks a service to classify a connector');
+  });
+
+  test('a skipped device connector is reported, not silently dropped', () => {
+    assert.match(CODE, /skipped: "device_runtime"/,
+      'the skip is invisible in the result — a reader cannot tell it was deliberate');
   });
 });

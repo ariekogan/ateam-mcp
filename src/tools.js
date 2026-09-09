@@ -3926,10 +3926,29 @@ export const handlers = {
     }
 
     // Phase 2.5: Restart connectors that have source code (upload triggers stop+start)
+    //
+    // A runtime:"device" connector is SKIPPED. It has authored source — the RN
+    // bundle (rn-src/, package.json, the esbuild config) — so it looks like an
+    // ordinary connector to a loop that only asks "does it have files?". But
+    // there is no server process to restart: the bundle ships to the phone.
+    // Uploading it here 409s on the merge and then health marked the connector
+    // "error", failing a deploy whose connector was working as designed.
+    //
+    // Classified from the DECLARED connectors[], which the caller authored —
+    // not by asking Core. Same ownership rule the Builder now follows.
+    const deviceConnectorIds = new Set(
+      (connectors || [])
+        .filter((c) => c && typeof c === "object" && c.runtime === "device" && c.id)
+        .map((c) => c.id),
+    );
     if (effectiveMcpStore && Object.keys(effectiveMcpStore).length > 0) {
       const connectorResults = [];
       for (const [connId, files] of Object.entries(effectiveMcpStore)) {
         if (!Array.isArray(files) || files.length === 0) continue;
+        if (deviceConnectorIds.has(connId)) {
+          connectorResults.push({ id: connId, ok: true, tools: 0, skipped: "device_runtime" });
+          continue;
+        }
         try {
           const uploadResult = await post(
             `/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
