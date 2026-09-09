@@ -1856,7 +1856,9 @@ export const tools = [
     name: "ateam_get_connector_source",
     core: true,
     description:
-      `Read the source code files of a deployed MCP connector. Returns all files (server.js, package.json, etc.) stored in the mcp_store for this connector. Use this BEFORE patching or rewriting a connector — always read the current code first so you can make surgical fixes instead of blind full rewrites.`,
+      `Read a connector's AUTHORED source — the code the Builder holds as the source of record (its authored store, or GitHub). Returns a file manifest, or one file's content with path:'<file>'. Use this BEFORE patching or rewriting a connector, so you make surgical fixes instead of blind full rewrites. Every answer carries `+
+      `\`provenance\` (authored_fs | github) so you know which store you are reading.\n\n` +
+      `This does NOT return what Core is currently RUNNING. Those are different questions and used to share one answer: a connector could be deployed and healthy while no authored copy of it existed anywhere, and this tool would hand back the runtime bytes as though they were the source. If there is no authored source you get AUTHORED_SOURCE_MISSING, not a silent substitute. To see the deployed copy use ateam_get_deployed_connector_source; to adopt it as authored source use ateam_recover_connector_source.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1871,6 +1873,45 @@ export const tools = [
         path: {
           type: "string",
           description: "Optional. Read ONE file (e.g. 'server.js', 'ui-dist/panel/index.html'). Omit to get a file manifest (paths + sizes, no content) — a whole connector's source exceeds the ~50KB output limit and truncates, so read files one at a time.",
+        },
+      },
+      required: ["solution_id", "connector_id"],
+    },
+  },
+  {
+    name: "ateam_get_deployed_connector_source",
+    core: true,
+    description:
+      `Read the DEPLOYED copy of a connector — the files ADAS Core is actually running. This is a runtime projection of the last successful deploy, NOT the source of record: it can differ from the authored source, and it may exist for a connector the Builder cannot reproduce at all. Answers carry authored_source_of_record:false so that is never in doubt.\n\n` +
+      `Use it to diagnose ("what is actually running?"), to compare against ateam_get_connector_source, or to inspect a connector whose authored source is missing before deciding whether to adopt it with ateam_recover_connector_source. Do NOT copy bytes out of here and re-upload them as if you had authored them — that launders a runtime copy into the source of record and hides the fact that the real source was lost.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        connector_id: { type: "string", description: "The connector ID to inspect" },
+        path: {
+          type: "string",
+          description: "Optional. Read ONE file. Omit for a manifest (paths + sizes) — a whole connector exceeds the output limit and truncates.",
+        },
+      },
+      required: ["solution_id", "connector_id"],
+    },
+  },
+  {
+    name: "ateam_recover_connector_source",
+    core: true,
+    description:
+      `ADOPT the deployed copy of a connector as its AUTHORED source. The only sanctioned Core→Builder direction, and deliberately explicit: it is never part of a deploy.\n\n` +
+      `Use it when a connector is running in Core but has no authored source (ateam_get_connector_source returns AUTHORED_SOURCE_MISSING) — the running bytes may be the only surviving copy of real work. The recovered files are STAMPED as recovered_from_core with a timestamp, so a reconstruction is never later mistaken for code someone wrote. Refuses with AUTHORED_SOURCE_EXISTS if authored source is already present; pass force:true only after comparing both copies and deciding the deployed one is the keeper.\n\n` +
+      `Binaries and files over 512KB cannot round-trip and are reported under not_recovered — they stay missing. Push the result to GitHub afterwards so the recovered source is not held in one place only.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        connector_id: { type: "string", description: "The connector ID to recover" },
+        force: {
+          type: "boolean",
+          description: "Overwrite EXISTING authored source with Core's deployed copy. Default false. Only after comparing the two — the deployed copy may be older than what was authored.",
         },
       },
       required: ["solution_id", "connector_id"],
@@ -2574,6 +2615,8 @@ const TENANT_TOOLS = new Set([
   "ateam_chain_status",
   "ateam_get_widget_catalog",
   "ateam_get_connector_source",
+  "ateam_get_deployed_connector_source",
+  "ateam_recover_connector_source",
   "ateam_get_metrics",
   "ateam_diff",
   "ateam_verify_consistency",
@@ -3127,7 +3170,12 @@ function chainTreeOf(resp) {
   };
 }
 
-const handlers = {
+// Exported for tests. handleToolCall below is the runtime entry point and stays
+// the only one production code should use; reaching a handler directly lets a
+// test EXECUTE it instead of asserting against this file's source text, which
+// is the difference between proving behaviour and matching a string that a
+// rename would quietly satisfy.
+export const handlers = {
   ateam_bootstrap: async () => ({
     runtime: {
       ateam_mcp_version: MCP_VERSION,
@@ -3272,7 +3320,7 @@ const handlers = {
     },
     advanced_tools: {
       _note: "These tools are available but hidden from the default tool list. Call them by name when you need fine-grained control.",
-      debugging: ["ateam_get_execution_logs", "ateam_connector_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source"],
+      debugging: ["ateam_get_execution_logs", "ateam_connector_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source", "ateam_get_deployed_connector_source"],
       manual_lifecycle: ["ateam_validate_skill", "ateam_validate_solution", "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector", "ateam_update", "ateam_redeploy"],
       async_testing: ["ateam_test_status", "ateam_test_abort"],
       other: ["ateam_upload_connector_files", "ateam_solution_chat"],
@@ -3646,6 +3694,12 @@ const handlers = {
     if (!mcp_store) {
       try {
         const ghStatus = await get(`/deploy/solutions/${solutionId}/github/status`, sid);
+        // repo_url only says a REPO EXISTS. It has never said the repo carries
+        // this solution's connector source, and treating the two as the same
+        // claim is how a connector with nothing in the repo used to slip
+        // through Phase 0 and then vanish from connectors[] below. The real
+        // per-connector answer comes from pull-bundle, and it is acted on
+        // there — this stays a cheap "is GitHub worth asking at all?" gate.
         if (ghStatus?.repo_url) {
           github = true;
         }
@@ -3690,13 +3744,30 @@ const handlers = {
         // shape to the connector id and dedupe, so a mis-keyed mcp_store can never
         // manufacture file-path connectors. (Core also rejects "/"-bearing ids at
         // its boundary as defense-in-depth.)
-        if (!connectors?.length && Object.keys(effectiveMcpStore).length > 0) {
-          const connIds = [...new Set(
-            Object.keys(effectiveMcpStore).map((k) => {
+        //
+        // B5 — A CONNECTOR WITH NO SOURCE IN THE REPO MUST NOT VANISH.
+        // Synthesizing purely from mcp_store keys means a declared connector the
+        // repo does not carry is simply ABSENT from connectors[], so nothing
+        // validates it, nothing reports it, and the deploy proceeds as though it
+        // were never part of the solution. Phase 0 made this likelier by
+        // treating "the repo exists" (repo_url) as "the repo has the source" —
+        // two different claims.
+        //
+        // pull-bundle now answers per connector, so union those ids in. A
+        // connector listed here still deploys when its authored source lives in
+        // the Builder's store; what it can no longer do is disappear.
+        const missingSource = Array.isArray(pullResult.connectors_missing_source)
+          ? pullResult.connectors_missing_source : [];
+        const unreadable = Array.isArray(pullResult.connectors_unreadable)
+          ? pullResult.connectors_unreadable : [];
+        if (!connectors?.length && (Object.keys(effectiveMcpStore).length > 0 || missingSource.length > 0)) {
+          const connIds = [...new Set([
+            ...Object.keys(effectiveMcpStore).map((k) => {
               const m = String(k).match(/^connectors\/([^/]+)\//);
               return m ? m[1] : k;
-            })
-          )];
+            }),
+            ...missingSource.map((c) => (typeof c === "string" ? c : c?.id)).filter(Boolean),
+          ])];
           connectors = connIds.map((id) => ({
             id,
             name: id,
@@ -3710,6 +3781,12 @@ const handlers = {
           connectors_found: pullResult.connectors_found || 0,
           files_loaded: pullResult.files_loaded || 0,
           connectors_synthesized: connectors?.length || 0,
+          // Named, not swallowed. The repo existing said nothing about these.
+          ...(missingSource.length > 0 && {
+            connectors_missing_source: missingSource,
+            note: "These connectors are declared but the repo carries no source for them. They are still deployed if the Builder holds their authored source; if it does not, validation refuses and ateam_get_connector_source / ateam_recover_connector_source tell you which.",
+          }),
+          ...(unreadable.length > 0 && { connectors_unreadable: unreadable }),
         });
       } catch (err) {
         return {
@@ -5247,8 +5324,46 @@ const handlers = {
   },
 
   ateam_get_connector_source: async ({ solution_id, connector_id, path }, sid) => {
-    const data = await get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
+    let data;
+    try {
+      data = await get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
+    } catch (err) {
+      // AUTHORED_SOURCE_MISSING is a real, actionable answer — not a lookup
+      // failure. Returning the raw 404 would send a caller hunting for a wrong
+      // solution_id, when the true state is "Core may be running this connector
+      // and nobody can reproduce it". Say that, and name the two tools that act
+      // on it, instead of leaving the agent to improvise a rewrite.
+      let parsed = null;
+      try { parsed = JSON.parse(err.body || "{}"); } catch { /* not JSON */ }
+      if (err.status === 404 && parsed?.code === "AUTHORED_SOURCE_MISSING") {
+        return {
+          ok: false,
+          code: "AUTHORED_SOURCE_MISSING",
+          connector_id,
+          error: parsed.error,
+          deployed_in_core: parsed.deployed_in_core === true,
+          next: parsed.deployed_in_core
+            ? [
+                `ateam_get_deployed_connector_source(solution_id:'${solution_id}', connector_id:'${connector_id}') — see what Core is actually running`,
+                `ateam_recover_connector_source(solution_id:'${solution_id}', connector_id:'${connector_id}') — adopt it as authored source, stamped as recovered`,
+              ]
+            : [`ateam_create_connector — nothing has been authored for this connector yet`],
+          warning: parsed.deployed_in_core
+            ? "Do NOT write a replacement from memory. A running connector's code is recoverable; an improvised rewrite silently replaces working code with a guess."
+            : undefined,
+        };
+      }
+      throw err;
+    }
     const files = Array.isArray(data?.files) ? data.files : [];
+    // Provenance travels with every answer. Without it a caller cannot tell the
+    // authored store from GitHub — and historically could not tell either from
+    // Core's runtime copy, which is how a lost source looked like a present one.
+    const prov = {
+      provenance: data?.provenance,
+      ...(data?.scheme && { scheme: data.scheme }),
+      authored_source_of_record: data?.authored_source_of_record !== false,
+    };
     // A whole connector's source easily exceeds the ~50KB tool-output ceiling and
     // truncates (you couldn't read the file you needed). So: no `path` → return a
     // FILE MANIFEST (paths + sizes, no content — small); with `path` → return just
@@ -5257,6 +5372,7 @@ const handlers = {
       return {
         ok: true,
         connector_id,
+        ...prov,
         files: files.map((f) => ({ path: f.path, bytes: (f.content || "").length, encoding: f.encoding || "utf8" })),
         total_bytes: files.reduce((n, f) => n + (f.content || "").length, 0),
         hint: "Large source is not returned inline. Call again with path:'<file>' to read one file (e.g. path:'server.js').",
@@ -5265,9 +5381,71 @@ const handlers = {
     const norm = String(path).replace(/^\.?\//, "");
     const file = files.find((f) => f.path === path || f.path === norm || f.path.replace(/^\.?\//, "") === norm);
     if (!file) {
-      return { ok: false, connector_id, error: `file '${path}' not found`, available: files.map((f) => f.path) };
+      return { ok: false, connector_id, ...prov, error: `file '${path}' not found`, available: files.map((f) => f.path) };
     }
-    return { ok: true, connector_id, path: file.path, encoding: file.encoding || "utf8", content: file.content };
+    return { ok: true, connector_id, ...prov, path: file.path, encoding: file.encoding || "utf8", content: file.content };
+  },
+
+  ateam_get_deployed_connector_source: async ({ solution_id, connector_id, path }, sid) => {
+    const data = await get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/deployed-source`, sid);
+    const files = Array.isArray(data?.files) ? data.files : [];
+    // The label rides on EVERY response shape, including the error one. A
+    // caller that reads one file out of here must not be able to forget which
+    // store it came from — that forgetting is the whole defect this splits.
+    const label = {
+      provenance: data?.provenance || "core_runtime",
+      authored_source_of_record: false,
+      note: "DEPLOYED copy from Core, not authored source. It reflects the last successful deploy and may differ from what the Builder can reproduce.",
+    };
+    if (!path) {
+      return {
+        ok: true,
+        connector_id,
+        ...label,
+        files: files.map((f) => ({ path: f.path, bytes: (f.content || "").length, encoding: f.encoding || "utf8" })),
+        total_bytes: files.reduce((n, f) => n + (f.content || "").length, 0),
+        hint: "Call again with path:'<file>' to read one file.",
+      };
+    }
+    const norm = String(path).replace(/^\.?\//, "");
+    const file = files.find((f) => f.path === path || f.path === norm || f.path.replace(/^\.?\//, "") === norm);
+    if (!file) {
+      return { ok: false, connector_id, ...label, error: `file '${path}' not found`, available: files.map((f) => f.path) };
+    }
+    return { ok: true, connector_id, ...label, path: file.path, encoding: file.encoding || "utf8", content: file.content };
+  },
+
+  ateam_recover_connector_source: async ({ solution_id, connector_id, force = false }, sid) => {
+    try {
+      const data = await post(
+        `/deploy/solutions/${solution_id}/connectors/${connector_id}/recover-from-core`,
+        { force: force === true },
+        sid,
+      );
+      return data;
+    } catch (err) {
+      // The refusal is the point of the tool, so report it as a decision the
+      // caller has to make rather than as a failure it should retry past.
+      let parsed = null;
+      try { parsed = JSON.parse(err.body || "{}"); } catch { /* not JSON */ }
+      if (err.status === 409 && parsed?.code === "AUTHORED_SOURCE_EXISTS") {
+        return {
+          ok: false,
+          code: "AUTHORED_SOURCE_EXISTS",
+          connector_id,
+          error: parsed.error,
+          next: [
+            `ateam_get_connector_source(solution_id:'${solution_id}', connector_id:'${connector_id}') — the authored copy`,
+            `ateam_get_deployed_connector_source(solution_id:'${solution_id}', connector_id:'${connector_id}') — the deployed copy`,
+            "Compare them. Only if the deployed copy is the one to keep, call again with force:true.",
+          ],
+        };
+      }
+      if (err.status === 404 && parsed?.code === "NOTHING_TO_RECOVER") {
+        return { ok: false, code: "NOTHING_TO_RECOVER", connector_id, error: parsed.error };
+      }
+      throw err;
+    }
   },
 
   // Render + write CLAUDE.md into the solution's GitHub repo.
