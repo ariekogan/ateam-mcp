@@ -39,18 +39,71 @@ const authOverrides = new Map();  // bearerToken → { tenant, apiKey, updatedAt
 const sessionBearers = new Map(); // sessionId → bearerToken
 
 /**
+ * THE ENVIRONMENTS A KEY MAY NAME. A CLOSED SET, deliberately.
+ *
+ * If this were an open pattern like [a-z]+, a typo — `adas_prd_…` — would
+ * become a NEW VALID ENVIRONMENT rather than an error, and the caller would be
+ * routed somewhere that does not exist instead of being told they mistyped.
+ * That is the same silent-wrong class as an environment fallback. Add an
+ * environment HERE, in one place, or it does not exist.
+ */
+export const KEY_ENVIRONMENTS = Object.freeze({
+  prod: "https://api.ateam-ai.com",
+  dev: "https://dev-api.ateam-ai.com",
+});
+
+const TENANT_RE = "[a-z0-9][a-z0-9-]{0,28}[a-z0-9]";
+const ENV_KEY_RE = new RegExp(`^adas_(${Object.keys(KEY_ENVIRONMENTS).join("|")})_(${TENANT_RE})_([0-9a-f]{32})$`);
+const PLAIN_KEY_RE = new RegExp(`^adas_(${TENANT_RE})_([0-9a-f]{32})$`);
+
+/**
  * Parse a tenant-embedded API key.
- * Format: adas_<tenant>_<32hex>
- * Legacy: adas_<32hex> (no tenant embedded)
- * @returns {{ tenant: string|null, isValid: boolean }}
+ * Format: adas_<env>_<tenant>_<32hex>   env ∈ prod|dev
+ * Older:  adas_<tenant>_<32hex>         (no environment named)
+ * Legacy: adas_<32hex>                  (no tenant either)
+ *
+ * The env form is tried FIRST, and the two cannot collide: the tenant charset
+ * has no underscore, so `adas_dev_acme_<hex>` can never match the older
+ * pattern. That is what makes accepting the new form purely additive.
+ *
+ * `env: null` means the key does not SAY which environment it belongs to — not
+ * that it is production. Nothing here defaults it; a caller that needs to know
+ * must treat null as unknown.
+ *
+ * @returns {{ env: string|null, tenant: string|null, isValid: boolean }}
  */
 export function parseApiKey(key) {
-  if (!key || typeof key !== 'string') return { tenant: null, isValid: false };
-  const match = key.match(/^adas_([a-z0-9][a-z0-9-]{0,28}[a-z0-9])_([0-9a-f]{32})$/);
-  if (match) return { tenant: match[1], isValid: true };
+  if (!key || typeof key !== 'string') return { env: null, tenant: null, isValid: false };
+  const withEnv = key.match(ENV_KEY_RE);
+  if (withEnv) return { env: withEnv[1], tenant: withEnv[2], isValid: true };
+  const match = key.match(PLAIN_KEY_RE);
+  if (match) return { env: null, tenant: match[1], isValid: true };
   const legacy = key.match(/^adas_([0-9a-f]{32})$/);
-  if (legacy) return { tenant: null, isValid: true };
-  return { tenant: null, isValid: false };
+  if (legacy) return { env: null, tenant: null, isValid: true };
+  return { env: null, tenant: null, isValid: false };
+}
+
+/** The API base a key's environment names, or null when it names none. */
+export function baseUrlForKeyEnv(key) {
+  const { env } = parseApiKey(key);
+  return env ? KEY_ENVIRONMENTS[env] : null;
+}
+
+/**
+ * Which known environment does this URL belong to? null = not a known host.
+ *
+ * Used to REFUSE a `url` that contradicts the key. Deliberately only recognises
+ * the known hosts: an unrecognised url (localhost, a staging box) is still
+ * allowed through, because the override exists for those — it just must not be
+ * a way to cross prod/dev by accident.
+ */
+export function envForBaseUrl(url) {
+  if (!url) return null;
+  const norm = String(url).replace(/\/+$/, "");
+  for (const [env, base] of Object.entries(KEY_ENVIRONMENTS)) {
+    if (norm === base) return env;
+  }
+  return null;
 }
 
 /**

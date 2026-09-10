@@ -11,7 +11,7 @@
 import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
-  getCredentials, parseApiKey, touchSession, getSessionContext,
+  getCredentials, parseApiKey, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere, getBaseUrl,
 } from "./api.js";
 
@@ -3542,8 +3542,36 @@ export const handlers = {
         message: `Could not resolve tenant from api_key (expected format: adas_<tenant>_<32hex>). Pass the "tenant" arg explicitly, or check that your API key is well-formed.`,
       };
     }
-    // Normalize URL: strip trailing slash
-    const apiUrl = url ? url.replace(/\/+$/, "") : undefined;
+    // ── THE KEY NAMES ITS ENVIRONMENT ──────────────────────────────────────
+    //
+    // One public MCP endpoint, and until now nothing about a session said which
+    // environment it was on: the caller passed `url` or silently got the prod
+    // default. A dev key at the prod base is just a 401, diagnosed after the
+    // fact (see the hint below) and never prevented. The process starts at the
+    // key, so the key carries the environment.
+    //
+    // NO FALLBACK, in either direction. A key that names an environment routes
+    // there and NOWHERE else; if that backend rejects it, that is the answer.
+    // Retrying the sibling host is how a dev key deploys to production.
+    const keyEnv = parseApiKey(api_key).env;
+    const explicitUrl = url ? url.replace(/\/+$/, "") : undefined;
+
+    // An explicit url that CONTRADICTS the key is refused here, locally, before
+    // any network call. The override still exists for unusual hosts (localhost,
+    // a staging box) — envForBaseUrl only recognises the known prod/dev hosts,
+    // so anything else passes through untouched. What it must never be is a way
+    // to cross environments by accident.
+    if (keyEnv && explicitUrl) {
+      const urlEnv = envForBaseUrl(explicitUrl);
+      if (urlEnv && urlEnv !== keyEnv) {
+        return {
+          ok: false,
+          message: `Refusing to authenticate: this key names the "${keyEnv}" environment, but url points at "${urlEnv}" (${explicitUrl}). One of them is wrong, and guessing which would mean operating on the wrong system. Drop the url argument to use the key's own environment, or use a key for "${urlEnv}".`,
+        };
+      }
+    }
+
+    const apiUrl = explicitUrl || baseUrlForKeyEnv(api_key) || undefined;
     setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true });
     // Persist override per bearer (survives session changes)
     setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl });
@@ -3554,6 +3582,11 @@ export const handlers = {
       return {
         ok: true,
         tenant: resolvedTenant,
+        // The environment is part of WHO YOU ARE NOW, so it is reported here and
+        // in ateam_bootstrap.runtime, from the same resolution — one question,
+        // one answer.
+        environment: envForBaseUrl(getBaseUrl(sessionId)) || keyEnv || null,
+        base_url: getBaseUrl(sessionId),
         message: `Authenticated to tenant "${resolvedTenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found.`,
       };
     } catch (err) {
