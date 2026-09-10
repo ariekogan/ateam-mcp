@@ -4693,8 +4693,36 @@ export const handlers = {
       ? ` ⚠️ Skill "${skill_id}" is INVALID (${validation.error_count ?? "?"} error(s)) — see validation (non-blocking; build_and_run will refuse until fixed).`
       : "";
 
+    // A PATCH THAT DID NOT REBUILD IS NOT A SUCCESSFUL PATCH.
+    //
+    // This returned ok:true whenever the write landed, even if the redeploy
+    // failed or timed out, on the reasoning that the edit "is not lost". The
+    // edit genuinely is not lost — but ok:true is not where that belongs.
+    //
+    // Changing skill.connectors[] makes the connector-derived half of tools[]
+    // STALE, and only the redeploy rebuilds it. So a green patch with a failed
+    // redeploy hands back exactly the state this whole fix exists to prevent: a
+    // skill whose declarations say one thing and whose generated tools still
+    // say another, reported as done. The caller stops, because it was told it
+    // succeeded.
+    //
+    // ok now reflects the LIFECYCLE — update, rebuild, validate, redeploy —
+    // and `patch_persisted` carries the "nothing was lost" fact as a field,
+    // where a caller can act on it, instead of as a lie in the status.
+    const lifecycleOk = redeployResult === undefined ? true : redeployOk;
+
     return {
-      ok: true,
+      ok: lifecycleOk,
+      ...(!lifecycleOk && {
+        patch_persisted: true,
+        phase: "redeploy",
+        error:
+          `The edit was saved to ${store} but the redeploy did not complete, so the skill's ` +
+          `connector-derived tools were NOT rebuilt. Nothing is lost and nothing needs re-patching — ` +
+          `the definition is stored. Finish it with ateam_redeploy(solution_id` +
+          (skill_id ? `, skill_id: "${skill_id}"` : "") + `). Until then Builder and Core disagree ` +
+          `about this skill's tools.`,
+      }),
       solution_id,
       source: isLocal ? "local" : "github",
       ...(degradedToLocal && {
@@ -4729,7 +4757,7 @@ export const handlers = {
         ? (widget_health && !widget_health.ok
             ? `✅ Patched on ${store} + redeployed. ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
             : `✅ Patched on ${store} + redeployed.`)
-        : `⚠️ Patched on ${store} ✅ but redeploy timed out. Run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
+        : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
         : 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
