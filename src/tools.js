@@ -3176,11 +3176,25 @@ function chainTreeOf(resp) {
 // is the difference between proving behaviour and matching a string that a
 // rename would quietly satisfy.
 export const handlers = {
-  ateam_bootstrap: async () => ({
+  // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
+  //
+  // getBaseUrl(sessionId) resolves per-session first (api.js:326-339): a caller
+  // that passed `url` to ateam_auth is talking to THAT api, and the session
+  // holds it. Bootstrap called it with NO argument, so it skipped the
+  // per-session and bearer branches every time and reported the process
+  // DEFAULT — https://api.ateam-ai.com.
+  //
+  // The result was a tool that says PROD while the session is authenticated to
+  // DEV, in the one field whose whole job is to tell you which environment you
+  // are on. Observed live: a session working entirely against
+  // dev-api.ateam-ai.com was told base_url: https://api.ateam-ai.com, and had
+  // to learn from deploy errors which environment it was actually on. The
+  // dangerous direction is the mirror image — believing you are on dev.
+  ateam_bootstrap: async (_args, sid) => ({
     runtime: {
       ateam_mcp_version: MCP_VERSION,
-      base_url: getBaseUrl(),
-      _note: "The version of the ateam-mcp process actually serving this call, and the API it talks to. If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
+      base_url: getBaseUrl(sid),
+      _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to (per-session, as set by ateam_auth's `url`). If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
     },
     platform_positioning: {
       name: "A-Team",
