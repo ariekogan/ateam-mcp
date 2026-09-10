@@ -180,23 +180,33 @@ export function startHttpServer(port = 3100) {
     next();
   };
 
-  // Bearer auth middleware chains for MCP routes:
-  // - "/" (Claude.ai): strict OAuth — Bearer token required
-  // - "/mcp" (ChatGPT): optional OAuth — validate Bearer if present, pass through if not
-  const mcpAuthStrict = bearerMiddleware
+  // Bearer auth middleware for MCP routes — STRICT ON BOTH PATHS.
+  //
+  // "/mcp" used to be optional-auth (704206e): validate a Bearer if one is
+  // present, otherwise let the request through so the caller could authenticate
+  // in-band with the ateam_auth tool. That reads as permissive, and it is —
+  // but permissiveness is not free, because SILENCE IS AN ANSWER TO A CLIENT.
+  //
+  // An OAuth client discovers that it must send a token by being REFUSED one
+  // that lacks it: 401 plus WWW-Authenticate pointing at the resource metadata
+  // (RFC 9728, and what the MCP authorization spec builds on). Answering 200 to
+  // an anonymous request tells the client the endpoint is public, so it never
+  // attaches the token it is holding.
+  //
+  // That is exactly what happened to ChatGPT, measured rather than guessed:
+  // 107 requests to /mcp, ZERO carrying an Authorization header, while the
+  // connector had completed OAuth and held a valid token. Every session was
+  // anonymous, so every tenant tool refused, and ChatGPT disabled the connector
+  // — a failure that looks like a broken server and is actually a server that
+  // never asked. The token was there the whole time.
+  //
+  // The in-band ateam_auth path is NOT lost: a client authenticates with its
+  // bearer and may still call ateam_auth to switch tenants or point at another
+  // environment. What is gone is authenticating with nothing at all, which
+  // never worked for an OAuth client anyway — it only looked like it did.
+  const mcpAuth = bearerMiddleware
     ? [autoInjectToken, bearerMiddleware]
     : [];
-
-  // Optional auth: if Bearer token present, validate it (sets req.auth for seedCredentials).
-  // If no token, let the request through — user can authenticate via ateam_auth tool.
-  const optionalBearerAuth = bearerMiddleware
-    ? (req, res, next) => {
-        if (!req.headers.authorization) return next();
-        bearerMiddleware(req, res, next);
-      }
-    : (_req, _res, next) => next();
-
-  const mcpAuthOptional = [autoInjectToken, optionalBearerAuth];
 
   // ─── CORS — required for browser-based MCP clients ──────────────
   // Origin allowlist (round 014 security hardening).
@@ -418,14 +428,12 @@ export function startHttpServer(port = 3100) {
     await transports[sessionId].handleRequest(req, res);
   };
 
-  // Mount MCP handlers at both "/" and "/mcp"
-  // "/" (Claude.ai): strict OAuth — requires Bearer token
-  // "/mcp" (ChatGPT): optional auth — accepts OAuth OR ateam_auth tool
+  // Mount MCP handlers at both "/" (Claude.ai) and "/mcp" (ChatGPT).
+  // ONE auth rule for both — see mcpAuth above for why the split was removed.
   for (const path of MCP_PATHS) {
-    const auth = path === "/" ? mcpAuthStrict : mcpAuthOptional;
-    app.post(path, ...auth, mcpPost);
-    app.get(path, ...auth, mcpGet);
-    app.delete(path, ...auth, mcpDelete);
+    app.post(path, ...mcpAuth, mcpPost);
+    app.get(path, ...mcpAuth, mcpGet);
+    app.delete(path, ...mcpAuth, mcpDelete);
   }
 
   // ─── Catch-all: log unhandled requests ──────────────────────────
