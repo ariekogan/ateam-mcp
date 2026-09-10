@@ -26,12 +26,16 @@ const HEX = "0123456789abcdef0123456789abcdef";
 const DEV_KEY = `adas_dev_acme_${HEX}`;
 const PROD_KEY = `adas_prod_acme_${HEX}`;
 const OLD_KEY = `adas_acme_${HEX}`;
+// A real sealed key Core minted on mac1 dev. Kept verbatim so these tests pin
+// the ACTUAL format, not my reading of a description of it. Note the `_` inside
+// the blob — base64url overlaps the separator, which is why order matters.
+const SEALED_KEY = "adas_dev_AdEqxaD9XtOmWBHbIqt0yFC0o3qDz-uPte_SUUni1VZoCHnLQElOQ-hFvnz1oL8";
 const PROD = "https://api.ateam-ai.com";
 const DEV = "https://dev-api.ateam-ai.com";
 
 describe("parsing: the env form is additive and cannot collide", () => {
   test("adas_dev_<tenant>_<hex> yields env and tenant", () => {
-    assert.deepEqual(parseApiKey(DEV_KEY), { env: "dev", tenant: "acme", isValid: true });
+    assert.deepEqual(parseApiKey(DEV_KEY), { env: "dev", tenant: "acme", sealed: false, isValid: true });
   });
 
   test("adas_prod_… likewise", () => {
@@ -41,7 +45,7 @@ describe("parsing: the env form is additive and cannot collide", () => {
   test("the OLDER form still parses, and its env is null — NOT prod", () => {
     // null means "this key does not say". Defaulting it to prod is exactly the
     // assumption that would relabel every existing dev key as production.
-    assert.deepEqual(parseApiKey(OLD_KEY), { env: null, tenant: "acme", isValid: true });
+    assert.deepEqual(parseApiKey(OLD_KEY), { env: null, tenant: "acme", sealed: false, isValid: true });
   });
 
   test("the two forms cannot collide — the tenant charset has no underscore", () => {
@@ -151,5 +155,110 @@ describe("the session reports one environment, everywhere", () => {
         "bootstrap and auth disagree about which API this session talks to");
       assert.equal(boot.runtime.base_url, getBaseUrl(sid));
     } finally { global.fetch = origFetch; }
+  });
+});
+
+/**
+ * THE TENANT IS NO LONGER IN THE STRING.
+ *
+ * `adas_<env>_<tenant>_<hex>` put the customer's name inside the credential, so
+ * it travelled wherever the key travelled — logs, screenshots, support tickets,
+ * a pasted config. Core now seals it: `adas_<env>_<blob>`, where the blob is
+ * base64url of [version][nonce][AES-256-GCM(tenant)][tag][secret]. The last 16
+ * bytes are the secret IN THE CLEAR; the sealing key protects routing only.
+ *
+ * This package must never decode it — it installs from npm onto developer
+ * laptops, so a decoder here would be the sealing secret shipping with it. The
+ * tenant is ASKED for, once, via /auth/whoami.
+ */
+describe("sealed keys: the tenant is asked for, never guessed", () => {
+  const origFetch = global.fetch;
+  const whoamiOk = (tenant) => ({
+    ok: true, status: 200, headers: { get: () => "application/json" },
+    json: async () => ({ ok: true, tenant, env: "dev" }),
+    text: async () => JSON.stringify({ ok: true, tenant, env: "dev" }),
+  });
+  const solutionsOk = {
+    ok: true, status: 200, headers: { get: () => "application/json" },
+    json: async () => ({ solutions: [] }), text: async () => "{}",
+  };
+
+  test("a sealed key parses: env named, tenant deliberately absent", () => {
+    assert.deepEqual(parseApiKey(SEALED_KEY), { env: "dev", tenant: null, sealed: true, isValid: true });
+  });
+
+  test("tenant null is NOT invalid — flipping this refuses every sealed key at the door", () => {
+    assert.equal(parseApiKey(SEALED_KEY).isValid, true);
+  });
+
+  test("ORDER: a well-formed tenant key is never claimed by the sealed pattern", () => {
+    // base64url includes `-` and `_`, so a long tenant key has blob SHAPE.
+    // Only trying the strict forms first keeps them apart. Mutation: move the
+    // sealed branch above the others and this fails.
+    const long = `adas_dev_a-rather-long-tenant-name_${HEX}`;
+    assert.ok(long.length > "adas_dev_".length + 46, "shorter than the sealed floor — would pass for the wrong reason");
+    assert.equal(parseApiKey(long).sealed, false);
+    assert.equal(parseApiKey(long).tenant, "a-rather-long-tenant-name");
+  });
+
+  test("ateam_auth asks whoami and uses ITS answer as the tenant", async () => {
+    const paths = [];
+    global.fetch = async (u) => {
+      const url = new URL(String(u));
+      paths.push(url.pathname);
+      if (url.pathname === "/auth/whoami") return whoamiOk("ateam-mcp-test");
+      return solutionsOk;
+    };
+    try {
+      const out = await handlers.ateam_auth({ api_key: SEALED_KEY }, "seal1");
+      assert.equal(out.ok, true, `auth failed: ${out.message}`);
+      assert.equal(out.tenant, "ateam-mcp-test", "the tenant did not come from whoami");
+      assert.ok(paths.includes("/auth/whoami"), `whoami was never called: ${JSON.stringify(paths)}`);
+    } finally { global.fetch = origFetch; }
+  });
+
+  test("whoami is asked on the KEY'S OWN host, not the process default", async () => {
+    // The default is production. Asking the wrong host who you are is how a dev
+    // session gets a prod answer — the exact class this format exists to close.
+    const origins = [];
+    global.fetch = async (u) => {
+      const url = new URL(String(u));
+      origins.push(url.origin);
+      return url.pathname === "/auth/whoami" ? whoamiOk("ateam-mcp-test") : solutionsOk;
+    };
+    try {
+      await handlers.ateam_auth({ api_key: SEALED_KEY }, "seal2");
+      assert.deepEqual([...new Set(origins)], [DEV], `contacted something other than the key's own environment: ${JSON.stringify(origins)}`);
+    } finally { global.fetch = origFetch; }
+  });
+
+  test("THE RULE: whoami fails -> REFUSED, and no tenant is invented", async () => {
+    global.fetch = async (u) => {
+      if (new URL(String(u)).pathname === "/auth/whoami") {
+        return { ok: false, status: 500, headers: { get: () => "application/json" }, json: async () => ({}), text: async () => "boom" };
+      }
+      throw new Error("must not proceed to any other call once identity is unknown");
+    };
+    try {
+      const out = await handlers.ateam_auth({ api_key: SEALED_KEY }, "seal3");
+      assert.equal(out.ok, false, "it authenticated a session that does not know who it is");
+      assert.equal(out.tenant, undefined, "a tenant was reported despite whoami failing");
+      assert.match(out.message, /sealed/i);
+    } finally { global.fetch = origFetch; }
+  });
+
+  test("an explicit tenant arg still wins, and skips the round trip entirely", async () => {
+    const paths = [];
+    global.fetch = async (u) => { paths.push(new URL(String(u)).pathname); return solutionsOk; };
+    try {
+      const out = await handlers.ateam_auth({ api_key: SEALED_KEY, tenant: "explicitly-named" }, "seal4");
+      assert.equal(out.ok, true);
+      assert.equal(out.tenant, "explicitly-named");
+      assert.ok(!paths.includes("/auth/whoami"), "asked whoami even though the caller had already said");
+    } finally { global.fetch = origFetch; }
+  });
+
+  test("a sealed key still names a CLOSED environment", () => {
+    assert.equal(parseApiKey(SEALED_KEY.replace("adas_dev_", "adas_prd_")).isValid, false);
   });
 });

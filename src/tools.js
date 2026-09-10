@@ -11,7 +11,7 @@
 import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
-  getCredentials, parseApiKey, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
+  getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere, getBaseUrl,
 } from "./api.js";
 
@@ -3528,20 +3528,6 @@ export const handlers = {
     if (!api_key) {
       return { ok: false, message: "Provide either api_key or master_key." };
     }
-    // Auto-extract tenant from key if not provided.
-    // Fail loudly if neither the explicit tenant arg nor a parseable apiKey
-    // yields a tenant — previously fell back to "main" silently.
-    let resolvedTenant = tenant;
-    if (!resolvedTenant) {
-      const parsed = parseApiKey(api_key);
-      resolvedTenant = parsed.tenant;
-    }
-    if (!resolvedTenant) {
-      return {
-        ok: false,
-        message: `Could not resolve tenant from api_key (expected format: adas_<tenant>_<32hex>). Pass the "tenant" arg explicitly, or check that your API key is well-formed.`,
-      };
-    }
     // ── THE KEY NAMES ITS ENVIRONMENT ──────────────────────────────────────
     //
     // One public MCP endpoint, and until now nothing about a session said which
@@ -3572,6 +3558,46 @@ export const handlers = {
     }
 
     const apiUrl = explicitUrl || baseUrlForKeyEnv(api_key) || undefined;
+
+    // ── WHO IS THIS KEY? ───────────────────────────────────────────────────
+    //
+    // It used to be answered by splitting the string, which is exactly why the
+    // customer's name travelled inside the credential — into logs, screenshots,
+    // support tickets. A SEALED key (`adas_<env>_<blob>`) does not carry it, so
+    // we ASK. Order of preference, and nothing beyond it:
+    //
+    //   1. an explicit `tenant` argument
+    //   2. the tenant the key still spells out (older formats)
+    //   3. GET /auth/whoami
+    //
+    // A sealed key whose whoami fails is REFUSED. Not "authenticated without a
+    // tenant", not retried elsewhere: ateam_auth is the moment a session learns
+    // who it is, and half-knowing is how a caller ends up acting on the wrong
+    // account. Nothing here invents a tenant under any circumstances.
+    let resolvedTenant = tenant || parseApiKey(api_key).tenant;
+    if (!resolvedTenant) {
+      const base = apiUrl || getBaseUrl(sessionId);
+      try {
+        const me = await whoami(api_key, base);
+        resolvedTenant = me.tenant;
+      } catch (err) {
+        return {
+          ok: false,
+          message:
+            `This key does not name its tenant — the tenant is sealed inside it and only the server can read it — ` +
+            `and ${base} could not tell me who you are: ${err.message} ` +
+            `Nothing was authenticated: acting on a guessed tenant is the one failure this must never have. ` +
+            `If that host is an older deployment without /auth/whoami, upgrade it or pass tenant: "<name>" explicitly.`,
+        };
+      }
+    }
+    if (!resolvedTenant) {
+      return {
+        ok: false,
+        message: `Could not resolve tenant from api_key (expected format: adas_<env>_<key>). Pass the "tenant" arg explicitly, or check that your API key is well-formed.`,
+      };
+    }
+
     setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true });
     // Persist override per bearer (survives session changes)
     setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl });
@@ -3607,7 +3633,8 @@ export const handlers = {
       // versa). Surface the base we tried and, if it looks like that mismatch,
       // hint the dev-api retry — instead of a generic "invalid/unconfigured key".
       const base = getBaseUrl(sessionId) || "";
-      const wellFormedKey = parseApiKey(api_key).isValid;
+      const parsedKey = parseApiKey(api_key);
+      const wellFormedKey = parsedKey.isValid;
       const triedProd = /(?:^|\/\/)api\.ateam-ai\.com/.test(base);
       // THE HEADLINE MUST NOT CONTRADICT THE HINT. The upstream message is
       // "Invalid or unconfigured API key" — which for a well-formed key tried
@@ -3616,7 +3643,12 @@ export const handlers = {
       // did not need. The hint below already said the right thing and rescued a
       // session on 2026-08-21, but only because someone read past the first
       // line. Lead with the likely cause; keep the upstream text as detail.
-      if (wellFormedKey && triedProd) {
+      // A key that NAMES its environment cannot be in the wrong one — routing
+      // came from the key itself, and a contradicting url was refused above. So
+      // this hint is only for the older no-env keys that still land on the prod
+      // default. Offering it for an env-bearing key would send the reader
+      // chasing an environment mismatch that the format has already ruled out.
+      if (wellFormedKey && triedProd && !parsedKey.env) {
         return {
           ok: false,
           tenant: resolvedTenant,

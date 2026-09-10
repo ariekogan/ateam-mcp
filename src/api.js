@@ -57,30 +57,94 @@ const ENV_KEY_RE = new RegExp(`^adas_(${Object.keys(KEY_ENVIRONMENTS).join("|")}
 const PLAIN_KEY_RE = new RegExp(`^adas_(${TENANT_RE})_([0-9a-f]{32})$`);
 
 /**
- * Parse a tenant-embedded API key.
- * Format: adas_<env>_<tenant>_<32hex>   env ∈ prod|dev
- * Older:  adas_<tenant>_<32hex>         (no environment named)
- * Legacy: adas_<32hex>                  (no tenant either)
+ * THE SEALED FORM — `adas_<env>_<blob>`, where the tenant is INSIDE the blob.
  *
- * The env form is tried FIRST, and the two cannot collide: the tenant charset
- * has no underscore, so `adas_dev_acme_<hex>` can never match the older
- * pattern. That is what makes accepting the new form purely additive.
+ * base64url of [version:1][nonce:8][AES-256-GCM(tenant)][tag:8][secret:16].
+ * The trailing 16 bytes — the actual secret — are in the clear; the sealing key
+ * protects ROUTING ONLY. So the blob is not "the encrypted key", and losing the
+ * sealing secret is an availability problem, not a credential breach.
+ *
+ * THIS FILE MUST NEVER DECODE IT, and the reason is specific to this package:
+ * `@ateam-ai/mcp` installs from npm onto developer laptops. Any decoder here
+ * would mean the sealing secret shipping with it. We learn the tenant by asking
+ * — GET /auth/whoami — never by parsing.
+ *
+ * Length bounds come from that byte layout: 1-char tenant = 34 bytes = 46
+ * base64url chars; 30-char tenant = 63 bytes = 84.
+ */
+const SEALED_KEY_RE = new RegExp(`^adas_(${Object.keys(KEY_ENVIRONMENTS).join("|")})_([A-Za-z0-9_-]{46,88})$`);
+
+/**
+ * Parse an API key.
+ * Sealed: adas_<env>_<blob>            (tenant NOT in the string — ask whoami)
+ * Format: adas_<env>_<tenant>_<32hex>  env ∈ prod|dev
+ * Older:  adas_<tenant>_<32hex>        (no environment named)
+ * Legacy: adas_<32hex>                 (no tenant either)
+ *
+ * ORDER IS LOAD-BEARING, and it is the order Core resolves in. base64url
+ * includes `-` and `_`, so a long-tenant key with a malformed secret has the
+ * SHAPE of a sealed blob. Trying the strict forms first means every well-formed
+ * key is claimed by the form it belongs to, and only genuine leftovers reach the
+ * blob pattern — where they parse as "sealed", fail to decrypt at Core, and
+ * authenticate as NOBODY. That residue is acceptable only because nothing here
+ * makes an authorisation decision. Reverse the order and a typo masquerades as
+ * a sealed key.
+ *
+ * `tenant: null` with `sealed: true` is the CORRECT answer, not a failure.
  *
  * `env: null` means the key does not SAY which environment it belongs to — not
  * that it is production. Nothing here defaults it; a caller that needs to know
  * must treat null as unknown.
  *
- * @returns {{ env: string|null, tenant: string|null, isValid: boolean }}
+ * @returns {{ env: string|null, tenant: string|null, sealed: boolean, isValid: boolean }}
  */
 export function parseApiKey(key) {
-  if (!key || typeof key !== 'string') return { env: null, tenant: null, isValid: false };
+  const no = { env: null, tenant: null, sealed: false, isValid: false };
+  if (!key || typeof key !== 'string') return no;
   const withEnv = key.match(ENV_KEY_RE);
-  if (withEnv) return { env: withEnv[1], tenant: withEnv[2], isValid: true };
+  if (withEnv) return { env: withEnv[1], tenant: withEnv[2], sealed: false, isValid: true };
   const match = key.match(PLAIN_KEY_RE);
-  if (match) return { env: null, tenant: match[1], isValid: true };
+  if (match) return { env: null, tenant: match[1], sealed: false, isValid: true };
   const legacy = key.match(/^adas_([0-9a-f]{32})$/);
-  if (legacy) return { env: null, tenant: null, isValid: true };
-  return { env: null, tenant: null, isValid: false };
+  if (legacy) return { env: null, tenant: null, sealed: false, isValid: true };
+  const sealed = key.match(SEALED_KEY_RE);
+  if (sealed) return { env: sealed[1], tenant: null, sealed: true, isValid: true };
+  return no;
+}
+
+/**
+ * ASK WHO THIS KEY IS. The replacement for splitting the string.
+ *
+ * Deliberately a bare fetch rather than request(): it runs BEFORE the session
+ * has credentials, which is the whole point — request() builds its headers from
+ * the session we are trying to populate.
+ *
+ * Returns { tenant, env } or throws. It does NOT fall back to anything. A key
+ * whose tenant cannot be established is a key we refuse to act for: guessing
+ * here would put a caller on someone else's data, which is the single failure
+ * this system must never have.
+ *
+ * `/auth/whoami` is served by the skill-validator (api.ateam-ai.com and
+ * dev-api.ateam-ai.com are BOTH the validator, not Core), which relays the
+ * tenant Core gave it when it verified the key. Same answer, one hop.
+ */
+export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
+  if (!apiKey) throw new Error("whoami: no api key");
+  if (!baseUrl) throw new Error("whoami: no base url");
+  const res = await fetch(`${String(baseUrl).replace(/\/+$/, "")}/auth/whoami`, {
+    headers: { "X-API-KEY": apiKey },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(`whoami failed at ${baseUrl} (HTTP ${res.status}): ${text.slice(0, 300)}`);
+  }
+  let json;
+  try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${baseUrl}: ${text.slice(0, 200)}`); }
+  if (!json?.ok || !json?.tenant) {
+    throw new Error(`whoami did not name a tenant at ${baseUrl}: ${text.slice(0, 300)}`);
+  }
+  return { tenant: json.tenant, env: json.env ?? null };
 }
 
 /** The API base a key's environment names, or null when it names none. */
@@ -118,20 +182,42 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     const parsed = parseApiKey(apiKey);
     if (parsed.tenant) resolvedTenant = parsed.tenant;
   }
+  // A SEALED key legitimately carries no tenant, so "unresolved" here means two
+  // very different things and they must not share an outcome:
+  //
+  //   sealed  → the tenant is not IN the string and never will be. Null is the
+  //             honest answer until whoami is asked. Requests still work: Core
+  //             resolves the tenant from the key itself, and headers() simply
+  //             omits X-ADAS-TENANT rather than sending a guess.
+  //   not sealed → the key is malformed. Still a hard failure.
+  //
+  // The distinction is the whole discipline: we never INVENT a tenant, but
+  // "not stated yet" is not the same as "wrong", and conflating them would
+  // refuse every sealed key at the door.
+  const sealedKey = apiKey ? parseApiKey(apiKey).sealed : false;
   // Fail loudly — silent fallback to "main" previously let malformed API keys
   // or missing tenant args silently pivot all operations onto the wrong tenant.
   // Matches the pattern we killed in ADAS connectors (memory-mcp, docs-index-mcp,
   // nutrition-mcp) — `|| "default"` was the #1 source of cross-tenant leaks.
-  if (!resolvedTenant) {
+  if (!resolvedTenant && !sealedKey) {
     throw new Error(
       `setSessionCredentials: tenant could not be resolved for session ${sessionId} ` +
-      `(tenant arg ${tenant ? "present" : "missing"}, apiKey ${apiKey ? "present but malformed (expected adas_<tenant>_<hex>)" : "absent"}). ` +
+      `(tenant arg ${tenant ? "present" : "missing"}, apiKey ${apiKey ? "present but malformed (expected adas_<env>_<key>)" : "absent"}). ` +
       `Refusing to fall back to a default tenant.`
+    );
+  }
+  if (!resolvedTenant) {
+    console.warn(
+      `[Auth] Session ${sessionId} holds a sealed key whose tenant is not resolved yet. ` +
+      `Calls will still authenticate (the tenant is inside the key and Core resolves it); ` +
+      `anything that needs the tenant BY NAME must call whoami rather than assume one.`
     );
   }
   const existing = sessions.get(sessionId);
   sessions.set(sessionId, {
-    tenant: resolvedTenant,
+    // Never `undefined` — a missing tenant is an explicit null, so every reader
+    // sees "not resolved" rather than an absent property it might paper over.
+    tenant: resolvedTenant || null,
     apiKey,
     apiUrl: apiUrl || existing?.apiUrl || null,
     authExplicit: explicit || existing?.authExplicit || false,
@@ -141,7 +227,7 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
   });
   const urlNote = apiUrl ? `, url: ${apiUrl}` : "";
   const masterNote = masterKey ? ", MASTER MODE" : "";
-  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant}${explicit ? ", explicit" : ""}${urlNote}${masterNote})`);
+  console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "unresolved — sealed key"}${explicit ? ", explicit" : ""}${urlNote}${masterNote})`);
 }
 
 /**
@@ -188,10 +274,15 @@ export function getCredentials(sessionId) {
   // If apiKey is present but tenant couldn't be derived, the key is malformed.
   // Previously fell back to "main" — this silently routed credentials to the
   // wrong tenant. Now we fail loudly.
-  if (apiKey && !tenant) {
+  //
+  // UNLESS THE KEY IS SEALED, where no tenant in the string is the design and
+  // not a defect. Same split as setSessionCredentials: "not stated" is not
+  // "wrong". Requests still authenticate, because the tenant is inside the key
+  // and Core reads it; headers() omits X-ADAS-TENANT rather than guessing one.
+  if (apiKey && !tenant && !parseApiKey(apiKey).sealed) {
     throw new Error(
       `getCredentials: apiKey is present (env ADAS_API_KEY) but tenant could not be resolved ` +
-      `(missing ADAS_TENANT env and apiKey is malformed — expected format adas_<tenant>_<hex>). ` +
+      `(missing ADAS_TENANT env and apiKey is malformed — expected format adas_<env>_<key>). ` +
       `Refusing to fall back to a default tenant.`
     );
   }

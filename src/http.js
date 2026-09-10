@@ -24,7 +24,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import { createServer } from "./server.js";
 import {
-  clearSession, setSessionCredentials, parseApiKey,
+  clearSession, setSessionCredentials, parseApiKey, whoami, baseUrlForKeyEnv, getCredentials,
   startSessionSweeper, getSessionStats, sweepStaleSessions,
   bindSessionBearer, getAuthOverride, getSessionBearer, bearerOwnershipOk,
 } from "./api.js";
@@ -302,7 +302,7 @@ export function startHttpServer(port = 3100) {
       if (sessionId && transports[sessionId]) {
         // Reuse existing session — seed credentials if Bearer token present
         transport = transports[sessionId];
-        seedCredentials(req, sessionId);
+        await seedCredentials(req, sessionId);
       } else if (isInitializeRequest(req.body) || (sessionId && !transports[sessionId])) {
         // New session, OR stale session with any request type (server restart recovery).
         // Many MCP clients (Claude mobile, Claude Code) cache the session ID and fail to
@@ -326,7 +326,7 @@ export function startHttpServer(port = 3100) {
         const newSessionId = sessionId || randomUUID();
 
         // Seed credentials from OAuth Bearer token before server starts
-        seedCredentials(req, newSessionId);
+        await seedCredentials(req, newSessionId);
 
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => newSessionId,
@@ -478,7 +478,7 @@ export function startHttpServer(port = 3100) {
  * If the user previously called ateam_auth to override (e.g., switch tenants),
  * that override is stored per bearer and takes priority here.
  */
-function seedCredentials(req, sessionId) {
+async function seedCredentials(req, sessionId) {
   const token = req.auth?.token;
   if (!token) return;
 
@@ -501,7 +501,35 @@ function seedCredentials(req, sessionId) {
   // redundant ateam_auth call. (The env-var guard in tools.js is unaffected —
   // env creds never flow through here; this path only fires for a real Bearer.)
   const parsed = parseApiKey(token);
-  if (parsed.isValid) {
-    setSessionCredentials(sessionId, { tenant: parsed.tenant, apiKey: token, explicit: true });
+  if (!parsed.isValid) return;
+
+  // The key's own environment decides the base. Without this a dev bearer
+  // silently used the process default, which is PRODUCTION — the same
+  // never-guess-the-environment rule ateam_auth already follows, applied to the
+  // path that had been missed.
+  const apiUrl = baseUrlForKeyEnv(token) || undefined;
+
+  if (parsed.tenant) {
+    setSessionCredentials(sessionId, { tenant: parsed.tenant, apiKey: token, apiUrl, explicit: true });
+    return;
+  }
+
+  // A SEALED key does not spell out its tenant, so it has to be asked for —
+  // ONCE. This runs on every request for an existing session, so without the
+  // guard below it would be a network round trip per MCP call.
+  const current = (() => { try { return getCredentials(sessionId); } catch { return null; } })();
+  if (current?.tenant && current.apiKey === token) return;
+
+  try {
+    const me = await whoami(token, apiUrl);
+    setSessionCredentials(sessionId, { tenant: me.tenant, apiKey: token, apiUrl, explicit: true });
+  } catch (err) {
+    // Credentials are still set: the tenant lives INSIDE the key and Core reads
+    // it, so calls authenticate correctly with no X-ADAS-TENANT header at all.
+    // What we must not do is fill the gap with a guess — an unresolved tenant
+    // is recorded as null and retried on the next request. Anything that needs
+    // the name will say it does not have it.
+    console.warn(`[Auth] whoami failed for session ${sessionId} at ${apiUrl}: ${err.message} — proceeding with the tenant unresolved, never assumed.`);
+    setSessionCredentials(sessionId, { tenant: null, apiKey: token, apiUrl, explicit: true });
   }
 }
