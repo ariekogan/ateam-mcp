@@ -3585,7 +3585,19 @@ export const handlers = {
         // The environment is part of WHO YOU ARE NOW, so it is reported here and
         // in ateam_bootstrap.runtime, from the same resolution — one question,
         // one answer.
-        environment: envForBaseUrl(getBaseUrl(sessionId)) || keyEnv || null,
+        //
+        // A KEY THAT NAMES NO ENVIRONMENT GETS NO CLAIM. Until keys are
+        // recreated, a legacy `adas_<tenant>_<hex>` still authenticates and
+        // still lands on the process default — which is PRODUCTION. That
+        // routing predates this change and is not made worse by it, but
+        // reporting it as `environment: "prod"` would be: it would turn an
+        // unstated default into a confident assertion, which is the exact
+        // failure this whole change exists to remove. So the field says
+        // `unstated`, and the note says which base was used and why.
+        environment: keyEnv || (explicitUrl ? envForBaseUrl(explicitUrl) : null) || "unstated",
+        ...(!keyEnv && !explicitUrl && {
+          environment_note: `This key does not name an environment, so the process default was used (${getBaseUrl(sessionId)}). Recreate it as adas_<env>_<tenant>_<hex> to make the environment explicit — until then nothing here can confirm which system you are on.`,
+        }),
         base_url: getBaseUrl(sessionId),
         message: `Authenticated to tenant "${resolvedTenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found.`,
       };
