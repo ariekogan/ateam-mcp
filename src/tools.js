@@ -1051,9 +1051,14 @@ export const tools = [
     name: "ateam_delete_solution",
     core: true,
     description:
-      "⚠️ IRREVERSIBLE — kills Mongo state, running MCP processes, and Builder FS for the whole solution and every skill. " +
+      "⚠️ IRREVERSIBLE — THIS CLEARS THE WHOLE TENANT, not just the named solution. " +
+      "TENANT === SOLUTION, so it wipes EVERY skill and connector in the tenant's Core registry, the solution record, " +
+      "and Builder FS — INCLUDING any orphaned skill that no longer belongs to a solution. The name says 'solution'; the " +
+      "blast radius is the tenant. Read the tenant's skill list first (ateam_get_solution view:'skills' or Core's registry) " +
+      "and know what you are destroying — an orphan from an earlier solution is still in there and still goes. " +
       "REQUIRES `confirm:true` AND `confirm_solution_id` echoing the solution id you're destroying (defeats typos and hallucinated ids). " +
-      "RECOVERY: the GitHub repo is untouched; `ateam_github_pull` rebuilds the solution from `main`. Prefer that over re-deploying from memory.",
+      "RECOVERY: only what GitHub holds. `ateam_github_pull` rebuilds from `main` — anything never pushed there is GONE. " +
+      "A skill authored FS-only, or orphaned before its solution was pushed, has no copy anywhere.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5921,8 +5926,13 @@ export const handlers = {
     if (confirm !== true) {
       return {
         ok: false,
-        error: "⚠️ REFUSED: ateam_delete_solution requires confirm:true. This is irreversible in Core + Builder FS. GitHub source is preserved — ateam_github_pull rebuilds from `main` if you already deleted by mistake.",
-        recovery: "ateam_github_pull(solution_id, ref:'main')",
+        error:
+          "⚠️ REFUSED: ateam_delete_solution requires confirm:true. " +
+          "THIS CLEARS THE WHOLE TENANT — TENANT === SOLUTION, so every skill and connector in the tenant's Core " +
+          "registry goes, including any ORPHAN that no longer belongs to a solution. On 2026-09-11 this call destroyed " +
+          "a skill the caller did not know was there and that existed in no GitHub branch. List the tenant's skills " +
+          "before you confirm. Recovery reaches only as far as GitHub: anything never pushed is unrecoverable.",
+        recovery: "ateam_github_pull(solution_id, ref:'main') — restores ONLY what `main` holds",
       };
     }
     if (confirm_solution_id !== solution_id) {
