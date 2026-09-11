@@ -1072,10 +1072,17 @@ export const tools = [
         },
         confirm_solution_id: {
           type: "string",
-          description: "REQUIRED. Must exactly equal `solution_id`. This defeats typos and hallucinated ids — you can't wipe a solution you couldn't spell.",
+          description: "Required with force:true. Must exactly equal `solution_id`. This defeats typos and hallucinated ids — you can't wipe a solution you couldn't spell.",
+        },
+        force: {
+          type: "boolean",
+          description:
+            "Omit (DEFAULT) to PREVIEW: returns will_clear — every skill and connector that would be destroyed, with " +
+            "orphan_skills called out separately — and clears NOTHING. Pass true only after reading that list. The " +
+            "preview exists because a description cannot name the orphan you did not know was in the registry.",
         },
       },
-      required: ["solution_id", "confirm", "confirm_solution_id"],
+      required: ["solution_id"],
     },
   },
   {
@@ -5922,20 +5929,22 @@ export const handlers = {
   ateam_github_list_versions: async ({ solution_id }, sid) =>
     get(`/deploy/solutions/${solution_id}/versions/dev`, sid),
 
-  ateam_delete_solution: async ({ solution_id, confirm, confirm_solution_id }, sid) => {
-    if (confirm !== true) {
-      return {
-        ok: false,
-        error:
-          "⚠️ REFUSED: ateam_delete_solution requires confirm:true. " +
-          "THIS CLEARS THE WHOLE TENANT — TENANT === SOLUTION, so every skill and connector in the tenant's Core " +
-          "registry goes, including any ORPHAN that no longer belongs to a solution. On 2026-09-11 this call destroyed " +
-          "a skill the caller did not know was there and that existed in no GitHub branch. List the tenant's skills " +
-          "before you confirm. Recovery reaches only as far as GitHub: anything never pushed is unrecoverable.",
-        recovery: "ateam_github_pull(solution_id, ref:'main') — restores ONLY what `main` holds",
-      };
-    }
-    if (confirm_solution_id !== solution_id) {
+  // SHOW BEFORE YOU DESTROY.
+  //
+  // Without force:true this RETURNS THE INVENTORY — every skill and connector
+  // the clear would take — and touches nothing. Only force:true clears.
+  //
+  // A warning in a description is a claim the caller must take on trust, and it
+  // cannot mention the ORPHAN nobody knew was in the registry. The inventory is
+  // evidence: the caller reads the actual names first. On 2026-09-11 the absence
+  // of that step cost `walk-guide` — destroyed while clearing an unrelated test
+  // fixture, present in no GitHub branch, unrecoverable.
+  //
+  // confirm/confirm_solution_id still guard typos and hallucinated ids. They
+  // answer "did you mean THIS tenant"; force answers "have you read what is in
+  // it". Both are needed, and neither substitutes for the other.
+  ateam_delete_solution: async ({ solution_id, confirm, confirm_solution_id, force }, sid) => {
+    if (confirm_solution_id !== undefined && confirm_solution_id !== solution_id) {
       return {
         ok: false,
         error: `⚠️ REFUSED: confirm_solution_id must exactly equal solution_id. Got confirm_solution_id="${confirm_solution_id}" but solution_id="${solution_id}". This check defeats typos and hallucinated ids — you should not be able to wipe a solution whose id you can't spell correctly.`,
@@ -5943,7 +5952,38 @@ export const handlers = {
         received: confirm_solution_id,
       };
     }
-    return del(`/deploy/solutions/${solution_id}`, sid);
+
+    // Preview: no confirm needed to LOOK, and looking is the default.
+    if (force !== true) {
+      const preview = await del(`/deploy/solutions/${solution_id}`, sid);
+      return {
+        ...preview,
+        _next:
+          "Nothing was cleared. Read will_clear above — especially orphan_skills, which belong to no solution and " +
+          "are the ones most likely to be unrecoverable. To proceed: ateam_delete_solution(solution_id, " +
+          `confirm:true, confirm_solution_id:"${solution_id}", force:true)`,
+      };
+    }
+
+    if (confirm !== true) {
+      return {
+        ok: false,
+        error:
+          "⚠️ REFUSED: force:true also requires confirm:true. THIS CLEARS THE WHOLE TENANT — TENANT === SOLUTION, so " +
+          "every skill and connector in the tenant's Core registry goes, including any ORPHAN that no longer belongs " +
+          "to a solution. Recovery reaches only as far as GitHub: anything never pushed is unrecoverable.",
+        recovery: "ateam_github_pull(solution_id, ref:'main') — restores ONLY what `main` holds",
+      };
+    }
+    if (confirm_solution_id !== solution_id) {
+      return {
+        ok: false,
+        error: `⚠️ REFUSED: force:true requires confirm_solution_id to exactly equal solution_id.`,
+        expected: solution_id,
+        received: confirm_solution_id,
+      };
+    }
+    return del(`/deploy/solutions/${solution_id}?force=true`, sid);
   },
 
   ateam_delete_skill: async ({ solution_id, skill_id, confirm }, sid) => {
