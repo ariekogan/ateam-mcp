@@ -47,10 +47,27 @@ const sessionBearers = new Map(); // sessionId → bearerToken
  * That is the same silent-wrong class as an environment fallback. Add an
  * environment HERE, in one place, or it does not exist.
  */
-export const KEY_ENVIRONMENTS = Object.freeze({
-  prod: "https://api.ateam-ai.com",
-  dev: "https://dev-api.ateam-ai.com",
+export const ENVIRONMENTS = Object.freeze({
+  prod: Object.freeze({
+    api: "https://api.ateam-ai.com",
+    app: "https://app.ateam-ai.com",
+    mcp: "https://mcp.ateam-ai.com",
+  }),
+  dev: Object.freeze({
+    api: "https://dev-api.ateam-ai.com",
+    app: "https://dev-app.ateam-ai.com",
+    mcp: "https://dev-mcp.ateam-ai.com",
+  }),
 });
+
+/**
+ * The API base each environment's key routes to. DERIVED from ENVIRONMENTS, not
+ * a second copy of it: the app URL an agent is told to look at and the api URL
+ * its calls go to must never be able to name different environments.
+ */
+export const KEY_ENVIRONMENTS = Object.freeze(
+  Object.fromEntries(Object.entries(ENVIRONMENTS).map(([env, urls]) => [env, urls.api])),
+);
 
 const TENANT_RE = "[a-z0-9][a-z0-9-]{0,28}[a-z0-9]";
 const ENV_KEY_RE = new RegExp(`^adas_(${Object.keys(KEY_ENVIRONMENTS).join("|")})_(${TENANT_RE})_([0-9a-f]{32})$`);
@@ -168,6 +185,126 @@ export function envForBaseUrl(url) {
     if (norm === base) return env;
   }
   return null;
+}
+
+/**
+ * Which environment is a PUBLIC A-Team URL? Used for the urls that identify a
+ * DEPLOYMENT rather than a request target — this ateam-mcp's own public base.
+ *
+ * Host-leading `dev-` is dev; any other ateam-ai.com host is prod; anything
+ * else is null, because a self-host or a localhost box is not our dev
+ * environment. The leading-dash rule is deliberate and is the same one
+ * ai-dev-assistant's currentEnv() uses: a customer host like
+ * `myapp-dev-thing.com` must not be classified as our dev.
+ */
+export function envForDeploymentUrl(url) {
+  if (!url) return null;
+  let host;
+  try { host = new URL(String(url)).hostname.toLowerCase(); } catch { return null; }
+  if (!/(^|\.)ateam-ai\.com$/.test(host)) return null;
+  return /^dev-/.test(host) ? "dev" : "prod";
+}
+
+/**
+ * WHICH ENVIRONMENT IS THIS SESSION ON? ONE resolver, three sources, ranked by
+ * how hard each is to be wrong about — and `unstated` when none of them
+ * answers, because a GUESSED environment does not fail: it silently succeeds
+ * against the wrong system.
+ *
+ * THE INDICATOR IS THE HOSTNAME. `dev-*` is the development environment and the
+ * bare host is production — that is the platform's actual convention, not a
+ * label kept beside it, and it is wrong-proof: if the host were wrong nothing
+ * would reach the box at all. So every source here is a URL; none is a field
+ * something set about itself.
+ *
+ *   1. api_key        — `adas_<env>_…` names it, and that same name PICKED the
+ *                       host (baseUrlForKeyEnv), so the claim and the routing
+ *                       cannot disagree. Session-specific, so it goes first.
+ *   2. session_url    — the resolved base_url IS one of the known API hosts
+ *                       (dev-api.ateam-ai.com → dev, api.ateam-ai.com → prod).
+ *   3. deployment_url — this ateam-mcp's OWN public url (ATEAM_BASE_URL), by the
+ *                       same `dev-` rule. The source that matters in the
+ *                       container: mac1 and prod run the SAME compose file with
+ *                       ADAS_API_URL=http://skill-builder-backend:3200, so
+ *                       base_url reads identically on both and sources 1-2
+ *                       cannot tell them apart. Read RAW from the environment
+ *                       and only when actually set — compose supplies the prod
+ *                       url as a default, and reading the defaulted value would
+ *                       turn "nobody said" into a confident "production".
+ *
+ * NO FOURTH SOURCE FROM /auth/whoami, and NOT because it is missing — it is
+ * live (skill-validator `routes/auth.js`, mounted at `/auth`) and it does
+ * return `env`. Read what that `env` IS before reaching for it: the route
+ * computes `parseApiKey(x-api-key).env`, i.e. THE SAME PARSE OF THE SAME STRING
+ * this file already does in source 1. Its own doc is explicit — "`env` is what
+ * the KEY NAMES … this service cannot tell the caller which environment it is
+ * itself running in without being told". So calling it would buy a network
+ * round-trip to learn a string we are holding, and a second path to one answer.
+ *
+ * And it is `null` in exactly the case that needs help: a legacy
+ * `adas_<tenant>_<hex>` key, which is what a session against an internal base
+ * typically has. It cannot answer the question deployment_url exists to answer.
+ *
+ * What WOULD be a real fourth source is a server that reports the environment
+ * IT is running in, derived from its own hostname (Core's `currentEnv()` does
+ * this; `/api/auth/whoami` returning `{tenant, env, actorId}` is specified in
+ * the Builder's docs/wip/SPEC_opaque_tenant_in_key_2026-09-10.md and does not
+ * exist yet). When it ships, add it ABOVE deployment_url — it is the hostname
+ * rule evaluated on the box that owns the hostname — and below session_url,
+ * which is specific to this session.
+ *
+ * DELIBERATELY NOT ADAS_ENV, for the reason ai-dev-assistant's currentEnv()
+ * already records: compose describes it as "just a free-text label", and a
+ * label nobody maintains on purpose is untrustworthy the moment it becomes
+ * load-bearing.
+ *
+ * @returns {{ name: string, source: string, api_url: string, app_url: string|null, label: string, note?: string }}
+ */
+export function resolveEnvironment(sessionId) {
+  const api_url = getBaseUrl(sessionId);
+  const session = sessionId ? sessions.get(sessionId) : null;
+  const apiKey = session?.apiKey || ENV_API_KEY || "";
+
+  const candidates = [
+    ["api_key", parseApiKey(apiKey).env],
+    ["session_url", envForBaseUrl(api_url)],
+    ["deployment_url", envForDeploymentUrl(process.env.ATEAM_BASE_URL)],
+  ];
+  const hit = candidates.find(([, env]) => env && ENVIRONMENTS[env]);
+
+  if (!hit) {
+    return {
+      name: "unstated",
+      source: "none",
+      api_url,
+      app_url: null,
+      label: "UNSTATED",
+      note:
+        `No hostname in reach names an environment, so none is claimed — reporting a default here would be ` +
+        `an assertion nobody made. The api this session talks to is ${api_url}, which is not one of the known ` +
+        `public hosts (${Object.values(ENVIRONMENTS).map((u) => u.api).join(", ")}), and this deployment's own ` +
+        `ATEAM_BASE_URL is unset. The convention is the hostname — dev-* is development, the bare host is ` +
+        `production — so to make this definite give it one: set ATEAM_BASE_URL on the deployment, pass url: to ` +
+        `ateam_auth, or authenticate with an environment-bearing key (adas_dev_… / adas_prod_…).`,
+    };
+  }
+
+  const [source, name] = hit;
+  const urls = ENVIRONMENTS[name];
+  return {
+    name,
+    source,
+    api_url,
+    app_url: urls.app,
+    label: `${name.toUpperCase()} — ${urls.app.replace(/^https?:\/\//, "")}`,
+    ...(source === "deployment_url" && {
+      note:
+        `Derived from THIS DEPLOYMENT's public url (ATEAM_BASE_URL=${process.env.ATEAM_BASE_URL}), not from the ` +
+        `session: the container's ADAS_API_URL is an internal compose host that is identical on dev and prod. ` +
+        `It says which ateam-mcp you are talking to, which is the same answer as long as that variable is set ` +
+        `per environment.`,
+    }),
+  };
 }
 
 /**

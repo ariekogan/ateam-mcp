@@ -13,6 +13,7 @@ import {
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere, getBaseUrl,
+  resolveEnvironment, ENVIRONMENTS,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -53,6 +54,32 @@ export const MCP_VERSION = (() => {
   try { return _createRequire(import.meta.url)("../package.json").version; }
   catch { return "unknown"; }
 })();
+
+/**
+ * THE ENVIRONMENT FIELDS, IN ONE SHAPE, for every tool that reports them.
+ *
+ * ateam_auth and ateam_bootstrap answer the same question — prod or dev? — and
+ * computed it with two different expressions: auth had an inline
+ * `keyEnv || envForBaseUrl(url) || "unstated"`, and bootstrap had nothing at
+ * all while auth's own comment claimed it was "reported here and in
+ * ateam_bootstrap.runtime, from the same resolution". Two answers to one
+ * question is how they drift; this is the one.
+ *
+ * `environment_source` is part of the answer, not decoration: "dev" derived
+ * from a key that NAMES dev and "dev" derived from a deployment url are worth
+ * different amounts of trust, and a caller that cannot tell them apart cannot
+ * audit a wrong one.
+ */
+function environmentReport(sid) {
+  const env = resolveEnvironment(sid);
+  return {
+    environment: env.name,
+    environment_label: env.label,
+    environment_source: env.source,
+    app_url: env.app_url,
+    ...(env.note && { environment_note: env.note }),
+  };
+}
 
 // ─── Async deploy helper ────────────────────────────────────────────
 //
@@ -3206,7 +3233,15 @@ export const handlers = {
     runtime: {
       ateam_mcp_version: MCP_VERSION,
       base_url: getBaseUrl(sid),
-      _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to (per-session, as set by ateam_auth's `url`). If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
+      // WHICH SYSTEM AM I ABOUT TO CHANGE? base_url used to be the only answer,
+      // and in the container it is not an answer at all: dev and prod run the
+      // same compose file with ADAS_API_URL=http://skill-builder-backend:3200,
+      // so the field reads identically on both and a session had to infer its
+      // environment from where a deploy error came back. Named here, from the
+      // SAME resolver ateam_auth reports — one question, one answer — and
+      // `unstated` rather than a guess when nothing actually says.
+      ...environmentReport(sid),
+      _note: "The version of the ateam-mcp process actually serving this call, the API THIS SESSION talks to (per-session, as set by ateam_auth's `url`), and which environment that is. If a fix looks missing, check the version FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
     },
     platform_positioning: {
       name: "A-Team",
@@ -3621,21 +3656,17 @@ export const handlers = {
         ok: true,
         tenant: resolvedTenant,
         // The environment is part of WHO YOU ARE NOW, so it is reported here and
-        // in ateam_bootstrap.runtime, from the same resolution — one question,
-        // one answer.
+        // in ateam_bootstrap.runtime, FROM THE SAME RESOLVER — one question, one
+        // answer. That claim used to be made by this comment alone: bootstrap
+        // did not report it at all, and this site computed it inline.
         //
-        // A KEY THAT NAMES NO ENVIRONMENT GETS NO CLAIM. Until keys are
-        // recreated, a legacy `adas_<tenant>_<hex>` still authenticates and
-        // still lands on the process default — which is PRODUCTION. That
-        // routing predates this change and is not made worse by it, but
-        // reporting it as `environment: "prod"` would be: it would turn an
-        // unstated default into a confident assertion, which is the exact
-        // failure this whole change exists to remove. So the field says
-        // `unstated`, and the note says which base was used and why.
-        environment: keyEnv || (explicitUrl ? envForBaseUrl(explicitUrl) : null) || "unstated",
-        ...(!keyEnv && !explicitUrl && {
-          environment_note: `This key does not name an environment, so the process default was used (${getBaseUrl(sessionId)}). Recreate it as adas_<env>_<tenant>_<hex> to make the environment explicit — until then nothing here can confirm which system you are on.`,
-        }),
+        // A KEY THAT NAMES NO ENVIRONMENT STILL GETS NO CLAIM FROM ITS KEY —
+        // reporting a legacy `adas_<tenant>_<hex>` as `prod` because prod is
+        // the process default would turn an unstated default into a confident
+        // assertion, the exact failure this exists to remove. What resolveEnvironment
+        // adds is the source that DOES know without guessing — this deployment's
+        // own public url — and `unstated` when no hostname names one at all.
+        ...environmentReport(sessionId),
         base_url: getBaseUrl(sessionId),
         message: `Authenticated to tenant "${resolvedTenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found.`,
       };
@@ -6627,6 +6658,25 @@ export async function handleToolCall(name, args, sessionId) {
           const listed = await handlers.ateam_list_solutions({}, sessionId);
           const solutions = Array.isArray(listed?.solutions) ? listed.solutions : [];
           if (solutions.length > 0) {
+            // WHICH GITHUB IS THIS WIRED TO? Same class of question as the
+            // environment, and it was answerable only by reading repo_url out of
+            // the list below and parsing it by eye. Derived from the solutions we
+            // have ALREADY fetched — no extra round-trip — and `connected:false`
+            // when no solution has a repo, which is a real state (a Core-only or
+            // freshly onboarded tenant) and not an error.
+            const owners = [...new Set(solutions
+              .map((x) => String(x.repo_url || "").match(/github\.com[/:]([^/]+)\//))
+              .filter(Boolean)
+              .map((m) => m[1]))];
+            (result.runtime ||= {}).github = {
+              connected: owners.length > 0,
+              owner: owners.length === 1 ? owners[0] : null,
+              ...(owners.length > 1 && { owners }),
+              repos: solutions.filter((x) => x.repo_url).map((x) => ({ solution: x.id, repo_url: x.repo_url, default_branch: x.default_branch || "main" })),
+              _note: owners.length
+                ? `Solution repos live under this GitHub account. GitHub access is SEPARATE from the A-Team API key — a valid key does not imply clone rights.`
+                : `No solution has a repo pinned, so definition edits use source:'local'. Connect at ${ENVIRONMENTS[resolveEnvironment(sessionId).name]?.mcp || "https://mcp.ateam-ai.com"}/connect-github.`,
+            };
             result.tenant_onboarding = {
               _note: "The authed key can see these solutions. For LOCAL development: clone the repo_url and open any Claude-Code-compatible agent in that directory — it will auto-load CLAUDE.md on session start. For REMOTE-only work: call ateam_github_read(solution_id, 'CLAUDE.md') to fetch the onboarding doc. If `git clone` returns 403, ask the solution owner to add your GitHub account as a collaborator on the repo (GitHub access is separate from the A-Team API key).",
               tenant: creds.tenant || null,
