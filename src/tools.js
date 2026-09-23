@@ -2531,6 +2531,60 @@ export const monitoringTools = tools
 
 // ─── Tool handlers ──────────────────────────────────────────────────
 
+/**
+ * THE BRANCH WORKFLOW — ONE DEFINITION, RENDERED EVERYWHERE.
+ *
+ * ateam_bootstrap is the first thing an external agent reads, and it used to
+ * carry the branch story in SIX independently-maintained places: `branching`,
+ * `github_tools._note`, `github_tools.branch`, `github_tools.checkpoints`,
+ * `github_tools.iteration_workflow`, `github_tools.when_to_use_what`,
+ * `developer_loop.steps[]` and `assistant_behavior_contract`. Several readers,
+ * one question, no owner — the defect class this whole codebase keeps paying
+ * for.
+ *
+ * What it cost: the single-branch model ("ALL changes go directly to main")
+ * was live from 4eced4f (2026-03-21) until 2026-09-23 — four months after
+ * promote became a real dev→main merge (7a75479) and a month after writes moved
+ * to dev (6e4470e). Then I "fixed" it twice by grepping for the strings I
+ * happened to think of, and both times an external agent found survivors — the
+ * second time INSIDE ONE RESPONSE, where `branching` dated its own former error
+ * while `assistant_behavior_contract.always` still asserted it.
+ *
+ * So the sections below do not describe the workflow. They render it from
+ * here. Change it once; every surface moves together, or none does.
+ */
+const BRANCH_WORKFLOW = Object.freeze({
+  write_branch: 'dev',
+  deploy_branch: 'main',
+  promote_tool: 'ateam_github_promote',
+  tag_format: 'prod-YYYY-MM-DD-NNN',
+
+  one_line:
+    'edit on `dev` → review the diff → ateam_github_promote → `main` → ateam_build_and_run deploys `main`',
+
+  loop: Object.freeze([
+    '1. EDIT    ateam_github_patch / ateam_github_write / ateam_patch   → lands on `dev`',
+    '2. REVIEW  ateam_github_promote(solution_id, dry_run:true)         → shows exactly what would ship',
+    '3. SHIP    ateam_github_promote(solution_id)                       → merges dev → main, tags prod-YYYY-MM-DD-NNN',
+    '4. DEPLOY  ateam_build_and_run(solution_id)                        → deploys `main`',
+  ]),
+
+  write_side: 'Every write lands on `dev`: ateam_github_patch, ateam_github_write and ateam_patch all default there. Nothing on `dev` is live.',
+  deploy_side: '`main` is production, and ONLY ateam_github_promote writes it. ateam_build_and_run deploys `main` — there is no ref parameter.',
+  the_silent_mistake:
+    'Skipping the promote. Your patches succeed, build_and_run reports success, and NOTHING you wrote is running — because `main` never moved. ' +
+    'If a deploy behaves as though your changes do not exist, that is this. ateam_build_and_run now refuses with MAIN_BEHIND_DEV and names the tool rather than letting you find out by reading a diff.',
+  // Deliberately does NOT quote the wrong framing. An earlier version said
+  // 'calling it "create a checkpoint" is what left agents believing…' — which
+  // put the misleading phrase back into the very response meant to retire it,
+  // where a first-turn agent reads it before the correction lands.
+  promote_is_a_ship_not_a_checkpoint:
+    'ateam_github_promote SHIPS: it merges dev → main, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
+  rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history.',
+  no_git_at_all:
+    'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',
+});
+
 const SPEC_PATHS = {
   overview: "/spec",
   skill: "/spec/skill",
@@ -3293,8 +3347,8 @@ export const handlers = {
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
-        { step: 3, action: "Version", description: "Every deploy auto-pushes to `dev` on GitHub — NOT main. main moves only when you call ateam_github_promote, and build_and_run deploys main, so an unpromoted change is not deployed. The repo (one per TENANT) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log", "ateam_github_promote"] },
-        { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch (lands on `dev`), then ateam_github_promote(solution_id) to merge dev → main, then ateam_build_and_run to deploy MAIN. The promote is not optional — build_and_run deploys main, so an unpromoted edit is not deployed. NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch (also lands on dev).", tools: ["ateam_github_patch", "ateam_github_promote", "ateam_build_and_run", "ateam_patch"] },
+        { step: 3, action: "Version", description: `Writes land on \`${BRANCH_WORKFLOW.write_branch}\`, NOT ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.deploy_side} The repo (one per TENANT) is the source of truth for connector code.`, tools: ["ateam_github_status", "ateam_github_log", BRANCH_WORKFLOW.promote_tool] },
+        { step: 4, action: "Iterate", description: `Edit connector code ONE FILE AT A TIME via ateam_github_patch, then follow the loop: ${BRANCH_WORKFLOW.one_line}. ${BRANCH_WORKFLOW.the_silent_mistake} NEVER re-pass all connector code inline after first deploy. For skill definitions use ateam_patch.`, tools: ["ateam_github_patch", BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_patch"] },
         { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
       ],
@@ -3314,25 +3368,16 @@ export const handlers = {
         continue: 'ateam_conversation(solution_id: "ada", message: "yes", actor_id: "test_x")',
       },
     },
+    // RENDERED FROM BRANCH_WORKFLOW — do not restate the model here.
     branching: {
-      _important:
-        "TWO BRANCHES, and the step between them is EXPLICIT. You work on `dev`. Nothing you write reaches production until you PROMOTE. " +
-        "This block told every first-turn agent the opposite — \"Single-branch model: ALL changes go directly to main\" — from 2026-03-21 (4eced4f) until 2026-09-23. " +
-        "promote became a real dev→main MERGE on 2026-05-19 (7a75479) and this narrative was never brought forward, so an agent following it wrote to dev, deployed main, and could not see why its edits had no effect.",
-      dev: "WHERE YOU WORK. ateam_github_patch, ateam_github_write and ateam_patch all write here by default. Safe: nothing here is live.",
-      main: "PRODUCTION, and ONLY ateam_github_promote writes it. ateam_build_and_run deploys MAIN — there is no ref parameter — so work that has not been promoted is not deployed.",
-      the_loop: [
-        "1. ateam_github_patch / ateam_github_write / ateam_patch   → lands on dev",
-        "2. ateam_github_promote(solution_id)                       → merges dev → main, auto-tags prod-YYYY-MM-DD-NNN",
-        "3. ateam_build_and_run(solution_id)                        → deploys MAIN",
-      ],
-      the_mistake_this_causes:
-        "Skipping step 2. Your patches succeed, build_and_run reports success, and NOTHING you wrote is running — because main never moved. " +
-        "If a deploy behaves as though your changes do not exist, call ateam_github_promote and deploy again. " +
-        "ateam_build_and_run now refuses with MAIN_BEHIND_DEV and names the tool, rather than letting you find this out by reading a diff.",
-      dry_run_first: "ateam_github_promote(solution_id, dry_run:true) shows the commits and files about to ship without merging.",
-      rollback: "ateam_github_rollback(solution_id, target) — roll main back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history.",
-      no_git_at_all: "A tenant with no repo connected works entirely on the Builder's own store — no branches, no promote. ateam_patch(source:'local') is the explicit form. Connect a repo later and work starts landing on dev from that point on.",
+      _important: `TWO BRANCHES, and the step between them is EXPLICIT: ${BRANCH_WORKFLOW.one_line}.`,
+      dev: BRANCH_WORKFLOW.write_side,
+      main: BRANCH_WORKFLOW.deploy_side,
+      the_loop: BRANCH_WORKFLOW.loop,
+      the_mistake_this_causes: BRANCH_WORKFLOW.the_silent_mistake,
+      promote_is_a_ship: BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint,
+      rollback: BRANCH_WORKFLOW.rollback,
+      no_git_at_all: BRANCH_WORKFLOW.no_git_at_all,
     },
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
@@ -3341,7 +3386,7 @@ export const handlers = {
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
     github_tools: {
-      _note: "Version control for solutions. TWO branches: you work on `dev`, and ateam_github_promote merges dev → main. build_and_run deploys MAIN. See `branching` above.",
+      _note: `Version control for solutions. ${BRANCH_WORKFLOW.one_line}. See \`branching\` above — it is the same definition.`,
       tools: ["ateam_github_push", "ateam_github_pull", "ateam_github_status", "ateam_github_read", "ateam_github_patch", "ateam_github_log", "ateam_github_promote", "ateam_github_rollback", "ateam_github_list_versions"],
       repo_structure: {
         "solution.json": "Full solution definition",
@@ -3349,14 +3394,15 @@ export const handlers = {
         "connectors/{connector-id}/server.js": "Connector MCP server code",
         "connectors/{connector-id}/package.json": "Connector dependencies",
       },
-      branch: "dev for every write; main for every deploy. ateam_github_promote is the ONLY thing that moves work from one to the other.",
-      checkpoints: "prod-YYYY-MM-DD-NNN tags are created automatically by each promote, and are what ateam_github_rollback rolls back to.",
+      branch: `${BRANCH_WORKFLOW.write_branch} for every write; ${BRANCH_WORKFLOW.deploy_branch} for every deploy. ${BRANCH_WORKFLOW.promote_tool} is the ONLY thing that moves work from one to the other.`,
+      checkpoints: `${BRANCH_WORKFLOW.tag_format} tags are created automatically by each promote. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint}`,
       iteration_workflow: {
-        code_changes: "ateam_github_patch (ONE FILE PER CALL, lands on dev) → ateam_github_promote(solution_id) → ateam_build_and_run() deploys main",
-        definition_changes: "ateam_patch (updates + redeploys + lands on dev) → ateam_github_promote(solution_id) when you want it in production",
+        the_loop: BRANCH_WORKFLOW.loop,
+        code_changes: `ateam_github_patch (ONE FILE PER CALL) → ${BRANCH_WORKFLOW.promote_tool}(solution_id) → ateam_build_and_run()`,
+        definition_changes: `ateam_patch → ${BRANCH_WORKFLOW.promote_tool}(solution_id) when you want it in production`,
         first_deploy: "Must include mcp_store — this creates the GitHub repo",
         after_first_deploy: "NEVER pass mcp_store again. Write files via ateam_github_patch, promote, then ateam_build_and_run() auto-detects the repo.",
-        do_not_skip_promote: "Every line above has a promote in it for a reason: build_and_run deploys MAIN. Without a promote your edits sit on dev and the deploy ships the previous state.",
+        do_not_skip_promote: BRANCH_WORKFLOW.the_silent_mistake,
       },
       when_to_use_what: {
         ateam_github_write: "Write/create connector files on main — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy.",
@@ -3364,7 +3410,7 @@ export const handlers = {
         ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to `dev`. Promote when you want it in production.",
         "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
-        ateam_github_promote: "SHIP dev → main. Merges your work into production and auto-tags prod-YYYY-MM-DD-NNN. build_and_run deploys MAIN, so nothing you patched is live until you call this. dry_run:true previews what would ship.",
+        ateam_github_promote: `SHIP ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} dry_run:true previews what would ship.`,
         ateam_github_rollback: "Revert main to a previous checkpoint",
       },
     },
@@ -3521,7 +3567,7 @@ export const handlers = {
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear — one at a time, with choices",
         "Deliver the FULL ask, including any requested UI/widget; stage only with the user's agreement",
-        "Writes land on `dev`; ONLY ateam_github_promote moves them to `main`, and build_and_run deploys main — so after any patch, tell the user their change is not live until it is promoted, and offer to run it.",
+        `After any write, say the change is not live yet and name the next step: ${BRANCH_WORKFLOW.one_line}.`,
       ],
       never: [
         "Talk to a business user like a developer — no jargon, no walls of text",

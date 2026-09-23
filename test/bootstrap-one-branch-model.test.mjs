@@ -89,5 +89,57 @@ check("it names promote as the only thing that moves work to main", /ONLY ateam_
 check("it says build_and_run deploys MAIN", /build_and_run deploys MAIN|deploys `?main`?/i.test(joined));
 check("it warns that skipping promote is silent", /NOT deployed|not live until|is NOT in this deploy|nothing you wrote is running/i.test(joined));
 
+console.log("ONE owner, not several copies");
+// The real fix is not "no forbidden phrases" — it is that no section RESTATES
+// the model. Six sections used to carry their own prose; now they render from
+// BRANCH_WORKFLOW, so changing it moves every surface together or none.
+const SRC = await import("node:fs").then((fs) =>
+  fs.readFileSync(new URL("../src/tools.js", import.meta.url), "utf8"));
+const bootstrapBody = SRC.slice(SRC.indexOf("ateam_bootstrap: async"), SRC.indexOf("ateam_status_all: async"));
+
+check("a single BRANCH_WORKFLOW definition exists", /const BRANCH_WORKFLOW = Object\.freeze\(\{/.test(SRC));
+check("it is frozen, so no section can mutate it for everyone else", /Object\.freeze/.test(SRC));
+
+// Every section that speaks about branches must do it THROUGH the owner.
+const refs = (bootstrapBody.match(/BRANCH_WORKFLOW\./g) || []).length;
+check(`the bootstrap sections render from it (${refs} references)`, refs >= 12);
+
+// Bounds by BRACE MATCHING, not a fixed window. A first cut sliced 2600 chars
+// from the section name and reported assistant_behavior_contract as not using
+// the owner — because that section is longer than the window. A check that
+// silently covers less than it claims is the failure mode this whole exercise
+// is about.
+const sectionBody = (name) => {
+  const at = bootstrapBody.indexOf(`${name}: {`);
+  if (at < 0) return null;
+  let i = bootstrapBody.indexOf("{", at), depth = 0;
+  for (let k = i; k < bootstrapBody.length; k++) {
+    if (bootstrapBody[k] === "{") depth++;
+    else if (bootstrapBody[k] === "}" && --depth === 0) return bootstrapBody.slice(at, k + 1);
+  }
+  return null;
+};
+
+for (const section of ["branching", "github_tools", "developer_loop", "assistant_behavior_contract"]) {
+  const block = sectionBody(section);
+  check(`${section} was found in the source`, !!block);
+  if (!block) continue;
+  check(`${section} renders from the owner rather than restating it`,
+        /BRANCH_WORKFLOW\./.test(block), `${block.length} chars scanned`);
+}
+
+// The canonical order must be present as an ordered loop, not as prose an
+// agent has to reassemble.
+const loop = boot.branching?.the_loop;
+check("the loop is an ordered list", Array.isArray(loop) && loop.length >= 4);
+if (Array.isArray(loop)) {
+  const joinedLoop = loop.join(" | ");
+  check("  step order is edit → review → ship → deploy",
+    /EDIT[\s\S]*REVIEW[\s\S]*SHIP[\s\S]*DEPLOY/.test(joinedLoop), joinedLoop.slice(0, 120));
+  check("  and github_tools shows the SAME array, not a paraphrase",
+    boot.github_tools?.iteration_workflow?.the_loop === loop ||
+    JSON.stringify(boot.github_tools?.iteration_workflow?.the_loop) === JSON.stringify(loop));
+}
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
