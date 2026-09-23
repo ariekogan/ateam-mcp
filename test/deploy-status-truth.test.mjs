@@ -46,19 +46,46 @@ test('a SKIPPED push is not reported as a push', () => {
   // skipped:true is returned both when GitHub is disabled and when
   // push_to_github was not opted in. Both used to read as success.
   assert.match(BLOCK, /github_result\?\.skipped \?/);
-  assert.match(BLOCK, /skipped[\s\S]{0,120}Core and GitHub now differ/);
+  assert.match(BLOCK, /GitHub push skipped/);
+});
+
+test('a skip after a PULL does not claim a divergence that does not exist', () => {
+  // This test used to pin `skipped … Core and GitHub now differ` as a single
+  // sentence — and that sentence is FALSE on the one path it most often fires:
+  // when the deploy PULLED from GitHub, the push-back is skipped precisely
+  // because Core was built from that content. They agree exactly. Telling the
+  // caller they "now differ" sends them to reconcile a repo that is correct.
+  //
+  // The test was defending the lie. It now requires the two cases to be
+  // distinguished, and requires the pull case to name the divergence that IS
+  // real: unpromoted work on dev is not in a deploy of main.
+  assert.match(BLOCK, /from github/i, 'the pull case is not distinguished from a real divergence');
+  assert.match(BLOCK, /Core matches the branch it was built from/);
+  assert.match(BLOCK, /ateam_github_promote\(solution_id\)/,
+    'the skip-after-pull case does not name the action that would include the missing work');
+  // The genuine divergence case must still say so.
+  assert.match(BLOCK, /Core and GitHub now differ/);
 });
 
 test('NO push attempted is distinguished from a successful one', () => {
   assert.match(BLOCK, /no GitHub push attempted/);
 });
 
-test('"pushed to main" is now conditional on a push having happened', () => {
-  // The exact regression: the phrase must not be reachable without github_result.
-  const claim = BLOCK.indexOf("'+ pushed to main'");
+test('the success phrase is conditional on a push having happened', () => {
+  // The exact regression: the phrase must not be reachable without
+  // github_result. Anchored on `pushed to` rather than the old literal
+  // "pushed to main" — that literal was itself wrong, since the push has
+  // resolved to `dev` since 6e4470e and the envelope now reports the branch
+  // the push actually reported.
+  const claim = BLOCK.indexOf('`+ pushed to ${github_result.branch');
   assert.ok(claim > 0, 'the success phrase vanished — re-anchor');
   const guard = BLOCK.slice(0, claim);
-  assert.match(guard, /github_result \?/, '"pushed to main" is no longer guarded by github_result');
+  assert.match(guard, /github_result \?/, 'the success phrase is no longer guarded by github_result');
+});
+
+test('the status names the branch the push REPORTED, not a hardcoded one', () => {
+  assert.doesNotMatch(BLOCK, /'\+ pushed to main'/,
+    'build_and_run claims "pushed to main" again — the push resolves to dev');
 });
 
 test('widget_health no longer gates the push claim', () => {

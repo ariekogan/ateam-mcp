@@ -3293,8 +3293,8 @@ export const handlers = {
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
-        { step: 3, action: "Version", description: "Every deploy auto-pushes to main on GitHub. The repo (tenant--solution-id) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log"] },
-        { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch, then redeploy with ateam_build_and_run (auto-pulls from GitHub). NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch.", tools: ["ateam_github_patch", "ateam_build_and_run", "ateam_patch"] },
+        { step: 3, action: "Version", description: "Every deploy auto-pushes to `dev` on GitHub — NOT main. main moves only when you call ateam_github_promote, and build_and_run deploys main, so an unpromoted change is not deployed. The repo (one per TENANT) is the source of truth for connector code.", tools: ["ateam_github_status", "ateam_github_log", "ateam_github_promote"] },
+        { step: 4, action: "Iterate", description: "Edit connector code ONE FILE AT A TIME via ateam_github_patch (lands on `dev`), then ateam_github_promote(solution_id) to merge dev → main, then ateam_build_and_run to deploy MAIN. The promote is not optional — build_and_run deploys main, so an unpromoted edit is not deployed. NEVER re-pass all connector code inline after first deploy. For skill definitions, use ateam_patch (also lands on dev).", tools: ["ateam_github_patch", "ateam_github_promote", "ateam_build_and_run", "ateam_patch"] },
         { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
       ],
@@ -3315,11 +3315,24 @@ export const handlers = {
       },
     },
     branching: {
-      _important: "Single-branch model: ALL changes go directly to 'main'. Use checkpoints (safe-* tags) as safe rollback points.",
-      main: "The only branch. All deploys, patches, and github_patches commit here automatically. This IS the live running system.",
-      checkpoints: "ateam_github_promote(solution_id) — creates a safe-YYYY-MM-DD-NNN tag on current main HEAD. Use before risky changes.",
-      rollback: "ateam_github_rollback(solution_id, tag) — reverts main to a previous checkpoint tag.",
-      workflow: "Build → iterate on main → test → checkpoint when stable → continue iterating.",
+      _important:
+        "TWO BRANCHES, and the step between them is EXPLICIT. You work on `dev`. Nothing you write reaches production until you PROMOTE. " +
+        "This block told every first-turn agent the opposite — \"Single-branch model: ALL changes go directly to main\" — from 2026-03-21 (4eced4f) until 2026-09-23. " +
+        "promote became a real dev→main MERGE on 2026-05-19 (7a75479) and this narrative was never brought forward, so an agent following it wrote to dev, deployed main, and could not see why its edits had no effect.",
+      dev: "WHERE YOU WORK. ateam_github_patch, ateam_github_write and ateam_patch all write here by default. Safe: nothing here is live.",
+      main: "PRODUCTION, and ONLY ateam_github_promote writes it. ateam_build_and_run deploys MAIN — there is no ref parameter — so work that has not been promoted is not deployed.",
+      the_loop: [
+        "1. ateam_github_patch / ateam_github_write / ateam_patch   → lands on dev",
+        "2. ateam_github_promote(solution_id)                       → merges dev → main, auto-tags prod-YYYY-MM-DD-NNN",
+        "3. ateam_build_and_run(solution_id)                        → deploys MAIN",
+      ],
+      the_mistake_this_causes:
+        "Skipping step 2. Your patches succeed, build_and_run reports success, and NOTHING you wrote is running — because main never moved. " +
+        "If a deploy behaves as though your changes do not exist, call ateam_github_promote and deploy again. " +
+        "ateam_build_and_run now refuses with MAIN_BEHIND_DEV and names the tool, rather than letting you find this out by reading a diff.",
+      dry_run_first: "ateam_github_promote(solution_id, dry_run:true) shows the commits and files about to ship without merging.",
+      rollback: "ateam_github_rollback(solution_id, target) — roll main back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history.",
+      no_git_at_all: "A tenant with no repo connected works entirely on the Builder's own store — no branches, no promote. ateam_patch(source:'local') is the explicit form. Connect a repo later and work starts landing on dev from that point on.",
     },
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
@@ -3328,7 +3341,7 @@ export const handlers = {
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
     github_tools: {
-      _note: "Version control for solutions. Single-branch model — everything on 'main'. Use checkpoints as safe rollback points.",
+      _note: "Version control for solutions. TWO branches: you work on `dev`, and ateam_github_promote merges dev → main. build_and_run deploys MAIN. See `branching` above.",
       tools: ["ateam_github_push", "ateam_github_pull", "ateam_github_status", "ateam_github_read", "ateam_github_patch", "ateam_github_log", "ateam_github_promote", "ateam_github_rollback", "ateam_github_list_versions"],
       repo_structure: {
         "solution.json": "Full solution definition",
@@ -3336,19 +3349,19 @@ export const handlers = {
         "connectors/{connector-id}/server.js": "Connector MCP server code",
         "connectors/{connector-id}/package.json": "Connector dependencies",
       },
-      branch: "main — the only branch. All changes land here directly.",
-      checkpoints: "safe-YYYY-MM-DD-NNN tags mark safe rollback points. Create with ateam_github_promote().",
+      branch: "dev for every write; main for every deploy. ateam_github_promote is the ONLY thing that moves work from one to the other.",
+      checkpoints: "prod-YYYY-MM-DD-NNN tags are created automatically by each promote, and are what ateam_github_rollback rolls back to.",
       iteration_workflow: {
-        code_changes: "ateam_github_patch (one file at a time, commits to main) → ateam_build_and_run() (auto-pulls from GitHub, redeploys)",
-        definition_changes: "ateam_patch (updates + redeploys + auto-pushes to main)",
+        code_changes: "ateam_github_patch (ONE FILE PER CALL, lands on dev) → ateam_github_promote(solution_id) → ateam_build_and_run() deploys main",
+        definition_changes: "ateam_patch (updates + redeploys + lands on dev) → ateam_github_promote(solution_id) when you want it in production",
         first_deploy: "Must include mcp_store — this creates the GitHub repo",
-        after_first_deploy: "NEVER pass mcp_store again. Write files via ateam_github_patch, then ateam_build_and_run() auto-detects the repo.",
-        checkpoint: "ateam_github_promote(solution_id) — tag current state as a safe rollback point",
+        after_first_deploy: "NEVER pass mcp_store again. Write files via ateam_github_patch, promote, then ateam_build_and_run() auto-detects the repo.",
+        do_not_skip_promote: "Every line above has a promote in it for a reason: build_and_run deploys MAIN. Without a promote your edits sit on dev and the deploy ships the previous state.",
       },
       when_to_use_what: {
         ateam_github_write: "Write/create connector files on main — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy.",
         ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
-        ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to main",
+        ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to `dev`. Promote when you want it in production.",
         "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
         ateam_github_promote: "Create a checkpoint (safe-* tag) — use before risky changes",
@@ -4179,7 +4192,18 @@ export const handlers = {
     return {
       ok: true,
       solution_id: solutionId,
-      branch: 'main',
+      // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts, and
+      // this asserted one value for both. Since the write path moved to `dev`
+      // (6e4470e, "one branch for the whole loop"), the push returns
+      // branch:'dev' plus a _note saying "Landed on dev, NOT main" — and this
+      // envelope spread that note into `github:` while its own top-level
+      // `branch: 'main'` said the opposite. The warning was reached and then
+      // contradicted by the object carrying it.
+      //
+      // b02c008 swept exactly this for ateam_patch and called itself "sweep
+      // #1". build_and_run was never swept.
+      deployed_from_branch: 'main',
+      ...(github_result?.branch && { pushed_to_branch: github_result.branch }),
       phases,
       deploy: {
         skills_deployed: deploy.import?.skills || [],
@@ -4205,14 +4229,26 @@ export const handlers = {
       _status: [
         '✅ Deployed to Core',
         github_result?.error ? `⚠️ GitHub push FAILED: ${github_result.error}`
-          : github_result?.skipped ? `⚠️ GitHub push skipped${github_result.reason ? ` (${github_result.reason})` : ''} — Core and GitHub now differ`
-          : github_result ? '+ pushed to main'
+          // A SKIP IS NOT ALWAYS A DIVERGENCE. When the deploy PULLED from
+          // GitHub, the push-back is skipped precisely because Core was built
+          // from that content — they agree exactly, and telling the caller they
+          // "now differ" sends them to reconcile a repo that is already
+          // correct. The divergence that DOES exist on that path is the one
+          // nobody mentions: dev may be ahead of the main we deployed.
+          : github_result?.skipped ? `⚠️ GitHub push skipped${github_result.reason ? ` (${github_result.reason})` : ''}`
+            + (/from github/i.test(github_result.reason || '')
+                ? ' — Core matches the branch it was built from. If you have unpromoted work on `dev`, it is NOT in this deploy: ateam_github_promote(solution_id), then deploy again.'
+                : ' — Core and GitHub now differ')
+          : github_result ? `+ pushed to ${github_result.branch || 'dev'}`
           : '⚠️ no GitHub push attempted — Core and GitHub may differ',
         ...(widget_health && !widget_health.ok
           ? [`⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`]
           : []),
       ].join(' '),
-      _next: 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
+      // promote is a SHIP, not a checkpoint. It merges dev → main; the tag is a
+      // side effect. Calling it "create a checkpoint" is what left agents
+      // thinking their work was already on main.
+      _next: 'This deployed `main`. Anything you patched since the last promote is still on `dev` and is NOT in this deploy — ateam_github_promote(solution_id) merges dev → main (dry_run:true to preview), then deploy again.',
     };
   },
 
