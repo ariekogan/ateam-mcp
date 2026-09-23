@@ -6353,6 +6353,12 @@ export const handlers = {
       failed: failedCount,
       total: totalCount,
       skills: result.skills || [],
+      // PASS THROUGH what the Builder decided. `status` carries
+      // "deployed_with_errors" — a real outcome, neither a clean success nor a
+      // failure — and `verification` carries why. This key list had never heard
+      // of either, so both were dropped one hop from the caller.
+      ...(result.status && { status: result.status }),
+      ...(result.verification && { verification: result.verification }),
       // Surface the underlying error when the request failed — the most
       // common cause is a validator failure (e.g. broken connector source
       // in the GitHub repo), and hiding it makes diagnosis impossible.
@@ -6365,7 +6371,14 @@ export const handlers = {
           : `Re-deployed ${deployedCount} skill(s) successfully.`
         : (result.error
             ? `Re-deploy failed: ${result.error}${result.hint ? ` — ${result.hint}` : ''}`
-            : `Re-deploy had ${failedCount} failure(s). Check skills array or call the underlying endpoint with verbose:true.`),
+            // "Check skills array" was the advice given WHILE the skills array
+            // was empty — the async branch never populated it. Say what is
+            // actually known, and only mention the array when there is one.
+            : (result.skills?.length
+                ? `Re-deploy had ${failedCount} failure(s) — see skills[].`
+                : `Re-deploy reported ${failedCount} failure(s) but named no skill and gave no reason. `
+                  + `That is a reporting fault, not necessarily a deploy fault: check ateam_get_solution(view:"status") `
+                  + `before redeploying, in case the skill actually landed.`)),
     };
     // If the deploy landed and the solution declares widgets, verify each one
     // actually renders (discovered by Core + has a render block). A silently
