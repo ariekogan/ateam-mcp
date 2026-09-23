@@ -664,14 +664,21 @@ export function formatError(method, path, status, body, baseUrl) {
   // morning, stopped, and asked the admin to paste an API key — for an error
   // that had nothing to do with keys. An error naming the wrong remedy does not
   // just fail; it sends someone competent in the wrong direction.
-  if (status === 401) {
+  // 400 is here too. The same cause reaches us with two different codes
+  // depending on which hop classified it: Core answers 401 directly, while the
+  // Builder's test route hands back a 400 ACTOR_NOT_FOUND. Keying this on 401
+  // alone meant the correctly-classified one missed the hint entirely — the
+  // guard did not follow the fix.
+  if (status === 401 || status === 400) {
     const t = typeof body === "string"
       ? body
       : (() => { try { return JSON.stringify(body || ""); } catch { return ""; } })();
-    const m = /Actor\s+\\?"([^"\\]+)\\?"\s+not found|unknown actor\s+\\?"?([^"\\,}]+)/i.exec(t);
+    const m = /Actor\s+\\?"([^"\\]+)\\?"\s+not found|unknown actor\s+\\?"?([^"\\,}]+)|ACTOR_NOT_FOUND/i.exec(t);
     if (m) {
-      const who = (m[1] || m[2] || "").trim();
-      hints[401] =
+      // The ACTOR_NOT_FOUND alternative carries a code, not a name — say "the
+      // actor you sent" rather than printing empty quotes.
+      const who = (m[1] || m[2] || "").trim() || "you sent";
+      hints[status] =
         `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
         `Re-authenticating will not help. Either pass a real actor id (the one ateam_conversation returned for the thread), ` +
         `or omit the actor entirely to act as the tenant. If you never sent an actor, the session is bound to a stale one: ` +
@@ -832,7 +839,15 @@ async function request(method, path, body, sessionId, opts = {}) {
         // come from narrows the entrance; this is the exit. Unbinding costs
         // nothing when the actor was genuinely wrong, and the next call simply
         // acts as the tenant until a real actor is passed.
-        if (res.status === 401 && /Actor\s+\\?"?[^"\\,}]+\\?"?\s+not found|unknown actor/i.test(text)) {
+        // 400 as well as 401 — see the hint block above. The Builder's test
+        // route classifies this correctly as 400 ACTOR_NOT_FOUND, and keying
+        // the self-heal on 401 alone meant the BETTER-classified error was the
+        // one that failed to clear the poisoned binding. Every subsequent call
+        // in the session then re-sent the actor Core had just rejected, which
+        // is precisely the latch the external build hit: a refused actor_id
+        // survived into ateam_upload_connector, a call that takes no actor.
+        if ((res.status === 401 || res.status === 400)
+            && /Actor\s+\\?"?[^"\\,}]+\\?"?\s+not found|unknown actor|ACTOR_NOT_FOUND/i.test(text)) {
           clearSessionActor(sessionId, `Core rejected it on ${method} ${path}`);
         }
         // Attach the HTTP status so callers can distinguish a genuine 404

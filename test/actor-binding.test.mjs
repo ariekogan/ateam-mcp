@@ -16,6 +16,7 @@ import {
   touchSession,
   clearSessionActor,
   getSessionContext,
+  formatError,
 } from "../src/api.js";
 
 let failures = 0;
@@ -54,24 +55,40 @@ check("a generated thread key does NOT overwrite a real actor",
 
 clearSessionActor(SID, "cleanup");
 
-// ─── The 401 must name the right cause ───────────────────────────────────────
-// Matching the classifier used in formatError. If this regex and that one drift,
-// the hint silently reverts to blaming the API key — which is the whole defect.
-console.log("401 classification");
+// ─── The error must name the right cause ─────────────────────────────────────
+//
+// This section used to declare its OWN copy of the classifier regex and test
+// that copy — so it proved a string in this file matched a string in this
+// file, and production was never called. It passed while the real classifier
+// missed the 400 form entirely. It now calls formatError.
+console.log("actor-not-found classification");
 
-const ACTOR_401 = /Actor\s+\\?"([^"\\]+)\\?"\s+not found|unknown actor\s+\\?"?([^"\\,}]+)/i;
+const say = (status, body) => formatError("POST", "/solutions/x/skills/y/test", status, JSON.stringify(body), "https://api.ateam-ai.com");
 
-const actorBody = JSON.stringify({
-  ok: false, connector_id: "invoice-mcp", error: 'Actor "dev" not found',
-});
-const m = ACTOR_401.exec(actorBody);
-check("an actor-not-found 401 is recognised", !!m);
-check("  and the offending actor is extracted", (m?.[1] || m?.[2]) === "dev");
+for (const status of [401, 400]) {
+  // BOTH codes carry this cause. Core answers 401 directly; the Builder's test
+  // route classifies it correctly as 400 ACTOR_NOT_FOUND. Keying on 401 alone
+  // meant the better-classified one got the key-is-invalid hint.
+  const msg = say(status, { ok: false, connector_id: "invoice-mcp", error: 'Actor "dev" not found' });
+  check(`${status}: names the ACTOR as the cause`, /does not recognise the ACTOR/i.test(msg));
+  check(`${status}:   and names WHICH actor`, /"dev"/.test(msg));
+  check(`${status}:   and says re-authenticating will not help`, /Re-authenticating will not help/i.test(msg));
+  check(`${status}:   and does NOT blame the API key`, !/key may be invalid or expired/i.test(msg));
+}
 
-check("a genuine invalid-key 401 is NOT reclassified",
-  !ACTOR_401.test(JSON.stringify({ error: "Invalid or unconfigured API key" })));
+// The Builder emits a code rather than the actor's name in some shapes.
+const coded = say(400, { ok: false, code: "ACTOR_NOT_FOUND", error: "Core does not recognize actor" });
+check("the ACTOR_NOT_FOUND code alone is enough to reclassify", /does not recognise the ACTOR/i.test(coded));
+check("  and it never prints empty quotes for the name", !/ACTOR ""/.test(coded));
+
+// Narrowing, not replacement — a real auth failure must still say so.
+const realAuth = say(401, { error: "Invalid or unconfigured API key" });
+check("a genuine invalid-key 401 is NOT reclassified", !/does not recognise the ACTOR/i.test(realAuth));
+check("  and still blames the key", /key/i.test(realAuth));
 check("an unrelated 401 is NOT reclassified",
-  !ACTOR_401.test(JSON.stringify({ error: "Authentication required" })));
+  !/does not recognise the ACTOR/i.test(say(401, { error: "Authentication required" })));
+check("an unrelated 400 is NOT reclassified",
+  !/does not recognise the ACTOR/i.test(say(400, { error: "message is required" })));
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
