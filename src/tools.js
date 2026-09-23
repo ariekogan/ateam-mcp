@@ -594,7 +594,7 @@ export const tools = [
       properties: {
         topic: {
           type: "string",
-          enum: ["capabilities", "realizations", "overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "monitoring"],
+          enum: ["capabilities", "realizations", "overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "host-contract", "platform-connectors", "platform-truth", "sdk", "workflows", "monitoring"],
           description:
             "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
@@ -2565,6 +2565,17 @@ const SPEC_PATHS = {
   // vs a photo loop, live GPS vs last-synced, an in-process voice device call
   // vs a server round trip.
   realizations: "/spec/realizations",
+  // Served by every deployment and nameable by NOBODY until 2026-09-23: these
+  // five were absent from both hand-maintained lists in this file, so no agent
+  // could request them however correctly it asked. test/spec-topics.test.mjs
+  // proved the enum and the map agreed with EACH OTHER — two copies of our own
+  // belief — and could not see that the server served more than both.
+  // It now checks against the deployment.
+  "host-contract": "/spec/host-contract",
+  "platform-connectors": "/spec/platform-connectors",
+  "platform-truth": "/spec/platform-truth",
+  sdk: "/spec/sdk",
+  workflows: "/spec/workflows",
 };
 
 const EXAMPLE_PATHS = {
@@ -3701,7 +3712,17 @@ export const handlers = {
         watching_a_run: "Poll ateam_chain_status (every ~2s, or ~30s for a long build) and read chain_done + last_activity_at/idle_seconds/activity_source. Call ateam_get_chain ONCE at the end for the full tree.",
       };
     }
+    // An unknown topic used to leave `path` undefined, so the fetch targeted
+    // "<base>undefined" — a host that does not exist. The DNS failure surfaced
+    // as "check your internet connection", about a deployment that had just
+    // answered. get_examples, twenty lines below, has had exactly this guard
+    // since 04c24ce; it was never brought up here.
     let path = SPEC_PATHS[topic];
+    if (!path) {
+      throw new Error(
+        `Unknown spec topic "${topic}". Available: ${Object.keys(SPEC_PATHS).join(", ")}.`
+      );
+    }
     const params = new URLSearchParams();
     if (section) params.set('section', section);
     if (search) params.set('search', search);
@@ -6453,6 +6474,10 @@ const MAX_RESPONSE_CHARS = 50_000;
 /**
  * Format tool results — summarize oversized payloads.
  */
+// Exported for test/spec-topics.test.mjs: the truncation is asserted against
+// a REAL oversized payload, not against a regex over this file.
+export { formatResult as formatResultForTest };
+
 function formatResult(result, toolName) {
   const json = JSON.stringify(result, null, 2);
 
@@ -6462,6 +6487,12 @@ function formatResult(result, toolName) {
 
   // For large responses, provide a summary + truncated data
   const summary = summarizeLargeResult(result, toolName);
+  // A summarizer that produced COMPLETE, valid JSON — one that indexed what it
+  // omitted instead of cutting mid-token — must not have an English sentence
+  // stapled to the end of it. That sentence is what made the output
+  // unparseable, and it says "truncated" about a document that already
+  // explains its own omissions in a field.
+  if (summary.startsWith("{") && summary.includes('"_truncation"')) return summary;
   return summary + `\n\n(Response truncated from ${json.length.toLocaleString()} chars. Use more specific queries to get smaller results.)`;
 }
 
@@ -6469,14 +6500,78 @@ function formatResult(result, toolName) {
  * Create a useful summary for large results.
  */
 function summarizeLargeResult(result, toolName) {
-  // Spec responses — keep content but cap size
-  if (toolName === "ateam_get_spec" && result && typeof result === "object") {
-    const keys = Object.keys(result);
+  // Spec responses — drop the BIGGEST section, keep every other one WHOLE.
+  //
+  // This used to `.slice(0, MAX_RESPONSE_CHARS)` a pretty-printed document,
+  // which fails twice: the output is truncated mid-token and is no longer
+  // valid JSON, and everything after the cut is gone with no mention that it
+  // existed. /spec/capabilities — the topic bootstrap names as the FIRST call
+  // an agent should make — is ~50KB, of which `questions` is ~45KB. So the cut
+  // landed inside `questions` and took `composing_several` and
+  // `if_your_question_is_not_here` with it. The reader could not tell: a
+  // truncated doc looks exactly like a short one.
+  //
+  // Sections are dropped largest-first, each replaced by a stub that says what
+  // it was and how to fetch it, until the whole thing fits. Valid JSON, and
+  // nothing vanishes silently.
+  if (toolName === "ateam_get_spec" && result && typeof result === "object" && !Array.isArray(result)) {
+    const out = { ...result };
+    const omitted = [];
+    const sizeOf = (v) => JSON.stringify(v ?? null).length;
+    const fits = () => JSON.stringify({ _truncation: "", sections: Object.keys(result), ...out }, null, 2).length <= MAX_RESPONSE_CHARS;
+
+    // Largest first — dropping one 45KB section beats dropping ten small ones.
+    const bySize = Object.keys(out)
+      .filter((k) => typeof out[k] === "object" && out[k] !== null)
+      .sort((a, b) => sizeOf(out[b]) - sizeOf(out[a]));
+
+    for (const key of bySize) {
+      if (fits()) break;
+      const value = out[key];
+      const idOf = (e) => e?.id || e?.q || e?.name;
+      const whole = sizeOf(value);
+      const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
+
+      if (Array.isArray(value)) {
+        // Fill the remaining budget with WHOLE entries rather than dropping
+        // all of them — the cap is 50K and this section is usually the only
+        // thing over it, so most of it fits. Partial beats absent, as long as
+        // the reader is told which entries are missing.
+        const kept = [];
+        out[key] = kept;
+        for (const entry of value) {
+          kept.push(entry);
+          if (!fits()) { kept.pop(); break; }
+        }
+        if (kept.length === value.length) continue;   // it all fit after all
+        const missing = value.slice(kept.length).map(idOf).filter(Boolean);
+        omitted.push(`${key} (${kept.length}/${value.length} included)`);
+        out[key] = {
+          _partial: `${kept.length} of ${value.length} entries included; the rest are indexed below (${whole.toLocaleString()} chars whole).`,
+          _how_to_read_the_rest: how,
+          not_included_ids: missing,
+          included: kept,
+        };
+      } else {
+        omitted.push(key);
+        out[key] = {
+          _omitted: `too large to inline (${whole.toLocaleString()} chars)`,
+          _how_to_read_it: how,
+          // The index survives even when the content cannot — knowing WHAT is
+          // in there is most of the value, and it is what the tail-slice ate.
+          count: Object.keys(value).length,
+          keys: Object.keys(value),
+        };
+      }
+    }
+
     return JSON.stringify({
-      _note: `A-Team spec with ${keys.length} sections. Content truncated — ask about specific sections for detail.`,
-      sections: keys,
-      ...result,
-    }, null, 2).slice(0, MAX_RESPONSE_CHARS);
+      _truncation: omitted.length
+        ? `${omitted.length} section(s) were too large to inline and are indexed rather than included: ${omitted.join(", ")}. EVERY OTHER SECTION BELOW IS COMPLETE.`
+        : "nothing omitted",
+      sections: Object.keys(result),
+      ...out,
+    }, null, 2);
   }
 
   // Validation results — keep errors/warnings, trim echoed input
