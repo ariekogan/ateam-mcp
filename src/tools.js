@@ -2278,7 +2278,7 @@ export const tools = [
     name: "ateam_github_promote",
     core: true,
     description:
-      "SHIP DEV TO PROD. Merges the `dev` branch into `main` and auto-tags the new main HEAD as safe-YYYY-MM-DD-NNN. " +
+      "SHIP DEV TO PROD. Merges the `dev` branch into `main` and auto-tags the new main HEAD as prod-YYYY-MM-DD-NNN. " +
       "Use after testing your dev work, when you're ready to deploy changes to production.\n\n" +
       "Workflow: 1) ateam_github_patch (writes to dev) → 2) ateam_github_promote (merges dev→main) → 3) ateam_build_and_run (deploys main).\n\n" +
       "Pass dry_run:true to see what's about to ship without merging.\n\nON 409 MERGE CONFLICT: main holds commits dev never received. Call ateam_github_sync_from_main(solution_id) to merge main into dev, then promote again. Only if THAT also returns 409 did both sides edit the same lines — that one needs a human (open a PR on GitHub).",
@@ -3364,7 +3364,7 @@ export const handlers = {
         ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to `dev`. Promote when you want it in production.",
         "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
-        ateam_github_promote: "Create a checkpoint (safe-* tag) — use before risky changes",
+        ateam_github_promote: "SHIP dev → main. Merges your work into production and auto-tags prod-YYYY-MM-DD-NNN. build_and_run deploys MAIN, so nothing you patched is live until you call this. dry_run:true previews what would ship.",
         ateam_github_rollback: "Revert main to a previous checkpoint",
       },
     },
@@ -3521,7 +3521,7 @@ export const handlers = {
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear — one at a time, with choices",
         "Deliver the FULL ask, including any requested UI/widget; stage only with the user's agreement",
-        "ALL changes go directly to main — suggest ateam_github_promote() to create a checkpoint before risky changes",
+        "Writes land on `dev`; ONLY ateam_github_promote moves them to `main`, and build_and_run deploys main — so after any patch, tell the user their change is not live until it is promoted, and offer to run it.",
       ],
       never: [
         "Talk to a business user like a developer — no jargon, no walls of text",
@@ -4829,7 +4829,7 @@ export const handlers = {
         : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
-        : 'Create a checkpoint before making more changes: ateam_github_promote(solution_id)',
+        : 'Your changes are on `dev`. They are NOT in production until you promote: ateam_github_promote(solution_id) merges dev → main (dry_run:true to preview), then ateam_build_and_run to deploy.',
     };
   },
 
