@@ -16,6 +16,8 @@
  *   - ateam_build_and_run — auto-invoked post-deploy (non-fatal)
  */
 
+import { BRANCH_WORKFLOW } from './branchWorkflow.js';
+
 export const AGENT_DOC_SENTINEL = "<!-- SOLUTION-SPECIFIC NOTES BELOW — not auto-regenerated -->";
 
 /**
@@ -120,20 +122,27 @@ ${repoLayout}
 
 ---
 
-## 6. Dev workflow (single-branch, GitHub-first)
+## 6. Dev workflow (two branches — \`${BRANCH_WORKFLOW.write_branch}\` then \`${BRANCH_WORKFLOW.deploy_branch}\`)
 
-Everything lands on \`main\` directly. Checkpoints via \`safe-*\` tags.
+${BRANCH_WORKFLOW.one_line}
+
+${BRANCH_WORKFLOW.write_side}
+
+${BRANCH_WORKFLOW.deploy_side}
 
 \`\`\`
-1. git clone <this repo>
+1. git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch}
 2. edit code in your IDE / agent
-3. git commit && git push origin main
-4. ateam_build_and_run(solution_id: "${solId}", github: true)
-5. ateam_test_skill / ateam_test_connector  — verify
-6. ateam_github_promote(solution_id)          — checkpoint when green
+3. git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
+4. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}", dry_run: true)   — see exactly what would ship
+5. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}")                  — merges ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}, tags ${BRANCH_WORKFLOW.tag_format}
+6. ateam_build_and_run(solution_id: "${solId}", github: true)      — deploys \`${BRANCH_WORKFLOW.deploy_branch}\`
+7. ateam_test_skill / ateam_test_connector                         — verify
 \`\`\`
 
-Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same effect.
+**${BRANCH_WORKFLOW.the_silent_mistake}**
+
+Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same effect, same branch.
 
 **First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
 

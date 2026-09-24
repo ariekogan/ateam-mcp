@@ -24,6 +24,7 @@
 //
 // Run: node test/bootstrap-one-branch-model.test.mjs
 import { handlers } from "../src/tools.js";
+import { renderAgentDocHeader } from "../src/agentDoc.js";
 
 let failures = 0;
 const check = (name, cond, detail = "") => {
@@ -58,12 +59,53 @@ const OLD_MODEL = [
   { re: /only branch/i, why: '"main is the only branch"' },
   { re: /auto-pushes to main/i, why: '"every deploy pushes main"' },
   { re: /commits? (?:here|to main) automatically/i, why: '"patches commit to main automatically"' },
+
+  // ── ADDED 2026-09-24, AND THE REASON MATTERS ──
+  // agentDoc.js carried the retired model for months and NOT ONE of the five
+  // patterns above matched its wording. The guard existed, ran green, and
+  // could not have failed on the surface that mattered most. Widened to the
+  // phrasings actually found there, so this set is shaped by what drifted
+  // rather than by what I imagined would drift.
+  { re: /single-branch/i, why: 'the bare word "single-branch"' },
+  { re: /Everything lands on [`'"]?main/i, why: '"everything lands on main directly"' },
+  { re: /push origin main/, why: "an instruction to push straight to production" },
+  { re: /safe-\*/, why: "the retired safe-* tag format" },
+  { re: /checkpoint when green/i, why: "promote framed as a checkpoint rather than a ship" },
 ];
 for (const { re, why } of OLD_MODEL) {
   const hits = ALL.filter((s) => re.test(s.text) && !HISTORY_NOTE.test(s.text));
   check(`${why} appears nowhere`, hits.length === 0,
         hits.map((h) => h.path).join(", "));
 }
+
+console.log("the AGENT DOC teaches the same model — it is the copy that PERSISTS");
+// Bootstrap prose dies with the session. CLAUDE.md is committed into the
+// tenant's own repo on every build_and_run and is then read by every future
+// agent and human there, including ones that never call ateam_bootstrap. It
+// taught the retired model — "Everything lands on `main` directly",
+// "git push origin main", "safe-*" — for months, because this guard only ever
+// looked at bootstrap.
+const AGENT_DOC = renderAgentDocHeader({
+  solution: { id: "guard-test" }, skills: [], connectors: [],
+});
+check("the agent doc rendered", AGENT_DOC.length > 200, `${AGENT_DOC.length} chars`);
+check("it still has a dev-workflow section to guard", /## 6\./.test(AGENT_DOC));
+
+for (const { re, why } of OLD_MODEL) {
+  check(`agent doc: ${why} appears nowhere`, !re.test(AGENT_DOC));
+}
+check("agent doc names the write branch", AGENT_DOC.includes("`dev`"));
+check("agent doc names the promote tool", AGENT_DOC.includes("ateam_github_promote"));
+check("agent doc carries the current tag format", AGENT_DOC.includes("prod-YYYY-MM-DD-NNN"));
+
+console.log("the branch story has ONE owner, importable by both consumers");
+// tools.js imports agentDoc.js, so agentDoc cannot import tools back — which is
+// exactly why it kept a private copy. The fact now lives in its own module.
+const { BRANCH_WORKFLOW } = await import("../src/branchWorkflow.js");
+check("BRANCH_WORKFLOW is importable on its own", typeof BRANCH_WORKFLOW === "object");
+check("it is frozen", Object.isFrozen(BRANCH_WORKFLOW));
+check("the agent doc renders FROM it, not from a copy",
+      AGENT_DOC.includes(BRANCH_WORKFLOW.one_line) && AGENT_DOC.includes(BRANCH_WORKFLOW.write_side));
 
 console.log("promote is described as a SHIP, not a checkpoint");
 // A tag is a side effect of the merge. Calling it a checkpoint is what left
@@ -97,8 +139,20 @@ const SRC = await import("node:fs").then((fs) =>
   fs.readFileSync(new URL("../src/tools.js", import.meta.url), "utf8"));
 const bootstrapBody = SRC.slice(SRC.indexOf("ateam_bootstrap: async"), SRC.indexOf("ateam_status_all: async"));
 
-check("a single BRANCH_WORKFLOW definition exists", /const BRANCH_WORKFLOW = Object\.freeze\(\{/.test(SRC));
-check("it is frozen, so no section can mutate it for everyone else", /Object\.freeze/.test(SRC));
+// The definition MOVED (2026-09-24) out of tools.js into its own module, because
+// a second consumer appeared that tools.js cannot serve: agentDoc.js renders the
+// tenant's CLAUDE.md, and tools.js already imports agentDoc — so agentDoc
+// importing tools back is a cycle. It kept a private copy instead, and that copy
+// taught the retired model for months. Assert the owner is in the shared module
+// and that tools.js no longer defines its own.
+const OWNER_SRC = await import("node:fs").then((fs) =>
+  fs.readFileSync(new URL("../src/branchWorkflow.js", import.meta.url), "utf8"));
+check("a single BRANCH_WORKFLOW definition exists, in the shared module",
+      /export const BRANCH_WORKFLOW = Object\.freeze\(\{/.test(OWNER_SRC));
+check("tools.js imports it rather than redefining it",
+      /import \{ BRANCH_WORKFLOW \} from ['"]\.\/branchWorkflow\.js['"]/.test(SRC)
+      && !/const BRANCH_WORKFLOW = Object\.freeze/.test(SRC));
+check("it is frozen, so no consumer can mutate it for everyone else", /Object\.freeze/.test(OWNER_SRC));
 
 // Every section that speaks about branches must do it THROUGH the owner.
 const refs = (bootstrapBody.match(/BRANCH_WORKFLOW\./g) || []).length;
