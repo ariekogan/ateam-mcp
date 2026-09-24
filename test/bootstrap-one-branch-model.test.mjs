@@ -195,5 +195,22 @@ if (Array.isArray(loop)) {
     JSON.stringify(boot.github_tools?.iteration_workflow?.the_loop) === JSON.stringify(loop));
 }
 
+console.log("the agent doc's git steps work on a repo that has no dev branch yet");
+// CAUGHT BY ARIE, not by a test: the first cut told the reader
+// `git checkout dev`, which FAILS on a tenant repo that only has `main`.
+// ensureDevBranch (Builder githubService.js:836) creates `dev` from `main` on
+// the first PLATFORM write, so a repo only ever written by hand does not have
+// it. Three live tenant repos were in exactly that state.
+//
+// A doc that tells an agent to run a command that errors is not a smaller
+// defect than one that teaches the wrong model — it just fails louder.
+check("step 1 does not assume dev already exists",
+      /git checkout dev 2>\/dev\/null \|\| git checkout -b dev/.test(AGENT_DOC),
+      "a main-only tenant repo would fail at step 1");
+check("and it SAYS why, so the reader is not guessing",
+      /may not exist yet/.test(AGENT_DOC) && /ensureDevBranch/.test(AGENT_DOC));
+check("no step pushes to the deploy branch",
+      !/git push origin main/.test(AGENT_DOC));
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

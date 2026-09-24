@@ -128,10 +128,15 @@ ${BRANCH_WORKFLOW.one_line}
 
 ${BRANCH_WORKFLOW.write_side}
 
+> \`${BRANCH_WORKFLOW.write_branch}\` may not exist yet in this repo. The platform creates it from
+> \`${BRANCH_WORKFLOW.deploy_branch}\` on the first write it makes (ensureDevBranch), so a repo that has
+> only ever been written to by hand will not have it until then — hence the
+> \`|| git checkout -b\` in step 1.
+
 ${BRANCH_WORKFLOW.deploy_side}
 
 \`\`\`
-1. git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch}
+1. git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch} 2>/dev/null || git checkout -b ${BRANCH_WORKFLOW.write_branch}
 2. edit code in your IDE / agent
 3. git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
 4. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}", dry_run: true)   — see exactly what would ship
