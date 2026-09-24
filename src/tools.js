@@ -107,6 +107,79 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
 // async path (it sends no deploy_status) — alone it says nothing was wrong.
 const CLEAN_REDEPLOY_OUTCOMES = new Set(["deployed", "done"]);
 
+/**
+ * Is GitHub connected for this tenant? ONE answer to one question: ateam_patch
+ * asks it to decide whether to degrade to the Builder store, ateam_build_and_run
+ * to decide whether it has a branch story to tell at all. The probe is the
+ * definitive source — a failed github read or push alone is ambiguous.
+ * @returns {Promise<boolean|null>} true/false from the probe; null when the probe
+ *   itself failed, which callers must treat as UNKNOWN, never as "not connected".
+ */
+async function probeGithubConnected(solution_id, sid) {
+  try {
+    const probe = await get(`/deploy/solutions/${solution_id}/github/connected`, sid);
+    return probe?.connected !== false && probe?.enabled !== false;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The BRANCH half of ateam_build_and_run's envelope, decided in ONE place from
+ * what the deploy actually did. Exported so it is tested by calling it.
+ *
+ * `deployed_from_branch` and a `_next` about unpromoted work on `dev` used to be
+ * literals in the return object, emitted for every tenant — so a tenant with NO
+ * repo was told which branch it deployed and to promote a branch that does not
+ * exist, contradicting BRANCH_WORKFLOW.no_git_at_all. And a deploy of an INLINE
+ * payload claimed to have deployed `main`, which it never read.
+ *
+ * @param {object} p
+ * @param {boolean} p.pulledFromRepo   Core was built from the repo's bundle
+ * @param {object}  [p.githubResult]   the phase-5 push result (or its error/skip)
+ * @param {boolean|null} p.githubConnected  probeGithubConnected's answer; only
+ *   `false` means "no repo" — null is unknown and keeps the branch story
+ * @param {object}  [p.widgetHealth]
+ */
+export function describeDeployBranches({ pulledFromRepo, githubResult, githubConnected, widgetHealth }) {
+  const W = BRANCH_WORKFLOW;
+  const noRepo = githubConnected === false && !pulledFromRepo && !githubResult?.branch;
+  const pushLine = noRepo
+    ? '— no GitHub repo is connected, so nothing was pushed; the Builder store is this solution\'s source of truth'
+    : githubResult?.error ? `⚠️ GitHub push FAILED: ${githubResult.error}`
+      // A SKIP IS NOT ALWAYS A DIVERGENCE. When the deploy PULLED from GitHub,
+      // the push-back is skipped precisely because Core was built from that
+      // content — they agree exactly, and telling the caller they "now differ"
+      // sends them to reconcile a repo that is already correct. The divergence
+      // that DOES exist on that path is the one nobody mentions: dev may be
+      // ahead of the main we deployed.
+      : githubResult?.skipped ? `⚠️ GitHub push skipped${githubResult.reason ? ` (${githubResult.reason})` : ''}`
+        + (/from github/i.test(githubResult.reason || '')
+            ? ` — Core matches the branch it was built from. If you have unpromoted work on \`${W.write_branch}\`, it is NOT in this deploy: ${W.promote_tool}(solution_id), then deploy again.`
+            : ' — Core and GitHub now differ')
+      : githubResult ? `+ pushed to ${githubResult.branch || W.write_branch}`
+      : '⚠️ no GitHub push attempted — Core and GitHub may differ';
+  return {
+    // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts.
+    ...(pulledFromRepo && { deployed_from_branch: W.deploy_branch }),
+    ...(githubResult?.branch && { pushed_to_branch: githubResult.branch }),
+    _status: [
+      '✅ Deployed to Core',
+      pushLine,
+      ...(widgetHealth && !widgetHealth.ok
+        ? [`⚠️ ${widgetHealth.issues?.length || 0} widget(s) not rendering — see widget_health.`]
+        : []),
+    ].join(' '),
+    // promote is a SHIP, not a checkpoint: it merges dev → main; the tag is a
+    // side effect.
+    _next: noRepo
+      ? `No GitHub repo is connected, so there are no branches and nothing to promote. ${W.no_git_at_all}`
+      : pulledFromRepo
+        ? `This deployed \`${W.deploy_branch}\`. Anything you patched since the last promote is still on \`${W.write_branch}\` and is NOT in this deploy — ${W.promote_tool}(solution_id) merges ${W.write_branch} → ${W.deploy_branch} (dry_run:true to preview), then deploy again.`
+        : `This deployed the payload you passed, not a branch. ${W.deploy_side} ${W.promote_tool}(solution_id) (dry_run:true to preview) is what ships \`${W.write_branch}\` there.`,
+  };
+}
+
 // ─── Widget health verification ────────────────────────────────────
 //
 // A skill/solution that declares UI plugins (ui_plugins[]) can silently ship
@@ -4212,21 +4285,25 @@ export const handlers = {
       }
     } catch { /* advisory — never fail a successful deploy on the health check */ }
 
+    // Is there a branch story to tell at all? A pull or a landed push proves a
+    // repo; otherwise ask the one probe that knows, rather than guessing from a
+    // failed or skipped push — mirroring ateam_patch's local split.
+    const pulledFromRepo = Boolean(github);
+    const githubConnected = (pulledFromRepo || github_result?.branch)
+      ? true
+      : await probeGithubConnected(solutionId, sid);
+    const branches = describeDeployBranches({
+      pulledFromRepo, githubResult: github_result, githubConnected, widgetHealth: widget_health,
+    });
+
     return {
       ok: true,
       solution_id: solutionId,
-      // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts, and
-      // this asserted one value for both. Since the write path moved to `dev`
-      // (6e4470e, "one branch for the whole loop"), the push returns
-      // branch:'dev' plus a _note saying "Landed on dev, NOT main" — and this
-      // envelope spread that note into `github:` while its own top-level
-      // `branch: 'main'` said the opposite. The warning was reached and then
-      // contradicted by the object carrying it.
-      //
-      // b02c008 swept exactly this for ateam_patch and called itself "sweep
-      // #1". build_and_run was never swept.
-      deployed_from_branch: 'main',
-      ...(github_result?.branch && { pushed_to_branch: github_result.branch }),
+      // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts —
+      // and for a tenant with no repo, neither exists. describeDeployBranches
+      // decides all three.
+      ...(branches.deployed_from_branch && { deployed_from_branch: branches.deployed_from_branch }),
+      ...(branches.pushed_to_branch && { pushed_to_branch: branches.pushed_to_branch }),
       phases,
       deploy: {
         skills_deployed: deploy.import?.skills || [],
@@ -4243,35 +4320,10 @@ export const handlers = {
       ...(github_result && { github: github_result }),
       ...(agent_doc_result && !agent_doc_result.error && { agent_doc: agent_doc_result }),
       ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
-      // _status must describe WHAT HAPPENED. It previously asserted
-      // "pushed to main" unconditionally — when the push failed, when it was
-      // skipped (GitHub disabled, or push_to_github not opted in), and when no
-      // push was attempted at all. Worse, its only variable was widget_health,
-      // an unrelated flag: whether the code reached GitHub could not change the
-      // sentence claiming the code reached GitHub.
-      _status: [
-        '✅ Deployed to Core',
-        github_result?.error ? `⚠️ GitHub push FAILED: ${github_result.error}`
-          // A SKIP IS NOT ALWAYS A DIVERGENCE. When the deploy PULLED from
-          // GitHub, the push-back is skipped precisely because Core was built
-          // from that content — they agree exactly, and telling the caller they
-          // "now differ" sends them to reconcile a repo that is already
-          // correct. The divergence that DOES exist on that path is the one
-          // nobody mentions: dev may be ahead of the main we deployed.
-          : github_result?.skipped ? `⚠️ GitHub push skipped${github_result.reason ? ` (${github_result.reason})` : ''}`
-            + (/from github/i.test(github_result.reason || '')
-                ? ' — Core matches the branch it was built from. If you have unpromoted work on `dev`, it is NOT in this deploy: ateam_github_promote(solution_id), then deploy again.'
-                : ' — Core and GitHub now differ')
-          : github_result ? `+ pushed to ${github_result.branch || 'dev'}`
-          : '⚠️ no GitHub push attempted — Core and GitHub may differ',
-        ...(widget_health && !widget_health.ok
-          ? [`⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`]
-          : []),
-      ].join(' '),
-      // promote is a SHIP, not a checkpoint. It merges dev → main; the tag is a
-      // side effect. Calling it "create a checkpoint" is what left agents
-      // thinking their work was already on main.
-      _next: 'This deployed `main`. Anything you patched since the last promote is still on `dev` and is NOT in this deploy — ateam_github_promote(solution_id) merges dev → main (dry_run:true to preview), then deploy again.',
+      // _status must describe WHAT HAPPENED — it once asserted "pushed to main"
+      // unconditionally, keyed only on widget_health. See describeDeployBranches.
+      _status: branches._status,
+      _next: branches._next,
     };
   },
 
@@ -4337,10 +4389,8 @@ export const handlers = {
           // degrades. The local write below reconciles to GitHub once connected.
           let connected = true;
           if (!sourceExplicit) {
-            try {
-              const probe = await get(`/deploy/solutions/${solution_id}/github/connected`, sid);
-              connected = probe?.connected !== false && probe?.enabled !== false;
-            } catch { connected = true; /* probe failed → don't mask the real read error */ }
+            // null (the probe itself failed) counts as connected → don't mask the real read error
+            connected = (await probeGithubConnected(solution_id, sid)) !== false;
           }
           if (!sourceExplicit && !connected) {
             isLocal = true;
