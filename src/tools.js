@@ -40,6 +40,7 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_verify_surface",
 ]);
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
+import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
@@ -2553,37 +2554,6 @@ export const monitoringTools = tools
  * So the sections below do not describe the workflow. They render it from
  * here. Change it once; every surface moves together, or none does.
  */
-const BRANCH_WORKFLOW = Object.freeze({
-  write_branch: 'dev',
-  deploy_branch: 'main',
-  promote_tool: 'ateam_github_promote',
-  tag_format: 'prod-YYYY-MM-DD-NNN',
-
-  one_line:
-    'edit on `dev` → review the diff → ateam_github_promote → `main` → ateam_build_and_run deploys `main`',
-
-  loop: Object.freeze([
-    '1. EDIT    ateam_github_patch / ateam_github_write / ateam_patch   → lands on `dev`',
-    '2. REVIEW  ateam_github_promote(solution_id, dry_run:true)         → shows exactly what would ship',
-    '3. SHIP    ateam_github_promote(solution_id)                       → merges dev → main, tags prod-YYYY-MM-DD-NNN',
-    '4. DEPLOY  ateam_build_and_run(solution_id)                        → deploys `main`',
-  ]),
-
-  write_side: 'Every write lands on `dev`: ateam_github_patch, ateam_github_write and ateam_patch all default there. Nothing on `dev` is live.',
-  deploy_side: '`main` is production, and ONLY ateam_github_promote writes it. ateam_build_and_run deploys `main` — there is no ref parameter.',
-  the_silent_mistake:
-    'Skipping the promote. Your patches succeed, build_and_run reports success, and NOTHING you wrote is running — because `main` never moved. ' +
-    'If a deploy behaves as though your changes do not exist, that is this. ateam_build_and_run now refuses with MAIN_BEHIND_DEV and names the tool rather than letting you find out by reading a diff.',
-  // Deliberately does NOT quote the wrong framing. An earlier version said
-  // 'calling it "create a checkpoint" is what left agents believing…' — which
-  // put the misleading phrase back into the very response meant to retire it,
-  // where a first-turn agent reads it before the correction lands.
-  promote_is_a_ship_not_a_checkpoint:
-    'ateam_github_promote SHIPS: it merges dev → main, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
-  rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history.',
-  no_git_at_all:
-    'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',
-});
 
 const SPEC_PATHS = {
   overview: "/spec",
