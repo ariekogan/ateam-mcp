@@ -26,6 +26,11 @@ export const BRANCH_WORKFLOW = Object.freeze({
   deploy_branch: 'main',
   promote_tool: 'ateam_github_promote',
   tag_format: 'prod-YYYY-MM-DD-NNN',
+  // The prefix promote wrote before 7a75479 (2026-05-19). It no longer writes
+  // it, but older solutions still carry such tags and rollback accepts them —
+  // so the tools that LIST and TARGET tags say so ONCE, here, instead of each
+  // naming the retired prefix as the thing to look for (which they did).
+  legacy_tag_note: 'Solutions older than 2026-05-19 may also carry retired safe-* tags; rollback accepts those too.',
 
   one_line:
     'edit on `dev` → review the diff → ateam_github_promote → `main` → ateam_build_and_run deploys `main`',

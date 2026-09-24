@@ -2352,7 +2352,7 @@ export const tools = [
   },
 
   // ═══════════════════════════════════════════════════════════════════
-  // RELEASE MANAGEMENT — checkpoint, rollback, version listing
+  // RELEASE MANAGEMENT — ship (promote), rollback, version listing
   // ═══════════════════════════════════════════════════════════════════
 
   {
@@ -2435,7 +2435,7 @@ export const tools = [
     description:
       "Roll prod (`main` branch) back to a previous state.\n\n" +
       "ADDITIVE — does NOT destroy history. Creates a new commit on top of main whose tree matches the target's tree. The history of everything between target and current main is preserved (you can roll back the rollback).\n\n" +
-      "Workflow: 1) ateam_github_list_versions (find a safe-* tag) → 2) ateam_github_rollback(target: 'safe-...') → 3) ateam_build_and_run (deploys the reverted state).",
+      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run (deploys the reverted state). ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2445,7 +2445,7 @@ export const tools = [
         },
         target: {
           type: "string",
-          description: "Tag (e.g., 'safe-2026-05-19-001') or commit SHA to revert main to. Use ateam_github_list_versions to find safe-* tags.",
+          description: `A ${BRANCH_WORKFLOW.tag_format} tag or a commit SHA to revert main to. Use ateam_github_list_versions to find the tags. ${BRANCH_WORKFLOW.legacy_tag_note}`,
         },
       },
       required: ["solution_id", "target"],
@@ -2455,7 +2455,7 @@ export const tools = [
     name: "ateam_github_list_versions",
     core: true,
     description:
-      "List all available checkpoints (safe-* tags) for a solution. Shows tag name, date, counter, and commit SHA. Use before rollback to see available safe points.",
+      `List the ${BRANCH_WORKFLOW.tag_format} tags each ${BRANCH_WORKFLOW.promote_tool} wrote for a solution — the points ateam_github_rollback can return main to. Shows tag name, date, counter, and commit SHA. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3400,7 +3400,7 @@ export const handlers = {
         { step: 3, action: "Version", description: `Writes land on \`${BRANCH_WORKFLOW.write_branch}\`, NOT ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.deploy_side} The repo (one per TENANT) is the source of truth for connector code.`, tools: ["ateam_github_status", "ateam_github_log", BRANCH_WORKFLOW.promote_tool] },
         { step: 4, action: "Iterate", description: `Edit connector code ONE FILE AT A TIME via ateam_github_patch, then follow the loop: ${BRANCH_WORKFLOW.one_line}. ${BRANCH_WORKFLOW.the_silent_mistake} NEVER re-pass all connector code inline after first deploy. For skill definitions use ateam_patch.`, tools: ["ateam_github_patch", BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_patch"] },
         { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
-        { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
+        { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
     conversation_flow: {
@@ -3455,13 +3455,13 @@ export const handlers = {
         do_not_skip_promote: BRANCH_WORKFLOW.the_silent_mistake,
       },
       when_to_use_what: {
-        ateam_github_write: "Write/create connector files on main — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy.",
+        ateam_github_write: `Write/create connector files on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
         ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
-        ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to `dev`. Promote when you want it in production.",
+        ateam_patch: `Edit skill definitions (intents, tools, policy) — auto-pushes to \`${BRANCH_WORKFLOW.write_branch}\`. Promote when you want it in production.`,
         "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
         ateam_github_promote: `SHIP ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} dry_run:true previews what would ship.`,
-        ateam_github_rollback: "Revert main to a previous checkpoint",
+        ateam_github_rollback: BRANCH_WORKFLOW.rollback,
       },
     },
     advanced_tools: {
