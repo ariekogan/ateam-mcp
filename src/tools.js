@@ -100,6 +100,13 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   };
 }
 
+// The redeploy outcomes that mean "came up clean". An allow-list on purpose:
+// an outcome this code has never heard of is reported as degraded, never as a
+// success. 'deployed' is the Builder's clean verdict; 'done' is only the job
+// LIFECYCLE word, which an older Builder leaves as the sole `status` on the
+// async path (it sends no deploy_status) — alone it says nothing was wrong.
+const CLEAN_REDEPLOY_OUTCOMES = new Set(["deployed", "done"]);
+
 // ─── Widget health verification ────────────────────────────────────
 //
 // A skill/solution that declares UI plugins (ui_plugins[]) can silently ship
@@ -6397,6 +6404,17 @@ export const handlers = {
     const deployedCount = result.deployed ?? (result.ok ? (skill_id ? 1 : (result.skills?.filter(s => s.ok !== false).length || 0)) : 0);
     const totalCount = result.total ?? (deployedCount + failedCount);
 
+    // THE OUTCOME, NOT THE TRANSPORT. On the async path the job entry's
+    // `status` is its LIFECYCLE ('done' | 'failed') — the Builder overwrites the
+    // deploy's own status with it so pollers stop — and the outcome travels as
+    // `deploy_status` ('deployed' | 'deployed_with_errors'). An older Builder
+    // sends no deploy_status; only then is `status` the fallback.
+    const outcome = result.deploy_status ?? result.status;
+    // Anything but a clean verdict is degraded — including a status this code
+    // has never heard of. Never "successfully" unless the deploy said so.
+    const degraded = result.ok !== false
+      && (failedCount > 0 || (outcome != null && !CLEAN_REDEPLOY_OUTCOMES.has(outcome)));
+
     const out = {
       ok: result.ok,
       solution_id,
@@ -6405,19 +6423,35 @@ export const handlers = {
       failed: failedCount,
       total: totalCount,
       skills: result.skills || [],
-      // PASS THROUGH what the Builder decided. `status` carries
-      // "deployed_with_errors" — a real outcome, neither a clean success nor a
-      // failure — and `verification` carries why. This key list had never heard
-      // of either, so both were dropped one hop from the caller.
-      ...(result.status && { status: result.status }),
+      // PASS THROUGH what the Builder decided: `status` is the outcome above
+      // (deployed_with_errors is a real outcome, neither a clean success nor a
+      // failure) and `verification` carries why.
+      ...(outcome && { status: outcome }),
       ...(result.verification && { verification: result.verification }),
+      // Machine-readable, so a caller (the ateam-proxy connector) does not have
+      // to parse the sentence below. Not isError: the Builder's ok:true stands.
+      ...(degraded && { code: "DEPLOYED_WITH_ERRORS" }),
       // Surface the underlying error when the request failed — the most
       // common cause is a validator failure (e.g. broken connector source
       // in the GitHub repo), and hiding it makes diagnosis impossible.
       ...(!result.ok && result.error && { error: result.error }),
       ...(!result.ok && result.details && { details: result.details }),
       ...(!result.ok && result.hint && { hint: result.hint }),
-      message: result.ok
+      // Branches on the VERDICT, not on `ok` alone — `ok` is true for a deploy
+      // that landed with errors, and this sentence is what an agent reads first.
+      message: degraded
+        ? (skill_id
+            // A single-skill result's `message` is the Builder's own verdict
+            // sentence (normalizeSkillRedeploy always writes one). A BULK job's
+            // is not: its runFn returns none, so the job entry still carries
+            // the progress text ("Calling Builder bulk-redeploy...") — never
+            // quote that as a reason.
+            ? `Re-deployed skill "${skill_id}" WITH ERRORS (status: ${outcome ?? "unknown"}) — it reached Core but did not come up clean.`
+              + (result.message ? ` Builder: ${result.message}` : "")
+              + " See verification."
+            : `Re-deployed ${deployedCount} of ${totalCount} skill(s) WITH ERRORS (${failedCount} failed`
+              + (outcome ? `, status: ${outcome}` : "") + ") — see skills[] and verification.")
+        : result.ok
         ? skill_id
           ? `Re-deployed skill "${skill_id}" successfully.`
           : `Re-deployed ${deployedCount} skill(s) successfully.`
