@@ -375,6 +375,17 @@ check("  and does not promise a refusal every Builder gives",
       /older Builder deploys it and reports success/.test(BRANCH_WORKFLOW.the_silent_mistake));
 check("ateam_redeploy is described as the Builder's copy, refreshed from dev — not as a read of dev",
       BRANCH_WORKFLOW.iterate_without_promote.some((l) => /^ateam_redeploy/.test(l) && /Builder's copy/.test(l) && /refreshes from `dev`/.test(l)));
+// Builder #50 decides FS-vs-GitHub by WHICH SIDE CHANGED (its sync records),
+// not by updated_at. Three claims follow from that and were missing or false.
+check("ateam_redeploy's line says a change on BOTH sides is refused, not picked",
+      BRANCH_WORKFLOW.iterate_without_promote.some((l) => /^ateam_redeploy/.test(l) && /ALSO changed/.test(l) && /refused/.test(l)));
+check("the CLAUDE.md hand-edit paragraph says the same",
+      /a hand push is\s+pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed[\s\S]{0,200}refused/.test(AGENT_DOC));
+check("the ref:'main' hotfix path says to bring dev along, and what the Builder does until then",
+      /ref:'main' only for emergency hotfixes[\s\S]*ateam_github_sync_from_main[\s\S]*keeps the hotfix as a change `dev` lacks/
+        .test(tools.find((t) => t.name === "ateam_github_patch").description));
+check("rollback no longer claims ateam_redeploy undoes it (the Builder keeps main's copy as dev's missing change)",
+      !/ateam_redeploy deploys the rolled-back change again/.test(BRANCH_WORKFLOW.rollback));
 check("rollback says to bring dev along (the iterate tools deploy dev)",
       /ateam_github_sync_from_main/.test(BRANCH_WORKFLOW.rollback)
       && tools.find((t) => t.name === "ateam_github_rollback").description.includes("ateam_github_sync_from_main"));

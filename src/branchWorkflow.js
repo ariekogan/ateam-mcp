@@ -92,7 +92,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
     'ateam_patch(solution_id, target: "skill", skill_id: "<skill-id>", updates: {…}) — writes `dev`, then redeploys THAT skill from `dev`',
     'ateam_patch(solution_id, target: "solution", updates: {…}) — writes `dev`, then redeploys the WHOLE solution, every skill, from the Builder\'s copy of `dev`',
     'ateam_upload_connector(solution_id, connector_id: "<connector-id>", github: true) — deploys that connector\'s code from `dev`, laid over the files Core already runs for it; skills untouched',
-    'ateam_redeploy(solution_id, skill_id: "<skill-id>") — redeploys one skill from the Builder\'s copy, which the pre-deploy check first refreshes from `dev` (a change pushed to `dev` by hand or by ateam_github_patch is picked up); no definition change',
+    'ateam_redeploy(solution_id, skill_id: "<skill-id>") — redeploys one skill from the Builder\'s copy, which the pre-deploy check first refreshes from `dev` (a change pushed to `dev` by hand or by ateam_github_patch is picked up; if the Builder\'s copy of that file ALSO changed since the two last agreed, the redeploy is refused and names the file rather than pick a side); no definition change',
     'then test with ateam_conversation / ateam_test_skill / ateam_test_voice against the running solution',
   ]),
   // Self-contained on purpose. It opened with "These deploy…" and was also
@@ -102,12 +102,13 @@ export const BRANCH_WORKFLOW = Object.freeze({
     + 'ateam_build_and_run is the HEAVY full path (the first deploy, or deploying `main` after a promote) and it deploys `main`. '
     + 'On a solution with 5+ skills it can hit the 100s edge timeout, which is the other reason not to reach for it every iteration.',
 
-  // Rollback writes `main` only. The iterate tools deploy from `dev`, so a dev
-  // that still holds the rolled-back change redeploys it over the rollback on
-  // the next ateam_patch / ateam_redeploy. A deploy used to paper over this by
-  // writing what it deployed back to `dev`; since Builder #50 it does not.
+  // Rollback writes `main` only. A deploy used to paper over that by writing
+  // what it deployed back to `dev`; since Builder #50 it does not. The Builder
+  // now keeps the rolled-back copy as a change `dev` lacks (its sync record),
+  // so a plain ateam_redeploy no longer undoes the rollback — but `dev` still
+  // holds the rolled-back change, and an edit of that file ON dev builds on it.
   rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history. '
-    + 'Then ateam_build_and_run(solution_id) deploys it, and ateam_github_sync_from_main(solution_id) brings `dev` along: the iterate tools deploy from `dev`, so otherwise the next ateam_patch or ateam_redeploy deploys the rolled-back change again.',
+    + 'Then ateam_build_and_run(solution_id) deploys it, and ateam_github_sync_from_main(solution_id) brings `dev` along: otherwise `dev` still holds the rolled-back change, and the next edit of that file on `dev` (ateam_patch, ateam_github_patch) deploys it again.',
   no_git_at_all:
     'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',
 });

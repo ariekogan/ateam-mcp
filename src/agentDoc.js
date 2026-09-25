@@ -164,7 +164,9 @@ git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
 Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same branch. Either way the
 next iterate deploy (\`ateam_redeploy\`, \`ateam_patch\`, \`ateam_upload_connector\`) picks the change
 up from \`${BRANCH_WORKFLOW.write_branch}\`: the tools also copy it into the Builder at once, and a hand push is
-pulled in by the pre-deploy check.
+pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed since the two
+last agreed (for example main content a build_and_run deployed that \`${BRANCH_WORKFLOW.write_branch}\` lacks). Then the
+deploy is refused and names the file instead of picking a side.
 
 **First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
 

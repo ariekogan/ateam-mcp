@@ -2286,7 +2286,8 @@ export const tools = [
       "1. FULL FILE: provide `content` — replaces entire file (good for new files or small files)\n" +
       "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
       "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
-      "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes.",
+      "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
+      "After one, run ateam_github_sync_from_main so `dev` has it too. Until then the Builder keeps the hotfix as a change `dev` lacks: the next iterate deploy of that file ships it and writes it to `dev`, and a deploy is refused if `dev`'s copy of the same file changed meanwhile.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4228,7 +4229,8 @@ export const handlers = {
     //
     // pulled_from_github NAMES THE PARTS THAT ARE THE REPO'S CONTENT, and it
     // must be exact. The Builder (#50) saves those parts into its store as a
-    // MIRROR: FS-only, keeping GitHub's updated_at, never written back. An
+    // MIRROR: FS-only, never written back; it records a sync baseline instead
+    // (which side changed is decided from that, not from updated_at). An
     // inline solution or skills it writes to `dev`, where an inline edit
     // belongs. (Inline connector CODE is a different, older story: on a repo
     // that exists, no deploy writes it to GitHub at all. Use ateam_github_write

@@ -72,7 +72,7 @@ test("taken from the owner, not a second literal", async () => {
 // ─── WHERE THE PAYLOAD CAME FROM, AS THE BUILDER HEARS IT ────────────────────
 //
 // The Builder (#50) saves the parts named in pulled_from_github as a MIRROR of
-// GitHub (FS-only, keeping GitHub's updated_at, never written back) and writes
+// GitHub (FS-only, recording a sync baseline, never written back) and writes
 // every other part to dev. Its MAIN_BEHIND_DEV guard checks only the files the
 // named parts are read from. So the list must be exact:
 //   - a part the caller wrote is NOT named, or its edit never reaches GitHub
