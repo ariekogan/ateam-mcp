@@ -12,7 +12,7 @@ import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
-  setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere, getBaseUrl,
+  setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -3688,6 +3688,12 @@ export const handlers = {
   }),
 
   ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId) => {
+    // A platform session (ateam-proxy-mcp's one session for every tenant) is
+    // signed in AFRESH: nothing the previous tenant left — url, master key,
+    // actor, context — reaches this one. First, before anything below reads the
+    // record. See resetPlatformSession.
+    resetPlatformSession(sessionId);
+
     // Master key mode: cross-tenant auth using shared secret
     if (master_key) {
       if (!tenant) {
@@ -6958,7 +6964,14 @@ export async function handleToolCall(name, args, sessionId) {
         ].join("\n"),
       }],
       isError: true,
-      structuredContent: { ok: false, code: "UNAUTHENTICATED" },
+      // `stage: "auth_gate"` is the ONE mark of a refusal given BEFORE the tool
+      // ran. The code alone is not: deriveErrorCode (below) also answers
+      // UNAUTHENTICATED for a tool that already ran and then failed with text
+      // that matches AUTH_SIGNAL_RX, e.g. "GitHub 401 Bad credentials" after a
+      // promote had merged. ateam-proxy-mcp signs in again and REPLAYS the call
+      // on this mark, and only on it, so a replay can never run a tool twice.
+      // Only this line sets `stage`: handlers never build structuredContent.
+      structuredContent: { ok: false, code: "UNAUTHENTICATED", stage: "auth_gate" },
     };
   }
 

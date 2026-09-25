@@ -10,6 +10,8 @@
  * last skill) to support TTL-based cleanup and smarter UX.
  */
 
+import { timingSafeEqual } from "node:crypto";
+
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
 const ENV_TENANT = process.env.ADAS_TENANT || "";
@@ -36,7 +38,74 @@ const sessions = new Map();
 // When a user calls ateam_auth to override (e.g., switch tenants), the override
 // is stored per bearer and applied to all future sessions from that user.
 const authOverrides = new Map();  // bearerToken → { tenant, apiKey, updatedAt }
-const sessionBearers = new Map(); // sessionId → bearerToken
+// sessionId → the session's OWNER: its bearer string, or PLATFORM_PRINCIPAL.
+// denySessionReuse (src/http.js) compares every request against it.
+const sessionOwners = new Map();
+
+/**
+ * THE PLATFORM PRINCIPAL — the owner of a session opened with `x-adas-token`.
+ *
+ * ai-dev-assistant's ateam-proxy-mcp is the in-product Solution Builder's way
+ * in. It opens ONE tenant-less session (initialize, tools/list — the catalog is
+ * the same for every tenant), then signs each tenant in with an in-band
+ * ateam_auth before that tenant's calls. It has no bearer to send: the catalog
+ * handshake belongs to no tenant. 39ff024 made every request without a bearer
+ * a 401, so from 2026-09-11 that handshake failed on every host.
+ *
+ * It now signs in with the platform secret instead (Core's ADAS_MCP_TOKEN; this
+ * container's CORE_MCP_SECRET, the same value). What that buys is EXACTLY what
+ * an anonymous session had before 39ff024, plus an owner:
+ *   - the global tools (bootstrap, spec, examples, validate);
+ *   - ateam_auth, which is how each tenant's own key gets into the session.
+ * It carries NO tenant and NO key. It is not a master key: a tenant tool on a
+ * platform session is refused until ateam_auth puts that tenant's credential
+ * in, exactly as for any other session. And since many tenants take turns on
+ * one platform session, each ateam_auth there replaces the last tenant's record
+ * instead of merging into it (resetPlatformSession).
+ *
+ * A Symbol, never a string, so it cannot equal any bearer a client presents.
+ * It is never a key in authOverrides (see bearerOf): overrides are per bearer
+ * and re-applied to every session of that bearer, so one shared platform
+ * credential holding an override would put one tenant into every proxy session.
+ */
+export const PLATFORM_PRINCIPAL = Symbol("ateam-mcp:platform-principal");
+
+/**
+ * Did the caller present the platform secret (`x-adas-token`)?
+ *
+ * Read per call from CORE_MCP_SECRET, the name this container already holds
+ * (ai-dev-assistant's docker-compose fills it from the same value Core reads as
+ * ADAS_MCP_TOKEN). No new variable.
+ *
+ * Returns false, never throws, when:
+ *   - CORE_MCP_SECRET is unset or empty. FAIL CLOSED: laptops, npx and the
+ *     launchd agent set none, and there the platform path does not exist. An
+ *     empty secret must never match an empty token.
+ *   - `presented` is not a non-empty string (a repeated header, an array).
+ *   - the BYTE lengths differ. Comparing string lengths and then calling
+ *     timingSafeEqual on the UTF-8 buffers throws a RangeError when a character
+ *     outside ASCII makes the buffers differ, which one unauthenticated request
+ *     could use to crash a server. Same rule as the Builder's
+ *     presentsServiceSecret (packages/skill-validator/src/services/serviceSecret.js).
+ */
+export function presentsPlatformSecret(presented) {
+  const secret = process.env.CORE_MCP_SECRET || "";
+  if (!secret || typeof presented !== "string" || presented === "") return false;
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(secret, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * The session's owner IF it is a bearer, else null. The one way to ask "which
+ * bearer's override applies here", so the platform principal can never become
+ * an override key, whoever adds the next caller.
+ */
+function bearerOf(sessionId) {
+  const owner = sessionOwners.get(sessionId);
+  return typeof owner === "string" && owner ? owner : null;
+}
 
 /**
  * THE ENVIRONMENTS A KEY MAY NAME. A CLOSED SET, deliberately.
@@ -397,23 +466,67 @@ export function getSessionContext(sessionId) {
  * Remove session credentials (on disconnect).
  */
 export function clearSession(sessionId) {
-  sessionBearers.delete(sessionId);
+  sessionOwners.delete(sessionId);
   sessions.delete(sessionId);
 }
 
-// ── Bearer identity functions ──────────────────────────────────────
+// ── Session ownership ──────────────────────────────────────────────
 
 /** Bind a session to its OAuth bearer token. Called from seedCredentials. */
 export function bindSessionBearer(sessionId, bearerToken) {
-  sessionBearers.set(sessionId, bearerToken);
+  sessionOwners.set(sessionId, bearerToken);
   console.log(`[Auth] Bearer bound for session ${sessionId}`);
 }
 
 /**
- * The bearer a session is bound to, or null if there is none. Used by the HTTP
- * transport to enforce that a bearer-bound session can only be reused by a
- * request presenting the SAME validated bearer — a client-supplied session-id
- * alone must never grant access to another client's credentials.
+ * Bind a session to the platform principal (a request that presented the
+ * platform secret — see PLATFORM_PRINCIPAL). Called from seedCredentials.
+ * Seeds NO credentials: the tenant arrives later, in-band, through ateam_auth.
+ */
+export function bindSessionPlatform(sessionId) {
+  sessionOwners.set(sessionId, PLATFORM_PRINCIPAL);
+  console.log(`[Auth] Platform principal bound for session ${sessionId}`);
+}
+
+/**
+ * ON A PLATFORM SESSION, EVERY ateam_auth STARTS FROM NOTHING. Called first
+ * thing in ateam_auth; a no-op on any other session.
+ *
+ * setSessionCredentials MERGES into the record it finds: it keeps the previous
+ * apiUrl (57007d3), masterKey (94b9bc0) and context (4dc8f17), which holds the
+ * active solution, the last skill and the bound actor (touchSession). On a
+ * bearer's session that is ONE user signing in again, and keeping them is the
+ * point. A platform session is the opposite. ateam-proxy-mcp keeps ONE session
+ * for EVERY tenant (Core holds one MCP session per connector) and signs each
+ * tenant in before its calls, so the merge handed the next tenant what the last
+ * one left:
+ *   - its url: a key that names no environment went to a host the previous
+ *     tenant's agent had chosen, and every call after it too;
+ *   - its master key: the next tenant's calls went out as x-adas-token = that
+ *     value, and without the next tenant's own key;
+ *   - its actor: the next tenant's calls carried X-ADAS-ACTOR-ID of the
+ *     previous tenant's user;
+ *   - its context: the next tenant's ateam_bootstrap showed the previous
+ *     tenant's active solution.
+ * So the record is dropped BEFORE ateam_auth reads anything (its whoami base is
+ * getBaseUrl, which reads the record), and it stays dropped if the sign-in then
+ * fails: a failed sign-in leaves nobody signed in, never the tenant before.
+ * The owner binding stays; only the credentials and the context go.
+ */
+export function resetPlatformSession(sessionId) {
+  if (!sessionId || sessionOwners.get(sessionId) !== PLATFORM_PRINCIPAL) return false;
+  if (sessions.delete(sessionId)) {
+    console.log(`[Auth] Platform session ${sessionId}: previous sign-in dropped before ateam_auth`);
+  }
+  return true;
+}
+
+/**
+ * The owner a session is bound to — a bearer string or PLATFORM_PRINCIPAL — or
+ * null if there is none. Used by the HTTP transport to enforce that a bound
+ * session can only be reused by a request presenting the SAME owner: a
+ * client-supplied session-id alone must never grant access to another client's
+ * credentials.
  *
  * With OAuth on, every LIVE session has a binding: seedCredentials binds on
  * every POST, and the binding is removed only together with the transport
@@ -422,34 +535,46 @@ export function bindSessionBearer(sessionId, bearerToken) {
  * closed, or lost in a restart: stale-recovery then opens a fresh session under
  * it with the caller's OWN credentials), or ATEAM_OAUTH_DISABLED=1.
  */
-export function getSessionBearer(sessionId) {
-  return sessionBearers.get(sessionId) || null;
+export function getSessionOwner(sessionId) {
+  return sessionOwners.get(sessionId) || null;
 }
 
 /**
- * May a request presenting `presentedToken` (its validated bearer, or
- * null/undefined if none) reuse a session whose bound bearer is `boundBearer`?
+ * May a request presenting `presented` reuse a session whose bound owner is
+ * `boundOwner`? `presented` is the request's validated bearer, PLATFORM_PRINCIPAL
+ * if it presented the platform secret, or null/undefined if neither.
  *
- * - No bound bearer → nothing to match against, allow. With OAuth on, a live
- *   session is never unbound (see getSessionBearer), so this is an id with no
+ * - No bound owner → nothing to match against, allow. With OAuth on, a live
+ *   session is never unbound (see getSessionOwner), so this is an id with no
  *   live session behind it, or ATEAM_OAUTH_DISABLED=1.
- * - Bound bearer → the request MUST present the exact same validated bearer.
- *   A missing or different bearer is denied — so a client that knows another
- *   client's (non-secret, logged/echoed) session-id cannot be served that
- *   client's credentials by sending the id with no/other Authorization.
+ * - Bound owner → the request MUST present the exact same owner. A missing or
+ *   different bearer is denied — so a client that knows another client's
+ *   (non-secret, logged/echoed) session-id cannot be served that client's
+ *   credentials by sending the id with no/other Authorization. The platform
+ *   principal is a Symbol, so it matches only itself: a bearer cannot reuse a
+ *   platform session, and the platform secret cannot reuse a bearer's.
  *
  * Pure + exported for unit testing.
  */
-export function bearerOwnershipOk(boundBearer, presentedToken) {
-  if (!boundBearer) return true;
-  return !!presentedToken && presentedToken === boundBearer;
+export function sessionOwnershipOk(boundOwner, presented) {
+  if (!boundOwner) return true;
+  return !!presented && presented === boundOwner;
 }
 
-/** Store ateam_auth override for this user (by bearer). Called from tools.js. */
+/**
+ * Store ateam_auth override for this user (by bearer). Called from tools.js.
+ *
+ * A platform session gets NO override. ateam_auth still sets that session's own
+ * credentials (setSessionCredentials), which is all the proxy needs: it signs
+ * each tenant in on the session it is about to use.
+ */
 export function setAuthOverride(sessionId, { tenant, apiKey, apiUrl }) {
-  const bearer = sessionBearers.get(sessionId);
+  const bearer = bearerOf(sessionId);
   if (!bearer) {
-    console.log(`[Auth] WARNING: No bearer bound for session ${sessionId} — override NOT stored. sessionBearers has ${sessionBearers.size} entries.`);
+    const why = sessionOwners.get(sessionId) === PLATFORM_PRINCIPAL
+      ? "it is a platform session, and an override is per bearer"
+      : "no bearer is bound to it";
+    console.log(`[Auth] Override NOT stored for session ${sessionId}: ${why}. The session's own credentials are set.`);
     return;
   }
   authOverrides.set(bearer, { tenant, apiKey, apiUrl: apiUrl || null, updatedAt: Date.now() });
@@ -480,7 +605,7 @@ export function getBaseUrl(sessionId) {
   if (session?.apiUrl) return session.apiUrl;
   // 2. Bearer override
   if (sessionId) {
-    const bearer = sessionBearers.get(sessionId);
+    const bearer = bearerOf(sessionId);
     if (bearer) {
       const override = getAuthOverride(bearer);
       if (override?.apiUrl) return override.apiUrl;
@@ -547,7 +672,7 @@ export function getWhere(sessionId) {
 
 /** Check if a bearer has an active auth override. */
 export function hasBearerAuth(sessionId) {
-  const bearer = sessionBearers.get(sessionId);
+  const bearer = bearerOf(sessionId);
   return bearer ? authOverrides.has(bearer) : false;
 }
 
@@ -555,7 +680,7 @@ export function hasBearerAuth(sessionId) {
  * Sweep expired sessions — drops the CREDENTIALS of sessions idle longer than
  * SESSION_TTL. Returns the number of sessions swept.
  *
- * It does NOT drop the session's bearer binding, and must not. sessionBearers
+ * It does NOT drop the session's owner binding, and must not. sessionOwners
  * is the session's OWNER: denySessionReuse (src/http.js) compares every request
  * against it. This sweep never closes the transport, so the session is still
  * live after it. 8fc71af deleted the binding here too, back when the map was
@@ -564,6 +689,13 @@ export function hasBearerAuth(sessionId) {
  * bearer took over the live transport, and the real owner was refused as "a
  * different credential". The owner's next request re-seeds the credentials
  * from its bearer. The binding goes when the transport does (clearSession).
+ *
+ * A PLATFORM session is not re-seeded: it has no bearer and no override, by
+ * design. After an idle hour its tenant tools are refused at the dispatcher's
+ * auth gate (isError, structuredContent { code: "UNAUTHENTICATED", stage:
+ * "auth_gate" }), and ateam-proxy-mcp re-runs ateam_auth and replays on exactly
+ * that signal: the stage says the tool did not run. test/session-isolation.test.mjs
+ * pins that contract.
  */
 export function sweepStaleSessions() {
   const now = Date.now();
