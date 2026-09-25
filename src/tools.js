@@ -3984,6 +3984,18 @@ export const handlers = {
     // Phase 0: Auto-detect GitHub repo — if no mcp_store passed and repo exists, pull bundle from GitHub
     let effectiveMcpStore = mcp_store;
     let effectiveSkills = skills;
+    // WHAT THE CALLER WROTE, captured before Phase 0 fills the gaps from the repo.
+    // `connectors` is reassigned below when it is synthesized from mcp_store keys,
+    // so it has to be read here.
+    const inline = {
+      solution: Boolean(solutionArg),
+      skills: Array.isArray(skills) && skills.length > 0,
+      connectors: Array.isArray(connectors) && connectors.length > 0,
+    };
+    // Set only when Phase 0 actually read the bundle. `github` alone does not say
+    // that: a caller may pass github:true together with mcp_store, and then
+    // nothing is pulled.
+    let pulledMcpStore = false;
     if (!mcp_store) {
       try {
         const ghStatus = await get(`/deploy/solutions/${solutionId}/github/status`, sid);
@@ -4025,6 +4037,7 @@ export const handlers = {
           };
         }
         effectiveMcpStore = pullResult.mcp_store || {};
+        pulledMcpStore = true;
         // Use solution from GitHub if not passed inline
         if (!solution && pullResult.solution) {
           solution = pullResult.solution;
@@ -4159,13 +4172,33 @@ export const handlers = {
     }
 
     // Phase 2: Deploy
+    //
+    // github:true TELLS THE BUILDER THIS PAYLOAD IS THE REPO'S CONTENT, and it
+    // must be exactly true. The Builder mirrors a github:true payload into its
+    // store WITHOUT writing it back to GitHub, because writing the repo's own
+    // content back to `dev` on every deploy is what kept dev ahead of main and
+    // tripped MAIN_BEHIND_DEV. So it may only be sent when EVERY part came from
+    // the pull: solution, skills and connector code, with no connectors[] of
+    // the caller's own.
+    //
+    // skip_github_push is NOT that statement. It follows the `github` argument,
+    // and the tool's own advice ("ateam_build_and_run(solution, skills)") sends
+    // an inline solution and skills with it. Mirroring those would keep the
+    // edits out of GitHub, and the next build_and_run(solution_id) would pull
+    // main and quietly revert Core. A payload with ANY inline part is not
+    // mirrored: the Builder writes it to `dev` as it always has.
+    const payloadIsTheRepo = pulledMcpStore && !inline.solution && !inline.skills && !inline.connectors;
+    const deployBody = {
+      solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
+      // Unchanged (99bba7e). The Builder's MAIN_BEHIND_DEV guard and its own
+      // background push both read it.
+      ...(github && { skip_github_push: true }),
+      ...(payloadIsTheRepo && { github: true }),
+    };
     let deploy;
     try {
       // Try sync first (fast for small solutions)
-      deploy = await post("/deploy/solution", {
-        solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
-        ...(github && { skip_github_push: true }),
-      }, sid, { timeoutMs: 120_000 });
+      deploy = await post("/deploy/solution", deployBody, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(err.message);
@@ -4176,11 +4209,9 @@ export const handlers = {
       // Timeout → retry with async mode + polling
       phases.push({ phase: "deploy", status: "async_retry" });
       try {
-        const asyncResult = await post("/deploy/solution", {
-          solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
-          ...(github && { skip_github_push: true }),
-          async: true,
-        }, sid, { timeoutMs: 15_000 });
+        // The SAME body. The async door must not learn less about where the
+        // payload came from than the sync one did.
+        const asyncResult = await post("/deploy/solution", { ...deployBody, async: true }, sid, { timeoutMs: 15_000 });
 
         if (asyncResult.job_id) {
           // Poll for completion (up to 10 min)
@@ -4252,9 +4283,15 @@ export const handlers = {
           continue;
         }
         try {
+          // THE MERGE BASE IS THE BRANCH THESE FILES CAME FROM. The upload
+          // merges `files` over the connector's GitHub state at `ref`, which
+          // defaults to `dev`. For files pulled from `main` that let dev-only
+          // files ride into a run that says it deploys main. An inline
+          // mcp_store keeps the default: those files are the caller's
+          // iteration, and dev is where iteration lives.
           const uploadResult = await post(
             `/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
-            { files },
+            { files, ...(pulledMcpStore && { ref: BRANCH_WORKFLOW.deploy_branch }) },
             sid,
             { timeoutMs: 120_000 },
           );
