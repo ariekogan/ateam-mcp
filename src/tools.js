@@ -100,6 +100,140 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   };
 }
 
+// ─── The redeploy verdict ───────────────────────────────────────────
+//
+// ONE answer to "did this redeploy work?" — ateam_redeploy's summary and
+// ateam_patch's rebuild phase both ask it — on every path (async job, sync
+// body, poll timeout) and against every Builder in service:
+//
+//   Builder #44+ (dev)   the async job carries the deploy's own outcome as
+//                        `deploy_status`; `status` is only the job lifecycle.
+//   Builder c6c20d3      (mac1 dev) normalizeSkillRedeploy, but NO
+//                        deploy_status — the job runner overwrites the
+//                        outcome with the lifecycle word 'done'.
+//   Builder 2e8cab5      (prod) no normaliser: a degraded skill arrives as
+//                        ok:false, lifecycle 'failed'.
+//
+// Three verdicts: failed | degraded (reached Core, did not come up clean) | clean.
+
+// The words startAsyncDeployJob writes into `status` OVER the deploy's own:
+// they say the JOB stopped, never what the deploy decided.
+const JOB_LIFECYCLE_STATUSES = new Set(["in_progress", "done", "failed"]);
+
+// The stated outcomes that mean "came up clean". An allow-list on purpose: an
+// outcome this code has never heard of is degraded, never a success.
+const CLEAN_REDEPLOY_OUTCOMES = new Set(["deployed"]);
+
+/**
+ * @param {object} result  a finished job entry, a sync body, or pollDeployJob's timeout object
+ * @returns {{ failed: boolean, degraded: boolean, outcome: string|undefined }}
+ */
+function redeployVerdict(result) {
+  const r = result && typeof result === "object" ? result : {};
+  // What the deploy itself STATED. Never a lifecycle word.
+  const stated = r.deploy_status ?? (JOB_LIFECYCLE_STATUSES.has(r.status) ? undefined : r.status);
+
+  // 1. FAILED — decided first. A success is STATED: ok === true. A job whose
+  //    runFn THREW (the Builder answered an HTML 502, so resp.json() threw; or
+  //    the 300s AbortSignal fired) is written as {status:'failed', error} with
+  //    NO ok key and the progress text still standing — `ok !== false` read
+  //    that as "reached Core WITH ERRORS". Lifecycle 'failed' alone is not the
+  //    test: pollDeployJob's timeout is ok:false with no status at all.
+  if (r.ok !== true) return { failed: true, degraded: false, outcome: stated ?? "failed" };
+
+  // 2. DEGRADED. With no stated outcome (a Builder before #44, async path),
+  //    re-derive it by the Builder's OWN rule — deploySkillToADAS:
+  //    `degraded = uiHardFail || importBad`, importBad being
+  //    tool_import.verdict !== 'SUCCESS'. uiHardFail cannot occur on a redeploy:
+  //    a skill-only deploy skips connector sync, leaving no healthy connector to
+  //    run UI verification against; a bulk one reports a degraded skill as
+  //    failed (ok:false). So tool_import IS the verdict on this path.
+  //    NOT verification.needs_attention: the Builder sets it on EVERY deploy
+  //    (it defaults hasGetSkillDefinition to false, and Core's deploy-mcp has
+  //    not returned that field since b6a83a035) — it would call every
+  //    redeploy degraded.
+  const importVerdict = r.verification?.tool_import?.verdict;
+  const inferred = importVerdict == null ? undefined
+    : importVerdict === "SUCCESS" ? "deployed" : "deployed_with_errors";
+  const outcome = stated ?? inferred;
+  const degraded = (Number(r.failed) || 0) > 0
+    || (outcome != null && !CLEAN_REDEPLOY_OUTCOMES.has(outcome));
+  return { failed: false, degraded, outcome: outcome ?? (degraded ? "deployed_with_errors" : undefined) };
+}
+
+/**
+ * Is GitHub connected for this tenant? ONE answer to one question: ateam_patch
+ * asks it to decide whether to degrade to the Builder store, ateam_build_and_run
+ * to decide whether it has a branch story to tell at all. The probe is the
+ * definitive source — a failed github read or push alone is ambiguous.
+ * @returns {Promise<boolean|null>} true/false from the probe; null when the probe
+ *   itself failed, which callers must treat as UNKNOWN, never as "not connected".
+ */
+async function probeGithubConnected(solution_id, sid) {
+  try {
+    const probe = await get(`/deploy/solutions/${solution_id}/github/connected`, sid);
+    return probe?.connected !== false && probe?.enabled !== false;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The BRANCH half of ateam_build_and_run's envelope, decided in ONE place from
+ * what the deploy actually did. Exported so it is tested by calling it.
+ *
+ * `deployed_from_branch` and a `_next` about unpromoted work on `dev` used to be
+ * literals in the return object, emitted for every tenant — so a tenant with NO
+ * repo was told which branch it deployed and to promote a branch that does not
+ * exist, contradicting BRANCH_WORKFLOW.no_git_at_all. And a deploy of an INLINE
+ * payload claimed to have deployed `main`, which it never read.
+ *
+ * @param {object} p
+ * @param {boolean} p.pulledFromRepo   Core was built from the repo's bundle
+ * @param {object}  [p.githubResult]   the phase-5 push result (or its error/skip)
+ * @param {boolean|null} p.githubConnected  probeGithubConnected's answer; only
+ *   `false` means "no repo" — null is unknown and keeps the branch story
+ * @param {object}  [p.widgetHealth]
+ */
+export function describeDeployBranches({ pulledFromRepo, githubResult, githubConnected, widgetHealth }) {
+  const W = BRANCH_WORKFLOW;
+  const noRepo = githubConnected === false && !pulledFromRepo && !githubResult?.branch;
+  const pushLine = noRepo
+    ? '— no GitHub repo is connected, so nothing was pushed; the Builder store is this solution\'s source of truth'
+    : githubResult?.error ? `⚠️ GitHub push FAILED: ${githubResult.error}`
+      // A SKIP IS NOT ALWAYS A DIVERGENCE. When the deploy PULLED from GitHub,
+      // the push-back is skipped precisely because Core was built from that
+      // content — they agree exactly, and telling the caller they "now differ"
+      // sends them to reconcile a repo that is already correct. The divergence
+      // that DOES exist on that path is the one nobody mentions: dev may be
+      // ahead of the main we deployed.
+      : githubResult?.skipped ? `⚠️ GitHub push skipped${githubResult.reason ? ` (${githubResult.reason})` : ''}`
+        + (/from github/i.test(githubResult.reason || '')
+            ? ` — Core matches the branch it was built from. If you have unpromoted work on \`${W.write_branch}\`, it is NOT in this deploy: ${W.promote_tool}(solution_id), then deploy again.`
+            : ' — Core and GitHub now differ')
+      : githubResult ? `+ pushed to ${githubResult.branch || W.write_branch}`
+      : '⚠️ no GitHub push attempted — Core and GitHub may differ';
+  return {
+    // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts.
+    ...(pulledFromRepo && { deployed_from_branch: W.deploy_branch }),
+    ...(githubResult?.branch && { pushed_to_branch: githubResult.branch }),
+    _status: [
+      '✅ Deployed to Core',
+      pushLine,
+      ...(widgetHealth && !widgetHealth.ok
+        ? [`⚠️ ${widgetHealth.issues?.length || 0} widget(s) not rendering — see widget_health.`]
+        : []),
+    ].join(' '),
+    // promote is a SHIP, not a checkpoint: it merges dev → main; the tag is a
+    // side effect.
+    _next: noRepo
+      ? `No GitHub repo is connected, so there are no branches and nothing to promote. ${W.no_git_at_all}`
+      : pulledFromRepo
+        ? `This deployed \`${W.deploy_branch}\`. Anything you patched since the last promote is still on \`${W.write_branch}\` and is NOT in this deploy — ${W.promote_tool}(solution_id) merges ${W.write_branch} → ${W.deploy_branch} (dry_run:true to preview), then deploy again.`
+        : `This deployed the payload you passed, not a branch. ${W.deploy_side} ${W.promote_tool}(solution_id) (dry_run:true to preview) is what ships \`${W.write_branch}\` there.`,
+  };
+}
+
 // ─── Widget health verification ────────────────────────────────────
 //
 // A skill/solution that declares UI plugins (ui_plugins[]) can silently ship
@@ -597,7 +731,7 @@ export const tools = [
           type: "string",
           enum: ["capabilities", "realizations", "overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "host-contract", "platform-connectors", "platform-truth", "sdk", "workflows", "monitoring"],
           description:
-            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
+            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'mobile-connector' = building functional connectors (background services) for ateam-mobile that use device capabilities through the Native Bridge SDK. 'actor-storage' = per-actor storage (dev-preview): a per-(tenant, actor, skill) SQLite database served by the actorstore-mcp platform connector — read this instead of hand-rolling per-user isolation in a connector. 'consumer-roles' = role-based access for your solution's END-USERS: you declare the config, the platform resolves and enforces one RoleProfile per request (roles decide WHO may act; actor-storage decides WHOSE data they touch). 'triggers' = the ONLY way a skill acts proactively — on a schedule or an event, with no user message; read before designing anything that must happen by itself. 'sub-agent' = sub-agents are a TOOL CALL (sys.callAiWithTools with a curated toolNames set), not a definition-level construct; caveats stated inline. 'voice' = the voice channel: phone (Twilio) and web/mobile callers reach the SAME skill runtime as chat — what you control (solution.voice, routing.voice.default_skill, a per-skill voice block, ateam_test_voice) and what you do not. 'voice-native' = the exception to that model: a `voice_native` block puts a skill inside the live audio loop (persona layer, one server skill tool, plus local device tools), with the boundaries that come with it. 'platform-connectors' = the built-in platform connectors (memory, browser, gmail, whatsapp, …) with their LIVE tool schemas and the inter-connector calling pattern — read before writing a connector that duplicates one. 'sdk' = the @ateam/sdk runtime API reference (platform, context, memory, progress, log, llm) for custom connector and skill code. 'host-contract' = the normative boundary between a host shell (mobile app, web shell, kiosk, watch) and the solutions it renders: ownership matrix, forbidden host behaviours, host capability allow-list — read when reviewing a host or designing a portable solution. 'platform-truth' = does this deployment's published sys.* tools and platform connectors agree with what the RUNNING Core exposes (including planner visibility)? Answers agrees:null when Core cannot be reached, never silence. 'workflows' = the Builder's step-by-step state machines for building skills and solutions (the same document ateam_get_workflows returns). 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
         section: {
           type: "string",
@@ -2272,7 +2406,7 @@ export const tools = [
   },
 
   // ═══════════════════════════════════════════════════════════════════
-  // RELEASE MANAGEMENT — checkpoint, rollback, version listing
+  // RELEASE MANAGEMENT — ship (promote), rollback, version listing
   // ═══════════════════════════════════════════════════════════════════
 
   {
@@ -2355,7 +2489,7 @@ export const tools = [
     description:
       "Roll prod (`main` branch) back to a previous state.\n\n" +
       "ADDITIVE — does NOT destroy history. Creates a new commit on top of main whose tree matches the target's tree. The history of everything between target and current main is preserved (you can roll back the rollback).\n\n" +
-      "Workflow: 1) ateam_github_list_versions (find a safe-* tag) → 2) ateam_github_rollback(target: 'safe-...') → 3) ateam_build_and_run (deploys the reverted state).",
+      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run (deploys the reverted state). ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2365,7 +2499,7 @@ export const tools = [
         },
         target: {
           type: "string",
-          description: "Tag (e.g., 'safe-2026-05-19-001') or commit SHA to revert main to. Use ateam_github_list_versions to find safe-* tags.",
+          description: `A ${BRANCH_WORKFLOW.tag_format} tag or a commit SHA to revert main to. Use ateam_github_list_versions to find the tags. ${BRANCH_WORKFLOW.legacy_tag_note}`,
         },
       },
       required: ["solution_id", "target"],
@@ -2375,7 +2509,7 @@ export const tools = [
     name: "ateam_github_list_versions",
     core: true,
     description:
-      "List all available checkpoints (safe-* tags) for a solution. Shows tag name, date, counter, and commit SHA. Use before rollback to see available safe points.",
+      `List the ${BRANCH_WORKFLOW.tag_format} tags each ${BRANCH_WORKFLOW.promote_tool} wrote for a solution — the points ateam_github_rollback can return main to. Shows tag name, date, counter, and commit SHA. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3320,7 +3454,7 @@ export const handlers = {
         { step: 3, action: "Version", description: `Writes land on \`${BRANCH_WORKFLOW.write_branch}\`, NOT ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.deploy_side} The repo (one per TENANT) is the source of truth for connector code.`, tools: ["ateam_github_status", "ateam_github_log", BRANCH_WORKFLOW.promote_tool] },
         { step: 4, action: "Iterate", description: `Edit connector code ONE FILE AT A TIME via ateam_github_patch, then follow the loop: ${BRANCH_WORKFLOW.one_line}. ${BRANCH_WORKFLOW.the_silent_mistake} NEVER re-pass all connector code inline after first deploy. For skill definitions use ateam_patch.`, tools: ["ateam_github_patch", BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_patch"] },
         { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
-        { step: 6, action: "Checkpoint", description: "When solution is in a good state, create a checkpoint (safe point). You can rollback to any checkpoint if something breaks.", tools: ["ateam_github_promote", "ateam_github_list_versions"] },
+        { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
     conversation_flow: {
@@ -3375,13 +3509,13 @@ export const handlers = {
         do_not_skip_promote: BRANCH_WORKFLOW.the_silent_mistake,
       },
       when_to_use_what: {
-        ateam_github_write: "Write/create connector files on main — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy.",
+        ateam_github_write: `Write/create connector files on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
         ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
-        ateam_patch: "Edit skill definitions (intents, tools, policy) — auto-pushes to `dev`. Promote when you want it in production.",
+        ateam_patch: `Edit skill definitions (intents, tools, policy) — auto-pushes to \`${BRANCH_WORKFLOW.write_branch}\`. Promote when you want it in production.`,
         "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
         ateam_github_promote: `SHIP ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} dry_run:true previews what would ship.`,
-        ateam_github_rollback: "Revert main to a previous checkpoint",
+        ateam_github_rollback: BRANCH_WORKFLOW.rollback,
       },
     },
     advanced_tools: {
@@ -4205,21 +4339,25 @@ export const handlers = {
       }
     } catch { /* advisory — never fail a successful deploy on the health check */ }
 
+    // Is there a branch story to tell at all? A pull or a landed push proves a
+    // repo; otherwise ask the one probe that knows, rather than guessing from a
+    // failed or skipped push — mirroring ateam_patch's local split.
+    const pulledFromRepo = Boolean(github);
+    const githubConnected = (pulledFromRepo || github_result?.branch)
+      ? true
+      : await probeGithubConnected(solutionId, sid);
+    const branches = describeDeployBranches({
+      pulledFromRepo, githubResult: github_result, githubConnected, widgetHealth: widget_health,
+    });
+
     return {
       ok: true,
       solution_id: solutionId,
-      // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts, and
-      // this asserted one value for both. Since the write path moved to `dev`
-      // (6e4470e, "one branch for the whole loop"), the push returns
-      // branch:'dev' plus a _note saying "Landed on dev, NOT main" — and this
-      // envelope spread that note into `github:` while its own top-level
-      // `branch: 'main'` said the opposite. The warning was reached and then
-      // contradicted by the object carrying it.
-      //
-      // b02c008 swept exactly this for ateam_patch and called itself "sweep
-      // #1". build_and_run was never swept.
-      deployed_from_branch: 'main',
-      ...(github_result?.branch && { pushed_to_branch: github_result.branch }),
+      // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts —
+      // and for a tenant with no repo, neither exists. describeDeployBranches
+      // decides all three.
+      ...(branches.deployed_from_branch && { deployed_from_branch: branches.deployed_from_branch }),
+      ...(branches.pushed_to_branch && { pushed_to_branch: branches.pushed_to_branch }),
       phases,
       deploy: {
         skills_deployed: deploy.import?.skills || [],
@@ -4236,35 +4374,10 @@ export const handlers = {
       ...(github_result && { github: github_result }),
       ...(agent_doc_result && !agent_doc_result.error && { agent_doc: agent_doc_result }),
       ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
-      // _status must describe WHAT HAPPENED. It previously asserted
-      // "pushed to main" unconditionally — when the push failed, when it was
-      // skipped (GitHub disabled, or push_to_github not opted in), and when no
-      // push was attempted at all. Worse, its only variable was widget_health,
-      // an unrelated flag: whether the code reached GitHub could not change the
-      // sentence claiming the code reached GitHub.
-      _status: [
-        '✅ Deployed to Core',
-        github_result?.error ? `⚠️ GitHub push FAILED: ${github_result.error}`
-          // A SKIP IS NOT ALWAYS A DIVERGENCE. When the deploy PULLED from
-          // GitHub, the push-back is skipped precisely because Core was built
-          // from that content — they agree exactly, and telling the caller they
-          // "now differ" sends them to reconcile a repo that is already
-          // correct. The divergence that DOES exist on that path is the one
-          // nobody mentions: dev may be ahead of the main we deployed.
-          : github_result?.skipped ? `⚠️ GitHub push skipped${github_result.reason ? ` (${github_result.reason})` : ''}`
-            + (/from github/i.test(github_result.reason || '')
-                ? ' — Core matches the branch it was built from. If you have unpromoted work on `dev`, it is NOT in this deploy: ateam_github_promote(solution_id), then deploy again.'
-                : ' — Core and GitHub now differ')
-          : github_result ? `+ pushed to ${github_result.branch || 'dev'}`
-          : '⚠️ no GitHub push attempted — Core and GitHub may differ',
-        ...(widget_health && !widget_health.ok
-          ? [`⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`]
-          : []),
-      ].join(' '),
-      // promote is a SHIP, not a checkpoint. It merges dev → main; the tag is a
-      // side effect. Calling it "create a checkpoint" is what left agents
-      // thinking their work was already on main.
-      _next: 'This deployed `main`. Anything you patched since the last promote is still on `dev` and is NOT in this deploy — ateam_github_promote(solution_id) merges dev → main (dry_run:true to preview), then deploy again.',
+      // _status must describe WHAT HAPPENED — it once asserted "pushed to main"
+      // unconditionally, keyed only on widget_health. See describeDeployBranches.
+      _status: branches._status,
+      _next: branches._next,
     };
   },
 
@@ -4330,10 +4443,8 @@ export const handlers = {
           // degrades. The local write below reconciles to GitHub once connected.
           let connected = true;
           if (!sourceExplicit) {
-            try {
-              const probe = await get(`/deploy/solutions/${solution_id}/github/connected`, sid);
-              connected = probe?.connected !== false && probe?.enabled !== false;
-            } catch { connected = true; /* probe failed → don't mask the real read error */ }
+            // null (the probe itself failed) counts as connected → don't mask the real read error
+            connected = (await probeGithubConnected(solution_id, sid)) !== false;
           }
           if (!sourceExplicit && !connected) {
             isLocal = true;
@@ -4699,7 +4810,16 @@ export const handlers = {
       redeployResult = (kicked?.async && kicked.job_id)
         ? await pollDeployJob(kicked.job_id, sid, { label: skill_id ? `redeploy-skill ${skill_id}` : "redeploy-bulk", maxMs: 15 * 60_000, intervalMs: 2000 })
         : kicked;
-      phases.push({ phase: "redeploy", status: redeployResult?.ok === false ? "error" : "done" });
+      // The SAME verdict ateam_redeploy reports. This was its own copy,
+      // `ok === false ? "error" : "done"`, so a job that crashed (no ok at all)
+      // read as a completed rebuild, and a degraded one as a clean one.
+      const rd = redeployVerdict(redeployResult);
+      phases.push({
+        phase: "redeploy",
+        status: rd.failed ? "error" : "done",
+        ...(rd.failed && redeployResult?.error && { error: redeployResult.error }),
+        ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome }),
+      });
     } catch (err) {
       // Partial success: patch is saved to GitHub, only redeploy failed.
       // Return ok:true so the agent doesn't think the patch was lost.
@@ -4726,7 +4846,13 @@ export const handlers = {
     }
 
     const redeployOk = phases.some(p => p.phase === "redeploy" && p.status === "done");
+    const redeployDegraded = phases.some(p => p.phase === "redeploy" && p.code === "DEPLOYED_WITH_ERRORS");
     const store = isLocal ? "Builder store (local)" : "GitHub";
+    // The rebuild RAN either way — the edit is live — so a degraded one keeps
+    // ok, but it is not a ✅.
+    const redeployedLine = redeployDegraded
+      ? `⚠️ Patched on ${store} + redeployed WITH ERRORS — it reached Core but did not come up clean; see redeploy.verification.`
+      : `✅ Patched on ${store} + redeployed.`;
 
     // Widget health — if the redeploy landed and the solution declares UI
     // plugins, verify each renders (Core discovered it + has a render block).
@@ -4840,8 +4966,8 @@ export const handlers = {
       ...(test_result && { test_result }),
       _status: (redeployOk
         ? (widget_health && !widget_health.ok
-            ? `✅ Patched on ${store} + redeployed. ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
-            : `✅ Patched on ${store} + redeployed.`)
+            ? `${redeployedLine} ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
+            : redeployedLine)
         : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
@@ -6386,42 +6512,54 @@ export const handlers = {
       };
     }
     if (!result) result = { ok: false, error: 'Redeploy returned no result' };
+    const verdict = redeployVerdict(result);
     // Pull through the underlying error/message instead of fabricating "0/0/0
     // success-shaped" output. Old wrapper hid backend errors (e.g. validator
     // failures from sentinel files in user repos) and reported `total: 0` with
     // no clue why — the agent was left thinking redeploy was a no-op when in
     // fact it was a hard failure.
-    const failedCount = !result.ok
+    const failedCount = verdict.failed
       ? (result.failed ?? (result.skills?.length ? result.skills.filter(s => s.ok === false).length : 1))
       : (result.failed || 0);
-    const deployedCount = result.deployed ?? (result.ok ? (skill_id ? 1 : (result.skills?.filter(s => s.ok !== false).length || 0)) : 0);
+    const deployedCount = result.deployed ?? (verdict.failed ? 0 : (skill_id ? 1 : (result.skills?.filter(s => s.ok !== false).length || 0)));
     const totalCount = result.total ?? (deployedCount + failedCount);
 
     const out = {
-      ok: result.ok,
+      // The verdict's, not result.ok: a crashed job has no ok at all, and
+      // passing `undefined` through is what kept isError off it.
+      ok: !verdict.failed,
       solution_id,
       ...(skill_id && { skill_id }),
       deployed: deployedCount,
       failed: failedCount,
       total: totalCount,
       skills: result.skills || [],
-      // PASS THROUGH what the Builder decided. `status` carries
-      // "deployed_with_errors" — a real outcome, neither a clean success nor a
-      // failure — and `verification` carries why. This key list had never heard
-      // of either, so both were dropped one hop from the caller.
-      ...(result.status && { status: result.status }),
+      // PASS THROUGH what the Builder decided: `status` is the deploy's OUTCOME
+      // (deployed_with_errors is a real outcome, neither a clean success nor a
+      // failure) — never the job lifecycle word — and `verification` carries why.
+      ...(verdict.outcome && { status: verdict.outcome }),
       ...(result.verification && { verification: result.verification }),
+      // Machine-readable, so a caller (the ateam-proxy connector) does not have
+      // to parse the sentence below. Not isError: the Builder's ok:true stands.
+      ...(verdict.degraded && { code: "DEPLOYED_WITH_ERRORS" }),
       // Surface the underlying error when the request failed — the most
       // common cause is a validator failure (e.g. broken connector source
       // in the GitHub repo), and hiding it makes diagnosis impossible.
-      ...(!result.ok && result.error && { error: result.error }),
-      ...(!result.ok && result.details && { details: result.details }),
-      ...(!result.ok && result.hint && { hint: result.hint }),
-      message: result.ok
-        ? skill_id
-          ? `Re-deployed skill "${skill_id}" successfully.`
-          : `Re-deployed ${deployedCount} skill(s) successfully.`
-        : (result.error
+      ...(verdict.failed && result.error && { error: result.error }),
+      ...(verdict.failed && result.details && { details: result.details }),
+      ...(verdict.failed && result.hint && { hint: result.hint }),
+      // Branches on the VERDICT, not on `ok` alone — `ok` is true for a deploy
+      // that landed with errors, and this sentence is what an agent reads first.
+      //
+      // `result.message` is quoted in ONE place: a degraded single skill. A
+      // degraded verdict needs ok === true, i.e. the runFn RETURNED, and every
+      // Builder's single-skill runFn result carries the deploy's own sentence
+      // (the normaliser always writes one; prod spreads deploySkillToADAS's,
+      // which always has one). Everywhere else the job entry's message can be
+      // the leftover PROGRESS text — a bulk runFn returns none, and a runFn
+      // that threw returned nothing — so it is never the verdict.
+      message: verdict.failed
+        ? (result.error
             ? `Re-deploy failed: ${result.error}${result.hint ? ` — ${result.hint}` : ''}`
             // "Check skills array" was the advice given WHILE the skills array
             // was empty — the async branch never populated it. Say what is
@@ -6430,12 +6568,22 @@ export const handlers = {
                 ? `Re-deploy had ${failedCount} failure(s) — see skills[].`
                 : `Re-deploy reported ${failedCount} failure(s) but named no skill and gave no reason. `
                   + `That is a reporting fault, not necessarily a deploy fault: check ateam_get_solution(view:"status") `
-                  + `before redeploying, in case the skill actually landed.`)),
+                  + `before redeploying, in case the skill actually landed.`))
+        : verdict.degraded
+        ? (skill_id
+            ? `Re-deployed skill "${skill_id}" WITH ERRORS (status: ${verdict.outcome}) — it reached Core but did not come up clean.`
+              + (result.message ? ` Builder: ${result.message}` : "")
+              + " See verification."
+            : `Re-deployed ${deployedCount} of ${totalCount} skill(s) WITH ERRORS (${failedCount} failed`
+              + `, status: ${verdict.outcome}) — see skills[] and verification.`)
+        : skill_id
+          ? `Re-deployed skill "${skill_id}" successfully.`
+          : `Re-deployed ${deployedCount} skill(s) successfully.`,
     };
     // If the deploy landed and the solution declares widgets, verify each one
     // actually renders (discovered by Core + has a render block). A silently
     // non-rendering widget is a common, hard-to-notice failure — surface it here.
-    if (result.ok) {
+    if (!verdict.failed) {
       try {
         const wh = await verifyWidgetHealth(solution_id, sid);
         if (wh) {
@@ -6578,65 +6726,9 @@ function summarizeLargeResult(result, toolName) {
   //
   // Sections are dropped largest-first, each replaced by a stub that says what
   // it was and how to fetch it, until the whole thing fits. Valid JSON, and
-  // nothing vanishes silently.
+  // nothing vanishes silently — see summarizeSpecResult.
   if (toolName === "ateam_get_spec" && result && typeof result === "object" && !Array.isArray(result)) {
-    const out = { ...result };
-    const omitted = [];
-    const sizeOf = (v) => JSON.stringify(v ?? null).length;
-    const fits = () => JSON.stringify({ _truncation: "", sections: Object.keys(result), ...out }, null, 2).length <= MAX_RESPONSE_CHARS;
-
-    // Largest first — dropping one 45KB section beats dropping ten small ones.
-    const bySize = Object.keys(out)
-      .filter((k) => typeof out[k] === "object" && out[k] !== null)
-      .sort((a, b) => sizeOf(out[b]) - sizeOf(out[a]));
-
-    for (const key of bySize) {
-      if (fits()) break;
-      const value = out[key];
-      const idOf = (e) => e?.id || e?.q || e?.name;
-      const whole = sizeOf(value);
-      const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
-
-      if (Array.isArray(value)) {
-        // Fill the remaining budget with WHOLE entries rather than dropping
-        // all of them — the cap is 50K and this section is usually the only
-        // thing over it, so most of it fits. Partial beats absent, as long as
-        // the reader is told which entries are missing.
-        const kept = [];
-        out[key] = kept;
-        for (const entry of value) {
-          kept.push(entry);
-          if (!fits()) { kept.pop(); break; }
-        }
-        if (kept.length === value.length) continue;   // it all fit after all
-        const missing = value.slice(kept.length).map(idOf).filter(Boolean);
-        omitted.push(`${key} (${kept.length}/${value.length} included)`);
-        out[key] = {
-          _partial: `${kept.length} of ${value.length} entries included; the rest are indexed below (${whole.toLocaleString()} chars whole).`,
-          _how_to_read_the_rest: how,
-          not_included_ids: missing,
-          included: kept,
-        };
-      } else {
-        omitted.push(key);
-        out[key] = {
-          _omitted: `too large to inline (${whole.toLocaleString()} chars)`,
-          _how_to_read_it: how,
-          // The index survives even when the content cannot — knowing WHAT is
-          // in there is most of the value, and it is what the tail-slice ate.
-          count: Object.keys(value).length,
-          keys: Object.keys(value),
-        };
-      }
-    }
-
-    return JSON.stringify({
-      _truncation: omitted.length
-        ? `${omitted.length} section(s) were too large to inline and are indexed rather than included: ${omitted.join(", ")}. EVERY OTHER SECTION BELOW IS COMPLETE.`
-        : "nothing omitted",
-      sections: Object.keys(result),
-      ...out,
-    }, null, 2);
+    return summarizeSpecResult(result);
   }
 
   // Validation results — keep errors/warnings, trim echoed input
@@ -6660,6 +6752,146 @@ function summarizeLargeResult(result, toolName) {
 
   // Generic fallback — truncate
   return JSON.stringify(result, null, 2).slice(0, MAX_RESPONSE_CHARS);
+}
+
+// How many names (omitted-entry ids, stubbed-object keys, section names) an
+// index may LIST. The index exists so nothing vanishes silently; it must not
+// itself become what blows the cap — 200,000 omitted ids listed in full came
+// to 3.3MB. Every list is capped here and paired with an EXACT count.
+const MAX_INDEX_NAMES = 200;
+
+/**
+ * Fit an oversized spec document under MAX_RESPONSE_CHARS without ever cutting
+ * mid-token. The CAP IS A CEILING: this returns valid JSON of at most
+ * MAX_RESPONSE_CHARS characters for ANY input object.
+ *
+ * 360fb78 replaced the old `.slice(0, MAX_RESPONSE_CHARS)` with a budget check
+ * that could not enforce it: it charged 2 chars for a _truncation sentence of
+ * hundreds, ran BEFORE the partial-array wrapper replaced the raw array, never
+ * considered a STRING section, and listed every omitted id. So "fits" was a
+ * guess, and a 300KB string section came back whole under "nothing omitted".
+ * Now every check measures the document that will actually be returned.
+ */
+function summarizeSpecResult(result) {
+  const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
+  const sizeOf = (v) => JSON.stringify(v ?? null).length;
+  // The pretty-printed length of one top-level entry. Swapping a section's
+  // value changes the whole document's length by exactly the difference of
+  // this, which is what lets the budget be tracked without re-rendering the
+  // document for every candidate (3,000 small sections took 6s that way).
+  const entryLen = (k, v) => JSON.stringify({ [k]: v }, null, 2).length;
+  // Names at most MAX_SENTENCE_NAMES sections — the sentence is part of the
+  // budget too, and thousands of names would blow it on their own.
+  const MAX_SENTENCE_NAMES = 20;
+  const sentence = (list) => list.length
+    ? `${list.length} section(s) were too large to inline and are indexed rather than included: ${list.slice(0, MAX_SENTENCE_NAMES).join(", ")}`
+      + (list.length > MAX_SENTENCE_NAMES ? `, and ${list.length - MAX_SENTENCE_NAMES} more, each stubbed in place` : "")
+      + ". EVERY OTHER SECTION BELOW IS COMPLETE."
+    : "nothing omitted";
+  const out = { ...result };
+  let omitted = [];
+  const render = () => JSON.stringify({ _truncation: sentence(omitted), sections: Object.keys(result), ...out }, null, 2);
+  // Exact length of render(), kept current by entry differences. The final
+  // render below is still measured for real before anything is returned.
+  let size = render().length;
+  const sentenceDelta = (list) => entryLen("_truncation", sentence(list)) - entryLen("_truncation", sentence(omitted));
+
+  // TOTAL, not best-effort: an entry with no id/q/name is named by its
+  // position. `.filter(Boolean)` used to drop it, and the document then said
+  // "the rest are indexed below" over an empty array.
+  const idOf = (e, i) => {
+    const v = e && typeof e === "object" ? (e.id ?? e.q ?? e.name) : undefined;
+    return v === undefined || v === null || v === "" ? `#${i}` : String(v);
+  };
+  const partial = (value, k, whole) => {
+    const missing = value.length - k;
+    const named = value.slice(k, k + MAX_INDEX_NAMES).map((e, i) => idOf(e, k + i));
+    return {
+      _partial: `${k} of ${value.length} entries included; the other ${missing} are indexed below (${whole.toLocaleString()} chars whole).`,
+      _how_to_read_the_rest: how,
+      not_included_count: missing,
+      not_included_ids: named,
+      ...(missing > named.length && { not_included_ids_note: `${missing - named.length} more not listed by id — ${how}` }),
+      included: value.slice(0, k),
+    };
+  };
+  const stub = (value, whole) => {
+    if (typeof value === "string") {
+      return { _omitted: `too large to inline (${whole.toLocaleString()} chars of text)`, _how_to_read_it: how, length: value.length };
+    }
+    const keys = Object.keys(value);
+    return {
+      _omitted: `too large to inline (${whole.toLocaleString()} chars)`,
+      _how_to_read_it: how,
+      // The index survives even when the content cannot — knowing WHAT is in
+      // there is most of the value, and it is what the tail-slice ate.
+      count: keys.length,
+      keys: keys.slice(0, MAX_INDEX_NAMES),
+      ...(keys.length > MAX_INDEX_NAMES && { keys_note: `${keys.length - MAX_INDEX_NAMES} more not listed` }),
+    };
+  };
+
+  // Largest first — dropping one 45KB section beats dropping ten small ones.
+  // STRINGS count: a document whose bulk is one text section used to have no
+  // reduction candidate at all.
+  const bySize = Object.keys(out)
+    .filter((k) => (typeof out[k] === "object" && out[k] !== null) || typeof out[k] === "string")
+    .sort((a, b) => sizeOf(out[b]) - sizeOf(out[a]));
+
+  for (const key of bySize) {
+    if (size <= MAX_RESPONSE_CHARS) break;
+    const value = out[key];
+    const whole = sizeOf(value);
+    const current = entryLen(key, value);
+
+    if (Array.isArray(value)) {
+      // Fill the remaining budget with WHOLE entries rather than dropping all
+      // of them — partial beats absent, as long as the reader is told which
+      // entries are missing. Binary search over the kept count; every trial is
+      // costed with the real wrapper AND the real _truncation sentence.
+      const trial = (k) => {
+        const wrapped = partial(value, k, whole);
+        const list = [...omitted, `${key} (${k}/${value.length} included)`];
+        return { wrapped, list, size: size - current + entryLen(key, wrapped) + sentenceDelta(list) };
+      };
+      let lo = 0, hi = value.length - 1, best = null;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const t = trial(mid);
+        if (t.size <= MAX_RESPONSE_CHARS) { best = t; lo = mid + 1; } else hi = mid - 1;
+      }
+      const chosen = best || trial(0);
+      if (chosen.size >= size) continue;   // wrapping saves nothing
+      out[key] = chosen.wrapped; size = chosen.size; omitted = chosen.list;
+    } else {
+      const replacement = stub(value, whole);
+      const list = [...omitted, key];
+      const next = size - current + entryLen(key, replacement) + sentenceDelta(list);
+      if (next >= size) continue;          // a stub bigger than the section saves nothing
+      out[key] = replacement; size = next; omitted = list;
+    }
+  }
+
+  const text = render();
+  if (text.length <= MAX_RESPONSE_CHARS) return text;
+
+  // THE BACKSTOP. Every large section is already indexed and it is STILL over
+  // (thousands of small sections, say). Return the index alone — still valid
+  // JSON, still naming the sections, never a mid-token cut.
+  const names = Object.keys(result);
+  const index = {
+    _truncation: `This spec document is ${sizeOf(result).toLocaleString()} chars and exceeds the ${MAX_RESPONSE_CHARS.toLocaleString()}-char response cap even with its large sections indexed, so only its index is returned. ${how}`,
+    ...(typeof result.topic === "string" && result.topic.length <= 100 && { topic: result.topic }),
+    section_count: names.length,
+    sections: names.slice(0, MAX_INDEX_NAMES),
+    ...(names.length > MAX_INDEX_NAMES && { sections_note: `${names.length - MAX_INDEX_NAMES} more not listed` }),
+  };
+  const indexText = JSON.stringify(index, null, 2);
+  if (indexText.length <= MAX_RESPONSE_CHARS) return indexText;
+  // Only section NAMES long enough to blow the cap on their own get here.
+  delete index.sections;
+  index.sections_note = `${names.length} section names, too long to list`;
+  return JSON.stringify(index, null, 2);
 }
 
 // Failure classification (isError + a machine-readable code, WITHOUT parsing

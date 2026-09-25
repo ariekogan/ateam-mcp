@@ -635,6 +635,45 @@ function headers(sessionId) {
   return h;
 }
 
+// Core's own wording, and the only free-text form trusted: the actor's name in
+// real quotes (a nested hop may escape them). `unknown actor` is NOT here —
+// nothing emits it, and the bare phrase matched Core's own
+// "unknown actor_skills plugin: <id>" (actorWidgetNamespace.js).
+const ACTOR_NOT_FOUND_TEXT_RX = /\bActor\s+\\?"([^"\\]+)\\?"\s+not found/i;
+
+/**
+ * ONE answer to "is this error body an actor-not-found?". formatError's hint
+ * and request()'s self-heal both ask it; they used to carry two regexes that
+ * had already drifted (the self-heal made the quotes optional and matched
+ * ACTOR_NOT_FOUND as a bare substring anywhere in the body), so any 400 that
+ * merely ECHOED that token unbound a valid session actor.
+ *
+ * Only two shapes count, and only at the TOP LEVEL of the body:
+ *   - the Builder's structured `code: "ACTOR_NOT_FOUND"`
+ *   - Core's `error: 'Actor "X" not found'` (the error/message string, or a
+ *     non-JSON body that is exactly that sentence)
+ * A token inside a nested or echoed field is data, not a verdict.
+ *
+ * @param {number} status
+ * @param {string|object} body
+ * @returns {{ actor: string|null } | null}  null when the body is not an actor-not-found
+ */
+export function actorNotFound(status, body) {
+  if (status !== 401 && status !== 400) return null;
+  let obj = body && typeof body === "object" ? body : null;
+  if (!obj && typeof body === "string") {
+    try { obj = JSON.parse(body); } catch { /* not JSON — judged as text below */ }
+  }
+  if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+    const said = [obj.error, obj.message].find((v) => typeof v === "string") || "";
+    const named = ACTOR_NOT_FOUND_TEXT_RX.exec(said);
+    if (obj.code === "ACTOR_NOT_FOUND" || named) return { actor: named ? named[1].trim() : null };
+    return null;
+  }
+  const named = typeof body === "string" ? ACTOR_NOT_FOUND_TEXT_RX.exec(body) : null;
+  return named ? { actor: named[1].trim() } : null;
+}
+
 /**
  * Format an API error into a user-friendly message with actionable hints.
  *
@@ -669,21 +708,16 @@ export function formatError(method, path, status, body, baseUrl) {
   // Builder's test route hands back a 400 ACTOR_NOT_FOUND. Keying this on 401
   // alone meant the correctly-classified one missed the hint entirely — the
   // guard did not follow the fix.
-  if (status === 401 || status === 400) {
-    const t = typeof body === "string"
-      ? body
-      : (() => { try { return JSON.stringify(body || ""); } catch { return ""; } })();
-    const m = /Actor\s+\\?"([^"\\]+)\\?"\s+not found|unknown actor\s+\\?"?([^"\\,}]+)|ACTOR_NOT_FOUND/i.exec(t);
-    if (m) {
-      // The ACTOR_NOT_FOUND alternative carries a code, not a name — say "the
-      // actor you sent" rather than printing empty quotes.
-      const who = (m[1] || m[2] || "").trim() || "you sent";
-      hints[status] =
-        `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
-        `Re-authenticating will not help. Either pass a real actor id (the one ateam_conversation returned for the thread), ` +
-        `or omit the actor entirely to act as the tenant. If you never sent an actor, the session is bound to a stale one: ` +
-        `call ateam_auth again to reset the session binding.`;
-    }
+  const notFound = actorNotFound(status, body);
+  if (notFound) {
+    // The structured code carries no name — say "the actor you sent" rather
+    // than printing empty quotes.
+    const who = notFound.actor || "you sent";
+    hints[status] =
+      `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
+      `Re-authenticating will not help. Either pass a real actor id (the one ateam_conversation returned for the thread), ` +
+      `or omit the actor entirely to act as the tenant. If you never sent an actor, the session is bound to a stale one: ` +
+      `call ateam_auth again to reset the session binding.`;
   }
 
   // A 404 ON /spec IS NOT A MISSING SOLUTION.
@@ -846,8 +880,9 @@ async function request(method, path, body, sessionId, opts = {}) {
         // in the session then re-sent the actor Core had just rejected, which
         // is precisely the latch the external build hit: a refused actor_id
         // survived into ateam_upload_connector, a call that takes no actor.
-        if ((res.status === 401 || res.status === 400)
-            && /Actor\s+\\?"?[^"\\,}]+\\?"?\s+not found|unknown actor|ACTOR_NOT_FOUND/i.test(text)) {
+        // The SAME classifier as the hint above — see actorNotFound for why a
+        // second, looser copy here unbound valid actors on echoed 400s.
+        if (actorNotFound(res.status, text)) {
           clearSessionActor(sessionId, `Core rejected it on ${method} ${path}`);
         }
         // Attach the HTTP status so callers can distinguish a genuine 404

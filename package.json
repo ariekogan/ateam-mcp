@@ -1,6 +1,6 @@
 {
   "name": "@ateam-ai/mcp",
-  "version": "0.4.102",
+  "version": "0.4.103",
   "mcpName": "io.github.ariekogan/ateam-mcp",
   "description": "A-Team MCP Server — build, validate, and deploy multi-agent solutions from any AI environment",
   "type": "module",
@@ -13,7 +13,8 @@
     "start:http": "node src/index.js --http",
     "dev": "node --watch src/index.js",
     "dev:http": "node --watch src/index.js --http",
-    "test": "node test/session-isolation.test.mjs && node test/widget-protocol.test.mjs && node test/actor-binding.test.mjs && node test/bootstrap-one-branch-model.test.mjs && node test/spec-topics.test.mjs && node test/example-types.test.mjs && node --test test/deploy-status-truth.test.mjs && node --test test/connector-source-provenance.test.mjs && node --test test/bootstrap-base-url.test.mjs && node --test test/key-environment.test.mjs"
+    "test": "node test/session-isolation.test.mjs && node test/widget-protocol.test.mjs && node test/actor-binding.test.mjs && node test/bootstrap-one-branch-model.test.mjs && node test/spec-topics.test.mjs && node --test test/spec-live-gate.test.mjs && node test/example-types.test.mjs && node --test test/deploy-status-truth.test.mjs && node --test test/redeploy-verdict.test.mjs && node --test test/connector-source-provenance.test.mjs && node --test test/bootstrap-base-url.test.mjs && node --test test/key-environment.test.mjs",
+    "test:live": "node test/spec-topics.test.mjs --live"
   },
   "keywords": [
     "mcp",

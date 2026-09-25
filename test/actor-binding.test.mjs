@@ -17,6 +17,7 @@ import {
   clearSessionActor,
   getSessionContext,
   formatError,
+  get,
 } from "../src/api.js";
 
 let failures = 0;
@@ -89,6 +90,57 @@ check("an unrelated 401 is NOT reclassified",
   !/does not recognise the ACTOR/i.test(say(401, { error: "Authentication required" })));
 check("an unrelated 400 is NOT reclassified",
   !/does not recognise the ACTOR/i.test(say(400, { error: "message is required" })));
+
+// ─── The self-heal must key on a VERDICT, not a token ────────────────────────
+//
+// The hint and the self-heal used to carry two different regexes. The
+// self-heal's made the quotes optional and matched ACTOR_NOT_FOUND as a bare
+// substring anywhere in the body, so a 400 that merely ECHOED the token — or
+// Core's own "unknown actor_skills plugin" — unbound a valid session actor and
+// every later call quietly ran as the tenant. This drives the REAL request()
+// against a local server, so it tests what production does, not a copy.
+console.log("self-heal fires on the verdict, never on an echo");
+
+const { createServer } = await import("node:http");
+let nextReply = { status: 200, body: {} };
+const server = createServer((req, res) => {
+  res.writeHead(nextReply.status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(nextReply.body));
+});
+await new Promise((r) => server.listen(0, "127.0.0.1", r));
+const API = `http://127.0.0.1:${server.address().port}`;
+const HEAL_SID = "sess-actor-heal";
+setSessionCredentials(HEAL_SID, { apiKey: KEY, apiUrl: API, explicit: true });
+
+const REAL_ACTOR = "ebe3dd82-e609-456f-9277-72f0986f40ed";
+async function actorAfter(status, body) {
+  touchSession(HEAL_SID, { actorId: REAL_ACTOR });
+  nextReply = { status, body };
+  try { await get("/deploy/solutions/s/logs", HEAL_SID); } catch { /* the error is expected */ }
+  return getSessionContext(HEAL_SID)?.actorId;
+}
+
+// Must NOT unbind — none of these says the actor is unknown.
+const ECHO = { error: "validation failed", echo: { code_sample: "if (e.code === 'ACTOR_NOT_FOUND') retry()" } };
+check("a 400 that only ECHOES the token keeps the actor", (await actorAfter(400, ECHO)) === REAL_ACTOR);
+check("  and its hint does not blame the actor", !/does not recognise the ACTOR/i.test(say(400, ECHO)));
+check("Core's 'unknown actor_skills plugin' 400 keeps the actor",
+  (await actorAfter(400, { error: "unknown actor_skills plugin: weather" })) === REAL_ACTOR);
+check("unquoted prose that happens to contain 'Actor … not found' keeps the actor",
+  (await actorAfter(400, { error: "Actor cannot be resolved because the skill test_x was not found" })) === REAL_ACTOR);
+check("a nested code field is not a top-level verdict",
+  (await actorAfter(400, { ok: false, details: { code: "ACTOR_NOT_FOUND" } })) === REAL_ACTOR);
+
+// MUST unbind — the two shapes that really mean it. Without these the
+// narrowing could over-shoot into never healing at all.
+check("the Builder's structured 400 ACTOR_NOT_FOUND unbinds",
+  (await actorAfter(400, { ok: false, code: "ACTOR_NOT_FOUND", error: 'Core does not recognize actor "dev": Actor "dev" not found' })) === undefined);
+check("Core's 401 Actor \"X\" not found unbinds",
+  (await actorAfter(401, { ok: false, error: 'Actor "dev" not found' })) === undefined);
+check("a genuine invalid-key 401 does NOT unbind",
+  (await actorAfter(401, { error: "Invalid or unconfigured API key" })) === REAL_ACTOR);
+
+server.close();
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

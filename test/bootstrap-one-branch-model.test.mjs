@@ -18,12 +18,15 @@
 // resolved — it moved inside a single tool result, where it is harder to
 // notice and impossible to reconcile.
 //
-// So this test does NOT grep for strings I happened to think of. It walks the
-// WHOLE bootstrap response and fails on any surviving claim of the old model,
-// wherever it is nested.
+// So this test walks the WHOLE bootstrap response — and the tool descriptions,
+// and the agent doc — and fails on the known PHRASINGS of the old model
+// (OLD_MODEL below) wherever they are nested. It is not proof of absence: it
+// used to claim it was, and two survivors ("files on main", "create a
+// checkpoint (safe point)") shipped green under that claim because no entry
+// matched their wording. A new phrasing needs a new entry.
 //
 // Run: node test/bootstrap-one-branch-model.test.mjs
-import { handlers } from "../src/tools.js";
+import { handlers, tools } from "../src/tools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
 
 let failures = 0;
@@ -34,12 +37,18 @@ const check = (name, cond, detail = "") => {
 
 const boot = await handlers.ateam_bootstrap({}, "boot-test");
 
-/** Every string in the response, with the dotted path that reaches it. */
-function strings(node, path = "", out = []) {
-  if (typeof node === "string") out.push({ path, text: node });
-  else if (Array.isArray(node)) node.forEach((v, i) => strings(v, `${path}[${i}]`, out));
+/**
+ * Every string in the response, with the dotted path that reaches it and the
+ * container it sits in. The container matters: developer_loop.steps[5] said
+ * "create a checkpoint (safe point)" while the TOOL NAME sat in its sibling
+ * `tools` array — neither the text nor the path mentioned promote, so a
+ * text-or-path probe could not see it.
+ */
+function strings(node, path = "", out = [], parent = null) {
+  if (typeof node === "string") out.push({ path, text: node, parent });
+  else if (Array.isArray(node)) node.forEach((v, i) => strings(v, `${path}[${i}]`, out, node));
   else if (node && typeof node === "object") {
-    for (const [k, v] of Object.entries(node)) strings(v, path ? `${path}.${k}` : k, out);
+    for (const [k, v] of Object.entries(node)) strings(v, path ? `${path}.${k}` : k, out, node);
   }
   return out;
 }
@@ -71,12 +80,42 @@ const OLD_MODEL = [
   { re: /push origin main/, why: "an instruction to push straight to production" },
   { re: /safe-\*/, why: "the retired safe-* tag format" },
   { re: /checkpoint when green/i, why: "promote framed as a checkpoint rather than a ship" },
+
+  // ── ADDED 2026-09-24 (review c4b68f0079), shaped by the two that escaped ──
+  // "Write/create connector files on main" (github_tools.when_to_use_what)
+  // matched none of the ten above. `land(s)` is deliberately NOT in this
+  // family: ateam_github_sync_from_main correctly says "the moment anything
+  // lands on main directly — a hotfix…", and "Everything lands on main" has
+  // its own entry above.
+  { re: /(?:write|writes|patch(?:es)?|commit(?:s)?|files)[^.]{0,40}\bon [`'"]?main\b/i, why: "a write placed on main" },
+  { re: /creates? a checkpoint|checkpoint \(/i, why: "promote framed as creating a checkpoint" },
 ];
 for (const { re, why } of OLD_MODEL) {
   const hits = ALL.filter((s) => re.test(s.text) && !HISTORY_NOTE.test(s.text));
   check(`${why} appears nowhere`, hits.length === 0,
         hits.map((h) => h.path).join(", "));
 }
+
+console.log("the TOOL DESCRIPTIONS teach the same model");
+// The guard used to walk only the bootstrap response, so the rollback and
+// list_versions descriptions went on telling agents to hunt for safe-* tags
+// that promote stopped writing on 2026-05-19 (7a75479). One retired-prefix
+// mention is legitimate — the owner's back-compat note — and it is exempted
+// by its exact text, so a second, hand-written one still fails.
+const { BRANCH_WORKFLOW: OWNER } = await import("../src/branchWorkflow.js");
+const TOOL_STRINGS = strings(tools);
+check("tool descriptions were walked", TOOL_STRINGS.length > 200, `${TOOL_STRINGS.length} strings`);
+check("the owner carries the one legitimate back-compat note",
+      typeof OWNER.legacy_tag_note === "string" && /safe-\*/.test(OWNER.legacy_tag_note));
+const withoutNote = (t) => (OWNER.legacy_tag_note ? t.split(OWNER.legacy_tag_note).join("") : t);
+for (const { re, why } of [...OLD_MODEL, { re: /safe-(?:\d{4}|YYYY)/, why: "a retired safe-YYYY-… example tag" }]) {
+  const hits = TOOL_STRINGS.filter((s) => re.test(withoutNote(s.text)));
+  check(`tools: ${why} appears nowhere`, hits.length === 0,
+        hits.map((h) => `${h.path} (${tools[Number(h.path.match(/^\[(\d+)\]/)?.[1])]?.name})`).join(", "));
+}
+const tagTools = tools.filter((t) => ["ateam_github_rollback", "ateam_github_list_versions"].includes(t.name));
+check("rollback and list_versions name the CURRENT tag format",
+      tagTools.length === 2 && tagTools.every((t) => t.description.includes(OWNER.tag_format)));
 
 console.log("the AGENT DOC teaches the same model — it is the copy that PERSISTS");
 // Bootstrap prose dies with the session. CLAUDE.md is committed into the
@@ -114,7 +153,12 @@ console.log("promote is described as a SHIP, not a checkpoint");
 // but `when_to_use_what.ateam_github_promote` has promote in the KEY, so
 // restoring the exact string the external agent found ("Create a checkpoint
 // (safe-* tag)") slipped straight through. My own mutation caught it.
-const mentionsPromote = (s) => /promote/i.test(s.text) || /promote/i.test(s.path);
+// …AND ITS CONTAINER. Text-or-path still missed developer_loop.steps[5]: the
+// step's description said "create a checkpoint (safe point)" and the tool name
+// lived in the sibling `tools` array. A string is about promote when anything
+// in the object or array it sits in names promote.
+const mentionsPromote = (s) => /promote/i.test(s.text) || /promote/i.test(s.path)
+  || (s.parent !== null && /promote/i.test(JSON.stringify(s.parent)));
 const checkpointClaims = ALL.filter((s) =>
   mentionsPromote(s) && /creates? a checkpoint|checkpoint \(/i.test(s.text));
 check("promote is never called 'create a checkpoint'", checkpointClaims.length === 0,
@@ -155,6 +199,11 @@ check("tools.js imports it rather than redefining it",
 check("it is frozen, so no consumer can mutate it for everyone else", /Object\.freeze/.test(OWNER_SRC));
 
 // Every section that speaks about branches must do it THROUGH the owner.
+// WHAT THIS DOES AND DOES NOT PROVE: one BRANCH_WORKFLOW reference satisfies a
+// section, so a section can render from the owner in one key and restate the
+// model in prose two keys away (github_tools did exactly that). The phrasing
+// guards above are what catch a restatement; these only catch a section that
+// stopped using the owner altogether.
 const refs = (bootstrapBody.match(/BRANCH_WORKFLOW\./g) || []).length;
 check(`the bootstrap sections render from it (${refs} references)`, refs >= 12);
 
