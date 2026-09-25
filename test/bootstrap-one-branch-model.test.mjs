@@ -261,5 +261,33 @@ check("and it SAYS why, so the reader is not guessing",
 check("no step pushes to the deploy branch",
       !/git push origin main/.test(AGENT_DOC));
 
+console.log("both loops are documented — iterate is not the same as ship");
+// WHAT THIS EXISTS FOR: ateam_build_and_run deploys `main` and has no ref
+// parameter, so a doc that shows ONLY the ship loop reads as "nothing can be
+// tested before production". That is false — ateam_patch and
+// ateam_upload_connector deploy to Core from `dev` with no promote — and the
+// doc that implied otherwise shipped into a tenant repo. Arie caught it by
+// reading the rendered output; no test did.
+check("the owner carries the iterate loop", Array.isArray(BRANCH_WORKFLOW.iterate_without_promote)
+      && BRANCH_WORKFLOW.iterate_without_promote.length >= 3);
+check("it names the tools that deploy without a promote",
+      BRANCH_WORKFLOW.iterate_without_promote.join(" ").includes("ateam_patch")
+      && BRANCH_WORKFLOW.iterate_without_promote.join(" ").includes("ateam_upload_connector"));
+check("the agent doc shows BOTH loops, not just the ship one",
+      /Iterate — deploy and TEST without promoting/.test(AGENT_DOC) && /### Ship/.test(AGENT_DOC));
+check("the agent doc says build_and_run is the HEAVY path, not the routine one",
+      /HEAVY full path/.test(AGENT_DOC));
+
+console.log("developer_loop step 6 is a SHIP, not a checkpoint");
+// The guard above only scanned the `branching`/`github_tools` prose. This
+// framing survived in developer_loop.steps[6] — the retired wording, in the
+// section an agent actually follows.
+const dl = boot.developer_loop.steps;
+check("step 6 is named Ship", dl[5].action === "Ship", dl[5].action);
+check("step 6 does not call promote a checkpoint", !/checkpoint/i.test(dl[5].description));
+check("step 6 renders from the owner",
+      dl[5].description.includes(BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint));
+check("step 5 tells you to test BEFORE shipping", /Test BEFORE you ship/.test(dl[4].description));
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

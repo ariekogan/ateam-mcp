@@ -3453,7 +3453,7 @@ export const handlers = {
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Version", description: `Writes land on \`${BRANCH_WORKFLOW.write_branch}\`, NOT ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.deploy_side} The repo (one per TENANT) is the source of truth for connector code.`, tools: ["ateam_github_status", "ateam_github_log", BRANCH_WORKFLOW.promote_tool] },
         { step: 4, action: "Iterate", description: `Edit connector code ONE FILE AT A TIME via ateam_github_patch, then follow the loop: ${BRANCH_WORKFLOW.one_line}. ${BRANCH_WORKFLOW.the_silent_mistake} NEVER re-pass all connector code inline after first deploy. For skill definitions use ateam_patch.`, tools: ["ateam_github_patch", BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_patch"] },
-        { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship — ${BRANCH_WORKFLOW.iterate_note} ` + "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
@@ -4000,9 +4000,18 @@ export const handlers = {
     }
     if (github && !mcp_store) {
       try {
+        // NAME THE BRANCH. build_and_run deploys the SHIPPED state — that is
+        // the whole dev → promote → main design, and why the Builder refuses
+        // this deploy with MAIN_BEHIND_DEV until you promote. This call used
+        // to send {} and lean on the Builder's default, which was `main` until
+        // Builder 873558e changed it to `dev`: from then on this deployed
+        // UNSHIPPED dev while every doc, the guard and deployed_from_branch
+        // all still said main. The Builder now refuses a branch-less read
+        // (BRANCH_REQUIRED), so the intent has to be stated here, from the
+        // one owner of the branch story.
         const pullResult = await post(
           `/deploy/solutions/${solutionId}/github/pull-bundle`,
-          {},
+          { branch: BRANCH_WORKFLOW.deploy_branch },
           sid,
           { timeoutMs: 60_000 },
         );

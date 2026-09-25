@@ -53,6 +53,24 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // where a first-turn agent reads it before the correction lands.
   promote_is_a_ship_not_a_checkpoint:
     'ateam_github_promote SHIPS: it merges dev → main, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
+  // THE ITERATION LOOP, which is NOT the ship loop and kept being mistaken for it.
+  //
+  // ateam_build_and_run deploys `main` and has no ref parameter, so reading the
+  // ship loop alone leaves you believing NOTHING can be tested before it is in
+  // production. That is false, and the doc that said it shipped into a tenant
+  // repo. ateam_patch and ateam_upload_connector deploy to Core from `dev`
+  // WITHOUT a promote — that is how you test before shipping.
+  iterate_without_promote: Object.freeze([
+    'ateam_patch(solution_id, target, updates)     — skill/solution definition: writes `dev` AND redeploys that skill to Core',
+    'ateam_upload_connector(solution_id, c, github:true) — connector code: deploys the `dev` state, skills untouched',
+    'ateam_redeploy(solution_id, skill_id)         — redeploy one skill with no definition change',
+    'then ateam_conversation / ateam_test_skill / ateam_test_voice against the running solution',
+  ]),
+  iterate_note:
+    'These deploy to Core from `dev` without touching `main`. Test here, promote when it is right. '
+    + 'ateam_build_and_run is the HEAVY full path (first deploy, or a multi-file change) and it deploys `main` — '
+    + 'on a solution with 5+ skills it can hit the 100s edge timeout, which is the other reason not to reach for it every iteration.',
+
   rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history.',
   no_git_at_all:
     'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',

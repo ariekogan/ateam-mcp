@@ -135,14 +135,28 @@ ${BRANCH_WORKFLOW.write_side}
 
 ${BRANCH_WORKFLOW.deploy_side}
 
+### Iterate — deploy and TEST without promoting
+
+${BRANCH_WORKFLOW.iterate_note}
+
 \`\`\`
-1. git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch} 2>/dev/null || git checkout -b ${BRANCH_WORKFLOW.write_branch}
-2. edit code in your IDE / agent
-3. git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
-4. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}", dry_run: true)   — see exactly what would ship
-5. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}")                  — merges ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}, tags ${BRANCH_WORKFLOW.tag_format}
-6. ateam_build_and_run(solution_id: "${solId}", github: true)      — deploys \`${BRANCH_WORKFLOW.deploy_branch}\`
-7. ateam_test_skill / ateam_test_connector                         — verify
+${BRANCH_WORKFLOW.iterate_without_promote.map((l) => l.replace(/solution_id(?=[,)])/, `solution_id: "${solId}"`)).join("\n")}
+\`\`\`
+
+### Ship — when it is right
+
+\`\`\`
+1. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}", dry_run: true)   — see exactly what would ship
+2. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}")                  — merges ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}, tags ${BRANCH_WORKFLOW.tag_format}
+3. ateam_build_and_run(solution_id: "${solId}")                   — deploys \`${BRANCH_WORKFLOW.deploy_branch}\`
+\`\`\`
+
+Editing files by hand instead of via the tools:
+
+\`\`\`
+git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch} 2>/dev/null || git checkout -b ${BRANCH_WORKFLOW.write_branch}
+# edit, then:
+git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
 \`\`\`
 
 **${BRANCH_WORKFLOW.the_silent_mistake}**
