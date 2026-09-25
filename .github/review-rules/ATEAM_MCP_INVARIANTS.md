@@ -28,10 +28,18 @@
   (`getNewestToken()` was the CRITICAL cross-user auth bypass, finding #28).
 - This is layer 2, and it is not redundant with the bearer gate (§3):
   `verifyAccessToken` is structural-only (§1), so ANY well-formed key passes the
-  gate, and only the ownership check stops it from using another client's session.
+  gate, including a made-up key naming the victim's own tenant. Only the ownership
+  check stops it from using another client's session, so it must compare the WHOLE
+  key, never the tenant or a prefix.
+- The binding (`sessionBearers`) lives as long as the session's transport and is
+  removed only with it (`clearSession`). The idle sweep (`sweepStaleSessions`)
+  drops credentials, NEVER the binding. It used to drop it (8fc71af, before
+  c294d0f made the map the owner), and an idle live session then went to the next
+  bearer that asked.
 - Extend `test/session-isolation.test.mjs` when touching this path. It tests each
-  layer on its own, on every verb. Regressing either ⇒ BLOCKING (cross-tenant auth
-  bypass on the public surface).
+  layer on its own, on every verb, plus the idle sweep and the injection cache's IP
+  scope and TTL. Regressing any of them ⇒ BLOCKING (cross-tenant auth bypass on the
+  public surface).
 
 ## 3. Dual mount contract: BOTH `/` and `/mcp` strict (BLOCKING)
 

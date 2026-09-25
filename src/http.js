@@ -163,6 +163,7 @@ export function startHttpServer(port = 3100) {
   // If a request has no Authorization header, check if THIS CLIENT IP recently
   // completed /token exchange. If so, inject that IP's cached token. Prevents
   // cross-user token leakage (fix for mcp-audit finding #1, round 009).
+  // test/session-isolation.test.mjs checks the IP scope and the TTL.
   const autoInjectToken = (req, _res, next) => {
     if (req.headers.authorization) return next();
     const ip = req.ip || "unknown";
@@ -307,10 +308,13 @@ export function startHttpServer(port = 3100) {
   // session owner's tenant and api key, or could read its stream or kill the
   // session.
   //
-  // A session has no bound bearer only when OAuth is disabled
-  // (ATEAM_OAUTH_DISABLED=1); with OAuth on, seedCredentials binds every one.
-  // An unbound session has nothing to match against, so this is a no-op there.
-  // That is the reason the escape hatch must stay unset on a shared server.
+  // With OAuth on, every LIVE session is bound: seedCredentials binds on every
+  // POST, and the binding lives until the transport closes (the idle sweep keeps
+  // it; see sweepStaleSessions). An id with no binding therefore has no live
+  // session behind it, and stale-recovery gives the caller a fresh session with
+  // its OWN credentials. With ATEAM_OAUTH_DISABLED=1 nothing is bound, so this
+  // check has nothing to compare and lets everything through. That is why the
+  // escape hatch must stay unset on a shared server.
   const denySessionReuse = (req, res, sessionId) => {
     if (sessionId && !bearerOwnershipOk(getSessionBearer(sessionId), req.auth?.token)) {
       console.warn(`[Auth] DENY session reuse: bearer mismatch for session ${sessionId} (presented=${req.auth?.token ? "other-bearer" : "none"})`);

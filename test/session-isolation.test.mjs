@@ -10,12 +10,17 @@
 //   Layer 1 — the bearer gate (`mcpAuth` in src/http.js, on BOTH "/" and
 //     "/mcp" since 39ff024). A request with no valid bearer gets a 401 OAuth
 //     challenge before any MCP handler runs: no session is minted, and none is
-//     reused.
+//     reused. Its one deliberate exception is token auto-injection: a request
+//     with no Authorization, from the client IP that just completed /token, is
+//     given THAT IP's token for TOKEN_TTL. Section 5 checks it stays scoped to
+//     that IP and that window.
 //   Layer 2 — session ownership (`denySessionReuse` + `bearerOwnershipOk`,
 //     c294d0f). A session is bound to the bearer that created it, and any other
 //     bearer is refused with 401 -32001, on POST, GET and DELETE. Layer 1 cannot
 //     do this: verifyAccessToken (src/oauth.js) checks only the key's SHAPE, so
-//     any well-formed bearer passes layer 1.
+//     any well-formed bearer passes layer 1, including a made-up key that names
+//     the victim's own tenant. The binding lasts as long as the transport: the
+//     idle sweep drops a session's credentials, never its owner (section 4).
 //
 // HISTORY — why the old "no-bearer" checks are gone and must not come back.
 // Until 39ff024, "/mcp" was optional-auth (704206e), and this file asserted
@@ -32,10 +37,18 @@
 // Run: node test/session-isolation.test.mjs   (npm test runs it too)
 
 import net from "node:net";
-import { bearerOwnershipOk, getSessionBearer } from "../src/api.js";
+import { bearerOwnershipOk, getSessionBearer, sweepStaleSessions } from "../src/api.js";
 
 const BEARER_A = "adas_tenanta_00000000000000000000000000000000";
 const BEARER_B = "adas_tenantb_11111111111111111111111111111111";
+// Same tenant as A, different secret. verifyAccessToken checks only the shape,
+// so anyone can write this key. Ownership must compare the WHOLE key: a check
+// on the tenant or on a prefix would let it through.
+const BEARER_A_OTHER = "adas_tenanta_22222222222222222222222222222222";
+// Two sealed keys. A sealed key does not spell out its tenant (parseApiKey
+// gives tenant null), so a tenant-only comparison would call these equal.
+const SEALED_1 = `adas_prod_${"S".repeat(46)}`;
+const SEALED_2 = `adas_prod_${"T".repeat(46)}`;
 
 let failures = 0;
 function check(name, cond) {
@@ -44,17 +57,19 @@ function check(name, cond) {
 }
 
 // ─── 1. Unit: bearerOwnershipOk ──────────────────────────────────────────────
-// A session has no bound bearer only when OAuth is disabled. With OAuth on,
-// layer 1 guarantees that every request carries a bearer, and seedCredentials
-// binds it (checked in section 2). An unbound session has no owner to compare
-// against, so reuse is allowed. That is why ATEAM_OAUTH_DISABLED is an escape
-// hatch and not a supported mode.
+// With OAuth on, every live session is bound: seedCredentials binds the bearer
+// (section 2) and the idle sweep keeps the binding (section 4). So an unbound
+// id either has no live session behind it or comes from ATEAM_OAUTH_DISABLED=1.
+// An unbound session has no owner to compare against, so reuse is allowed. That
+// is why ATEAM_OAUTH_DISABLED is an escape hatch and not a supported mode.
 console.log("unit: bearerOwnershipOk");
 check("unbound session + no token → allow", bearerOwnershipOk(null, undefined) === true);
 check("unbound session + some token → allow", bearerOwnershipOk(null, BEARER_A) === true);
 check("bound bearer + NO token → DENY", bearerOwnershipOk(BEARER_A, undefined) === false);
 check("bound bearer + empty token → DENY", bearerOwnershipOk(BEARER_A, "") === false);
 check("bound bearer + DIFFERENT token → DENY", bearerOwnershipOk(BEARER_A, BEARER_B) === false);
+check("bound bearer + another key for the SAME tenant → DENY", bearerOwnershipOk(BEARER_A, BEARER_A_OTHER) === false);
+check("bound sealed key + another sealed key → DENY", bearerOwnershipOk(SEALED_1, SEALED_2) === false);
 check("bound bearer + SAME token → allow", bearerOwnershipOk(BEARER_A, BEARER_A) === true);
 
 // ─── Boot two listeners over ONE session table ───────────────────────────────
@@ -158,6 +173,15 @@ check("cross-bearer GET (A's sid, B's bearer) → 401 -32001",
 check("cross-bearer DELETE (A's sid, B's bearer) → 401 -32001",
   ownershipDenied(await mcp("DELETE", { headers: { ...sid(SID_A), ...bearer(BEARER_B) } })));
 check("B's attempts did not rebind A's session", getSessionBearer(SID_A) === BEARER_A);
+
+console.log("integration (OAuth on): layer 2, a made-up key for A's OWN tenant");
+check("same-tenant POST (A's sid, another tenanta key) → 401 -32001",
+  ownershipDenied(await mcp("POST", { headers: { ...sid(SID_A), ...bearer(BEARER_A_OTHER) }, body: TOOLS_LIST })));
+check("same-tenant GET (A's sid, another tenanta key) → 401 -32001",
+  ownershipDenied(await mcp("GET", { headers: { ...sid(SID_A), ...bearer(BEARER_A_OTHER) } })));
+check("same-tenant DELETE (A's sid, another tenanta key) → 401 -32001",
+  ownershipDenied(await mcp("DELETE", { headers: { ...sid(SID_A), ...bearer(BEARER_A_OTHER) } })));
+check("the same-tenant key did not rebind A's session", getSessionBearer(SID_A) === BEARER_A);
 check("A reuses its own session → 200 tools/list",
   listedTools(await mcp("POST", { headers: { ...sid(SID_A), ...bearer(BEARER_A) }, body: TOOLS_LIST })));
 
@@ -174,6 +198,71 @@ check("anonymous DELETE with A's sid → 401 -32001",
 check("A's session is still bound to A", getSessionBearer(SID_A) === BEARER_A);
 check("A still reuses its own session → 200 tools/list",
   listedTools(await mcp("POST", { headers: { ...sid(SID_A), ...bearer(BEARER_A) }, body: TOOLS_LIST })));
+
+// ─── 4. The idle sweep drops credentials, never the owner ───────────────────
+// sweepStaleSessions (src/api.js) drops a session idle past SESSION_TTL (60 min)
+// but does not close its transport, so the session is still live. It used to
+// drop the bearer binding too. Then the next well-formed bearer took over A's
+// live session, and A was refused on its own session as "a different
+// credential". The clock is moved forward only for the sweep call itself.
+console.log("idle sweep: A's session after 61 idle minutes");
+let swept;
+{
+  const realNow = Date.now;
+  Date.now = () => realNow() + 61 * 60 * 1000;
+  try { swept = sweepStaleSessions(); } finally { Date.now = realNow; }
+}
+check("the sweep swept A's idle session (so the checks below are not vacuous)", swept >= 1);
+check("A's session is still bound to A after the sweep", getSessionBearer(SID_A) === BEARER_A);
+check("B's bearer on A's swept session → 401 -32001",
+  ownershipDenied(await mcp("POST", { headers: { ...sid(SID_A), ...bearer(BEARER_B) }, body: TOOLS_LIST })));
+check("anonymous POST on A's swept session (OAuth off) → 401 -32001",
+  ownershipDenied(await mcp("POST", { base: BASE_OPEN, headers: sid(SID_A), body: TOOLS_LIST })));
+check("A reuses its swept session → 200 tools/list (credentials re-seeded from its bearer)",
+  listedTools(await mcp("POST", { headers: { ...sid(SID_A), ...bearer(BEARER_A) }, body: TOOLS_LIST })));
+
+// ─── 5. Layer 1's one exception: token auto-injection ───────────────────────
+// Claude.ai's OAuth client and its MCP client do not share tokens. So after a
+// /token exchange, the server puts that token into no-Authorization requests
+// from the SAME client IP, for TOKEN_TTL (5 min). It must stay scoped to that
+// IP and that window. A process-global "newest token" gave every anonymous
+// caller the last user's key (finding #28). trust proxy is 1, so req.ip is the
+// X-Forwarded-For address; that is how this test plays several clients. This
+// section runs last because it leaves tokens in the cache.
+console.log("auto-injection: a /token exchange serves only its own IP, and only briefly");
+const ipHeaders = (ip) => ({ "x-forwarded-for": ip });
+async function exchange(key, ip) {
+  const r = await fetch(`${BASE}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", ...ipHeaders(ip) },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: `rt_${key}`, client_id: "ateam-public" }),
+    signal: AbortSignal.timeout(5000),
+  });
+  const json = await r.json().catch(() => ({}));
+  return r.status === 200 && json.access_token === key;
+}
+const IP_A = "10.9.9.1", IP_OTHER = "10.9.9.2", IP_B = "10.9.9.3";
+check(`A's /token exchange from ${IP_A} → 200 with A's token`, await exchange(BEARER_A, IP_A));
+check(`anonymous POST on A's sid from ANOTHER ip → 401 challenge`,
+  challenged(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_OTHER) }, body: TOOLS_LIST })));
+check(`anonymous initialize from ANOTHER ip → 401 challenge, no session minted`,
+  challenged(await mcp("POST", { headers: ipHeaders(IP_OTHER), body: INIT })));
+// Positive control: the cache IS live, so the two refusals above are not vacuous.
+check(`anonymous POST on A's sid from A's own ip, within TTL → injected, 200 tools/list (by design)`,
+  listedTools(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_A) }, body: TOOLS_LIST })));
+check(`B's /token exchange from ${IP_B} → 200 with B's token`, await exchange(BEARER_B, IP_B));
+check(`anonymous POST on A's sid from B's ip → B's token injected, still 401 -32001`,
+  ownershipDenied(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_B) }, body: TOOLS_LIST })));
+{
+  const realNow = Date.now;
+  // Just past TOKEN_TTL (5 min in src/http.js). Lengthening the TTL fails this
+  // check on purpose: the window is part of the security property.
+  Date.now = () => realNow() + 5 * 60 * 1000 + 5000;
+  try {
+    check(`anonymous POST on A's sid from A's own ip, AFTER TTL → 401 challenge`,
+      challenged(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_A) }, body: TOOLS_LIST })));
+  } finally { Date.now = realNow; }
+}
 
 // ─── done ────────────────────────────────────────────────────────────────────
 if (failures) { console.error(`\n${failures} check(s) FAILED`); process.exit(1); }

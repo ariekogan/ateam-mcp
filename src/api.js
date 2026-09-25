@@ -410,11 +410,17 @@ export function bindSessionBearer(sessionId, bearerToken) {
 }
 
 /**
- * The bearer a session is bound to, or null if the session was never
- * bearer-authenticated (only possible with ATEAM_OAUTH_DISABLED=1). Used by the HTTP
+ * The bearer a session is bound to, or null if there is none. Used by the HTTP
  * transport to enforce that a bearer-bound session can only be reused by a
  * request presenting the SAME validated bearer — a client-supplied session-id
  * alone must never grant access to another client's credentials.
+ *
+ * With OAuth on, every LIVE session has a binding: seedCredentials binds on
+ * every POST, and the binding is removed only together with the transport
+ * (clearSession, on close). The idle sweep keeps it — see sweepStaleSessions.
+ * So null means either an id with no live session behind it (never existed,
+ * closed, or lost in a restart: stale-recovery then opens a fresh session under
+ * it with the caller's OWN credentials), or ATEAM_OAUTH_DISABLED=1.
  */
 export function getSessionBearer(sessionId) {
   return sessionBearers.get(sessionId) || null;
@@ -424,10 +430,9 @@ export function getSessionBearer(sessionId) {
  * May a request presenting `presentedToken` (its validated bearer, or
  * null/undefined if none) reuse a session whose bound bearer is `boundBearer`?
  *
- * - No bound bearer → the session was never bearer-authenticated; nothing to
- *   match against, allow. Since 39ff024 this happens only with
- *   ATEAM_OAUTH_DISABLED=1: with OAuth on, every request carries a validated
- *   bearer and seedCredentials binds it.
+ * - No bound bearer → nothing to match against, allow. With OAuth on, a live
+ *   session is never unbound (see getSessionBearer), so this is an id with no
+ *   live session behind it, or ATEAM_OAUTH_DISABLED=1.
  * - Bound bearer → the request MUST present the exact same validated bearer.
  *   A missing or different bearer is denied — so a client that knows another
  *   client's (non-secret, logged/echoed) session-id cannot be served that
@@ -547,15 +552,24 @@ export function hasBearerAuth(sessionId) {
 }
 
 /**
- * Sweep expired sessions — removes sessions idle longer than SESSION_TTL.
- * Returns the number of sessions removed.
+ * Sweep expired sessions — drops the CREDENTIALS of sessions idle longer than
+ * SESSION_TTL. Returns the number of sessions swept.
+ *
+ * It does NOT drop the session's bearer binding, and must not. sessionBearers
+ * is the session's OWNER: denySessionReuse (src/http.js) compares every request
+ * against it. This sweep never closes the transport, so the session is still
+ * live after it. 8fc71af deleted the binding here too, back when the map was
+ * only ateam_auth's actor lookup. c294d0f then made it the owner and left this
+ * line alone, so an idle session became an unowned one: the next well-formed
+ * bearer took over the live transport, and the real owner was refused as "a
+ * different credential". The owner's next request re-seeds the credentials
+ * from its bearer. The binding goes when the transport does (clearSession).
  */
 export function sweepStaleSessions() {
   const now = Date.now();
   let swept = 0;
   for (const [sid, session] of sessions) {
     if (now - session.lastActivity > SESSION_TTL) {
-      sessionBearers.delete(sid);
       sessions.delete(sid);
       swept++;
     }
