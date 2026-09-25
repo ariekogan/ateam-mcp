@@ -4217,27 +4217,49 @@ export const handlers = {
 
     // Phase 2: Deploy
     //
-    // github:true TELLS THE BUILDER THIS PAYLOAD IS THE REPO'S CONTENT, and it
-    // must be exactly true. The Builder mirrors a github:true payload into its
-    // store WITHOUT writing it back to GitHub, because writing the repo's own
-    // content back to `dev` on every deploy is what kept dev ahead of main and
-    // tripped MAIN_BEHIND_DEV. So it may only be sent when EVERY part came from
-    // the pull: solution, skills and connector code, with no connectors[] of
-    // the caller's own.
+    // pulled_from_github NAMES THE PARTS THAT ARE THE REPO'S CONTENT, and it
+    // must be exact. The Builder (#50) saves those parts into its store as a
+    // MIRROR: FS-only, keeping GitHub's updated_at, never written back. An
+    // inline solution or skills it writes to `dev`, where an inline edit
+    // belongs. (Inline connector CODE is a different, older story: on a repo
+    // that exists, no deploy writes it to GitHub at all. Use ateam_github_write
+    // for code.) And its MAIN_BEHIND_DEV guard checks only the files the named
+    // parts were read from.
+    //
+    //   solution   pulled, and the caller passed no connectors[] of its own:
+    //              the Builder import adds new connector ids to
+    //              solution.platform_connectors, so an inline connectors[] is
+    //              an edit to solution.json.
+    //   skills     pulled.
+    //   mcp_store  pulled (Phase 0 pulls exactly when no mcp_store was passed).
+    //
+    // A LIST, NOT A FLAG. A flag for "all of it" (github:true, the previous cut
+    // of this change) left build_and_run(solution) with two wrong answers:
+    // mirror everything and the inline solution never reaches GitHub, or mirror
+    // nothing and the pulled skills are written back to dev, so the next
+    // identical call is refused because of its own write. It is also a name
+    // the Builders running today do not know. github:true is one they do, and
+    // their async hop turns it into a completeness check that refuses any
+    // connector whose source lives only in the Builder store.
+    //
+    // Sent on EVERY deploy, [] when nothing was pulled, so a Builder can tell
+    // "pulled nothing" from "a client that does not say".
     //
     // skip_github_push is NOT that statement. It follows the `github` argument,
-    // and the tool's own advice ("ateam_build_and_run(solution, skills)") sends
-    // an inline solution and skills with it. Mirroring those would keep the
-    // edits out of GitHub, and the next build_and_run(solution_id) would pull
-    // main and quietly revert Core. A payload with ANY inline part is not
-    // mirrored: the Builder writes it to `dev` as it always has.
-    const payloadIsTheRepo = pulledMcpStore && !inline.solution && !inline.skills && !inline.connectors;
+    // which is also set together with an inline mcp_store, when nothing is
+    // pulled. It is sent exactly as before (99bba7e), for the Builders that
+    // read it.
+    const pulledFromGithub = pulledMcpStore
+      ? [
+          ...(!inline.solution && !inline.connectors ? ["solution"] : []),
+          ...(!inline.skills ? ["skills"] : []),
+          "mcp_store",
+        ]
+      : [];
     const deployBody = {
       solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
-      // Unchanged (99bba7e). The Builder's MAIN_BEHIND_DEV guard and its own
-      // background push both read it.
       ...(github && { skip_github_push: true }),
-      ...(payloadIsTheRepo && { github: true }),
+      pulled_from_github: pulledFromGithub,
     };
     let deploy;
     try {
@@ -4385,8 +4407,12 @@ export const handlers = {
     // Phase 5: GitHub push — only when NOT deployed from GitHub
     let github_result;
     if (github) {
-      github_result = { skipped: true, reason: 'Deployed from GitHub — push-back skipped.' };
-      phases.push({ phase: "github", status: "skipped", reason: "pulled_from_github" });
+      // "Deployed from GitHub" only when something WAS pulled: github:true with
+      // an inline mcp_store pulls nothing and skips the push all the same.
+      github_result = pulledMcpStore
+        ? { skipped: true, reason: 'Deployed from GitHub — push-back skipped.' }
+        : { skipped: true, reason: 'github:true was passed with inline code — nothing was pulled, and the push was skipped.' };
+      phases.push({ phase: "github", status: "skipped", reason: pulledMcpStore ? "pulled_from_github" : "github_flag_inline_payload" });
     } else {
       try {
         github_result = await post(
@@ -4438,7 +4464,9 @@ export const handlers = {
     // Is there a branch story to tell at all? A pull or a landed push proves a
     // repo; otherwise ask the one probe that knows, rather than guessing from a
     // failed or skipped push — mirroring ateam_patch's local split.
-    const pulledFromRepo = Boolean(github);
+    // Something was PULLED — not merely `github` set, which an inline mcp_store
+    // can carry while nothing is read from the repo.
+    const pulledFromRepo = pulledMcpStore;
     const githubConnected = (pulledFromRepo || github_result?.branch)
       ? true
       : await probeGithubConnected(solutionId, sid);
