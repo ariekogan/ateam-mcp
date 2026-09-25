@@ -17,11 +17,12 @@
   ×3, `src/tools.js`) + the `/authorize` hint text ⇒ BLOCKING (breaks every OAuth'd
   Claude.ai session + refresh).
 
-## 2. Session reuse = bearer-ownership; token injection = IP-scoped short-TTL (BLOCKING)
+## 2. Session reuse = owner-ownership; token injection = IP-scoped short-TTL (BLOCKING)
 
-- `mcp-session-id` is client-supplied and non-secret (logged/echoed). A bearer-bound
-  session may be reused (POST/GET/DELETE) ONLY by the same validated bearer:
-  `denySessionReuse`/`bearerOwnershipOk` MUST run on **every** MCP verb. Any new
+- `mcp-session-id` is client-supplied and non-secret (logged/echoed). A bound
+  session may be reused (POST/GET/DELETE) ONLY by the same owner — the same
+  validated bearer, or the platform principal for a platform session (§3):
+  `denySessionReuse`/`sessionOwnershipOk` MUST run on **every** MCP verb. Any new
   route/method under `MCP_PATHS` must call it.
 - The OAuth→MCP token auto-injection cache must stay **IP-scoped with a short TTL**
   (`recentTokensByIp`, `TOKEN_TTL`) — NEVER a process-global "newest token"
@@ -31,11 +32,15 @@
   gate, including a made-up key naming the victim's own tenant. Only the ownership
   check stops it from using another client's session, so it must compare the WHOLE
   key, never the tenant or a prefix.
-- The binding (`sessionBearers`) lives as long as the session's transport and is
+- The binding (`sessionOwners`) lives as long as the session's transport and is
   removed only with it (`clearSession`). The idle sweep (`sweepStaleSessions`)
   drops credentials, NEVER the binding. It used to drop it (8fc71af, before
   c294d0f made the map the owner), and an idle live session then went to the next
   bearer that asked.
+- `PLATFORM_PRINCIPAL` is a Symbol so no bearer can equal it, and it is NEVER an
+  `authOverrides` key: an override is re-applied to every session of its key, so
+  one shared platform credential holding one would carry a tenant into every proxy
+  session. Every override lookup goes through `bearerOf`, which answers null for it.
 - Extend `test/session-isolation.test.mjs` when touching this path. It tests each
   layer on its own, on every verb, plus the idle sweep and the injection cache's IP
   scope and TTL. Regressing any of them ⇒ BLOCKING (cross-tenant auth bypass on the
@@ -50,10 +55,19 @@
   (704206e); an anonymous 200 told clients the endpoint was public, and an
   anonymous session has no bound bearer, so anyone with its id could reuse it.
 - Reopening either mount to anonymous requests ⇒ BLOCKING, even "for a legacy
-  client". A client that sends no `Authorization` (e.g. ai-dev-assistant's
-  ateam-proxy-mcp) is fixed by sending its key as a Bearer, not by relaxing the
-  gate. `ATEAM_OAUTH_DISABLED=1` removes the gate entirely and must stay unset on a
+  client". `ATEAM_OAUTH_DISABLED=1` removes the gate entirely and must stay unset on a
   shared server. `test/session-isolation.test.mjs` covers both mounts.
+- The ONE other way in is platform sign-in (`platformGate`, for ai-dev-assistant's
+  ateam-proxy-mcp, which has no bearer for its tenant-less handshake). It runs
+  BEFORE auto-injection and the bearer gate, and must stay:
+  - constant-time against `CORE_MCP_SECRET`, byte lengths compared first
+    (`presentsPlatformSecret`), and FAIL CLOSED when that is unset or empty;
+  - decided alone: a presented `x-adas-token` that fails is a 401, never a fall-through
+    to the bearer gate, and a passing one ignores any `Authorization` sent with it;
+  - tenant-less: it binds the session to `PLATFORM_PRINCIPAL` and seeds no key, no
+    tenant and no override. A tenant tool on a platform session is refused until
+    `ateam_auth` puts that tenant's own key in. Widening it into a master key
+    (a tenant, a key, or access to another owner's session) ⇒ BLOCKING.
 - Every POST must be Accept-normalized to include `application/json` +
   `text/event-stream` (on parsed headers AND `rawHeaders`) or the SDK rejects requests.
 - OAuth `resourceServerUrl` / PRM `resource` MUST equal the connector ROOT URL (not

@@ -15,6 +15,11 @@
  *   to, so anyone holding a session id can reuse that session (see
  *   denySessionReuse).
  *
+ * Platform sign-in (`x-adas-token`):
+ *   The one other way in, for the platform's own proxy (ai-dev-assistant's
+ *   ateam-proxy-mcp). Checked BEFORE the bearer gate and before auto-injection;
+ *   see platformGate. Off unless CORE_MCP_SECRET is set.
+ *
  * Token Auto-Injection:
  *   Claude.ai's OAuth client and MCP client don't share Bearer tokens.
  *   After a successful token exchange, we cache the token server-side and
@@ -30,7 +35,8 @@ import { createServer } from "./server.js";
 import {
   clearSession, setSessionCredentials, parseApiKey, whoami, baseUrlForKeyEnv, getCredentials,
   startSessionSweeper, getSessionStats, sweepStaleSessions,
-  bindSessionBearer, getAuthOverride, getSessionBearer, bearerOwnershipOk,
+  bindSessionBearer, bindSessionPlatform, getAuthOverride, getSessionOwner, sessionOwnershipOk,
+  presentsPlatformSecret, PLATFORM_PRINCIPAL,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
 import { connectGithubPage } from "./pages.js";
@@ -80,7 +86,9 @@ export function startHttpServer(port = 3100) {
     const url = req.originalUrl || req.url;
     const start = Date.now();
     const auth = req.headers.authorization;
-    console.log(`[HTTP] >>> ${req.method} ${url}${auth ? " Auth: [Bearer ...]" : ""}${MCP_PATHS.includes(url.split("?")[0]) ? ` Accept: ${req.headers.accept || "(none)"}` : ""}`);
+    // Never the value: only that a platform token was presented.
+    const platform = req.headers["x-adas-token"] !== undefined;
+    console.log(`[HTTP] >>> ${req.method} ${url}${platform ? " Auth: [platform]" : ""}${auth ? " Auth: [Bearer ...]" : ""}${MCP_PATHS.includes(url.split("?")[0]) ? ` Accept: ${req.headers.accept || "(none)"}` : ""}`);
     res.on("finish", () => {
       console.log(`[HTTP] <<< ${req.method} ${url} → ${res.statusCode} (${Date.now() - start}ms)`);
     });
@@ -214,14 +222,53 @@ export function startHttpServer(port = 3100) {
   // with no bearer has no owner (denySessionReuse has nothing to compare), so
   // anyone holding its id, which is logged and echoed, could use whatever
   // tenant key ateam_auth had put into it. Do not reopen this gate for a client
-  // that still sends no Authorization. ai-dev-assistant's ateam-proxy-mcp is one
-  // such client: it sends X-API-KEY / X-ADAS-TENANT, which this server never
-  // reads, and has had 401 since this gate closed. The fix belongs there: send
-  // the tenant key as `Authorization: Bearer`.
+  // that still sends no Authorization.
   // test/session-isolation.test.mjs fails if the gate is reopened.
-  const mcpAuth = bearerMiddleware
-    ? [autoInjectToken, bearerMiddleware]
-    : [];
+  //
+  // THE ONE OTHER WAY IN: PLATFORM SIGN-IN. ai-dev-assistant's ateam-proxy-mcp
+  // (the in-product Solution Builder) opens one tenant-less session for the
+  // catalog handshake and signs each tenant in with ateam_auth before that
+  // tenant's calls. It has no bearer to send, since the handshake belongs to no
+  // tenant, so this gate answered it 401 from 2026-09-11 on every host: Core
+  // logged "MCP server error: 401 Unauthorized" for "A-Team Builder (proxy)".
+  // It sends `x-adas-token`, the platform secret it already presents to Core.
+  //
+  // platformGate runs FIRST, before auto-injection: an internal call must never
+  // pick up an OAuth token cached for its IP. A request that presents
+  // x-adas-token is decided by it alone:
+  //   - it matches CORE_MCP_SECRET (constant time; see presentsPlatformSecret)
+  //     → the PLATFORM principal. The bearer gate and injection are skipped, and
+  //     any Authorization it also sent is ignored: it is never bound or seeded.
+  //   - it does not, or CORE_MCP_SECRET is unset → 401. A credential that was
+  //     presented and failed is a failure, not "no credential": it does not fall
+  //     through to the bearer gate.
+  // A request with no x-adas-token is untouched: it meets the bearer gate, and
+  // an anonymous one still gets the 401 challenge above.
+  //
+  // What the platform principal can do is what an anonymous session could do
+  // before 39ff024, with an OWNER this time: the global tools and ateam_auth.
+  // It carries no tenant and no key (see PLATFORM_PRINCIPAL in src/api.js), and
+  // denySessionReuse keeps its sessions and bearer sessions apart both ways.
+  const platformGate = (req, res, next) => {
+    const presented = req.headers["x-adas-token"];
+    if (presented === undefined) return next();
+    if (!presentsPlatformSecret(presented)) {
+      console.warn(`[Auth] DENY platform sign-in on ${req.method} ${req.originalUrl || req.url}: ${process.env.CORE_MCP_SECRET ? "x-adas-token does not match" : "CORE_MCP_SECRET is unset, so platform sign-in is off here"}`);
+      res.status(401).json({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Unauthorized: the x-adas-token presented is not accepted by this server (platform sign-in)." },
+        id: req.body?.id ?? null,
+      });
+      return;
+    }
+    req.platformPrincipal = true;
+    next();
+  };
+  const unlessPlatform = (mw) => (req, res, next) => (req.platformPrincipal ? next() : mw(req, res, next));
+  const mcpAuth = [
+    platformGate,
+    ...(bearerMiddleware ? [autoInjectToken, bearerMiddleware].map(unlessPlatform) : []),
+  ];
 
   // ─── CORS — required for browser-based MCP clients ──────────────
   // Origin allowlist (round 014 security hardening).
@@ -315,9 +362,13 @@ export function startHttpServer(port = 3100) {
   // its OWN credentials. With ATEAM_OAUTH_DISABLED=1 nothing is bound, so this
   // check has nothing to compare and lets everything through. That is why the
   // escape hatch must stay unset on a shared server.
+  //
+  // A platform session (x-adas-token) is bound to PLATFORM_PRINCIPAL the same
+  // way, so the same comparison keeps it apart from bearers in BOTH directions.
   const denySessionReuse = (req, res, sessionId) => {
-    if (sessionId && !bearerOwnershipOk(getSessionBearer(sessionId), req.auth?.token)) {
-      console.warn(`[Auth] DENY session reuse: bearer mismatch for session ${sessionId} (presented=${req.auth?.token ? "other-bearer" : "none"})`);
+    const presented = req.platformPrincipal ? PLATFORM_PRINCIPAL : req.auth?.token;
+    if (sessionId && !sessionOwnershipOk(getSessionOwner(sessionId), presented)) {
+      console.warn(`[Auth] DENY session reuse: owner mismatch for session ${sessionId} (presented=${req.platformPrincipal ? "platform" : req.auth?.token ? "other-bearer" : "none"})`);
       res.status(401).json({
         jsonrpc: "2.0",
         error: { code: -32001, message: "Unauthorized: this session belongs to a different credential. Re-initialize with your own Authorization." },
@@ -437,7 +488,8 @@ export function startHttpServer(port = 3100) {
     if (!sessionId || !transports[sessionId]) {
       // No live session: answer with health-check JSON. Added (6b81137) for an
       // anonymous connector-validation probe; with OAuth on that probe now gets
-      // mcpAuth's 401 challenge, so only a bearer-authenticated GET reaches here.
+      // mcpAuth's 401 challenge, so only an authenticated GET (a bearer, or the
+      // platform secret) reaches here.
       res.json({ ok: true, service: "ateam-mcp", transport: "http" });
       return;
     }
@@ -513,8 +565,15 @@ export function startHttpServer(port = 3100) {
  * The bearer IS the user's API key (set during OAuth authorization).
  * If the user previously called ateam_auth to override (e.g., switch tenants),
  * that override is stored per bearer and takes priority here.
+ *
+ * A platform request binds its owner and seeds NOTHING: no key, no tenant, no
+ * override. The tenant arrives in-band through ateam_auth.
  */
 async function seedCredentials(req, sessionId) {
+  if (req.platformPrincipal) {
+    bindSessionPlatform(sessionId);
+    return;
+  }
   const token = req.auth?.token;
   if (!token) return;
 
