@@ -26,14 +26,26 @@
 - The OAuth→MCP token auto-injection cache must stay **IP-scoped with a short TTL**
   (`recentTokensByIp`, `TOKEN_TTL`) — NEVER a process-global "newest token"
   (`getNewestToken()` was the CRITICAL cross-user auth bypass, finding #28).
-- Extend `test/session-isolation.test.mjs` when touching this path. Regressing
-  either ⇒ BLOCKING (cross-tenant auth bypass on the public surface).
+- This is layer 2, and it is not redundant with the bearer gate (§3):
+  `verifyAccessToken` is structural-only (§1), so ANY well-formed key passes the
+  gate, and only the ownership check stops it from using another client's session.
+- Extend `test/session-isolation.test.mjs` when touching this path. It tests each
+  layer on its own, on every verb. Regressing either ⇒ BLOCKING (cross-tenant auth
+  bypass on the public surface).
 
-## 3. Dual mount contract: `/` strict, `/mcp` optional (BLOCKING)
+## 3. Dual mount contract: BOTH `/` and `/mcp` strict (BLOCKING)
 
-- MCP is served at BOTH `/` (strict Bearer → forces Claude.ai OAuth discovery) and
-  `/mcp` (optional auth → lets ChatGPT auth via the `ateam_auth` tool). Swapping the
-  strictness locks out a whole client class ⇒ BLOCKING.
+- MCP is served at BOTH `/` and `/mcp`, behind ONE auth rule (`mcpAuth`, 39ff024):
+  a request with no valid Bearer gets 401 + `WWW-Authenticate` naming
+  `resource_metadata` (RFC 9728). That challenge is how an OAuth client (Claude.ai,
+  ChatGPT) learns to send its token. `/mcp` was optional-auth until 39ff024
+  (704206e); an anonymous 200 told clients the endpoint was public, and an
+  anonymous session has no bound bearer, so anyone with its id could reuse it.
+- Reopening either mount to anonymous requests ⇒ BLOCKING, even "for a legacy
+  client". A client that sends no `Authorization` (e.g. ai-dev-assistant's
+  ateam-proxy-mcp) is fixed by sending its key as a Bearer, not by relaxing the
+  gate. `ATEAM_OAUTH_DISABLED=1` removes the gate entirely and must stay unset on a
+  shared server. `test/session-isolation.test.mjs` covers both mounts.
 - Every POST must be Accept-normalized to include `application/json` +
   `text/event-stream` (on parsed headers AND `rawHeaders`) or the SDK rejects requests.
 - OAuth `resourceServerUrl` / PRM `resource` MUST equal the connector ROOT URL (not

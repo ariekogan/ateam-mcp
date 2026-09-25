@@ -411,7 +411,7 @@ export function bindSessionBearer(sessionId, bearerToken) {
 
 /**
  * The bearer a session is bound to, or null if the session was never
- * bearer-authenticated (e.g. a no-bearer ateam_auth flow). Used by the HTTP
+ * bearer-authenticated (only possible with ATEAM_OAUTH_DISABLED=1). Used by the HTTP
  * transport to enforce that a bearer-bound session can only be reused by a
  * request presenting the SAME validated bearer — a client-supplied session-id
  * alone must never grant access to another client's credentials.
@@ -424,8 +424,10 @@ export function getSessionBearer(sessionId) {
  * May a request presenting `presentedToken` (its validated bearer, or
  * null/undefined if none) reuse a session whose bound bearer is `boundBearer`?
  *
- * - No bound bearer → the session was never bearer-authenticated (a no-bearer
- *   ateam_auth flow); nothing to match against, allow (unchanged behavior).
+ * - No bound bearer → the session was never bearer-authenticated; nothing to
+ *   match against, allow. Since 39ff024 this happens only with
+ *   ATEAM_OAUTH_DISABLED=1: with OAuth on, every request carries a validated
+ *   bearer and seedCredentials binds it.
  * - Bound bearer → the request MUST present the exact same validated bearer.
  *   A missing or different bearer is denied — so a client that knows another
  *   client's (non-secret, logged/echoed) session-id cannot be served that
