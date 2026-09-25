@@ -8,8 +8,12 @@
  *
  * OAuth2 (enabled by default):
  *   Serves /.well-known/*, /authorize, /token, /register endpoints.
- *   MCP routes require a Bearer token — triggers OAuth discovery in Claude.ai.
- *   Set ATEAM_OAUTH_DISABLED=1 to bypass (for ChatGPT or legacy clients).
+ *   MCP routes on BOTH paths require a Bearer token; a request without one gets
+ *   a 401 challenge, which is how an OAuth client learns to send its token.
+ *   ATEAM_OAUTH_DISABLED=1 removes the gate entirely. It is an escape hatch, not
+ *   a client mode: with no validated bearer there is nothing to bind a session
+ *   to, so anyone holding a session id can reuse that session (see
+ *   denySessionReuse).
  *
  * Token Auto-Injection:
  *   Claude.ai's OAuth client and MCP client don't share Bearer tokens.
@@ -159,6 +163,7 @@ export function startHttpServer(port = 3100) {
   // If a request has no Authorization header, check if THIS CLIENT IP recently
   // completed /token exchange. If so, inject that IP's cached token. Prevents
   // cross-user token leakage (fix for mcp-audit finding #1, round 009).
+  // test/session-isolation.test.mjs checks the IP scope and the TTL.
   const autoInjectToken = (req, _res, next) => {
     if (req.headers.authorization) return next();
     const ip = req.ip || "unknown";
@@ -204,6 +209,16 @@ export function startHttpServer(port = 3100) {
   // bearer and may still call ateam_auth to switch tenants or point at another
   // environment. What is gone is authenticating with nothing at all, which
   // never worked for an OAuth client anyway — it only looked like it did.
+  //
+  // It was also a security hole, not only a discovery problem. A session opened
+  // with no bearer has no owner (denySessionReuse has nothing to compare), so
+  // anyone holding its id, which is logged and echoed, could use whatever
+  // tenant key ateam_auth had put into it. Do not reopen this gate for a client
+  // that still sends no Authorization. ai-dev-assistant's ateam-proxy-mcp is one
+  // such client: it sends X-API-KEY / X-ADAS-TENANT, which this server never
+  // reads, and has had 401 since this gate closed. The fix belongs there: send
+  // the tenant key as `Authorization: Bearer`.
+  // test/session-isolation.test.mjs fails if the gate is reopened.
   const mcpAuth = bearerMiddleware
     ? [autoInjectToken, bearerMiddleware]
     : [];
@@ -284,11 +299,22 @@ export function startHttpServer(port = 3100) {
   // non-secret (logged + echoed in the mcp-session-id response header). If a
   // session was authenticated with a Bearer, ONLY a request presenting that SAME
   // validated Bearer may reuse it — for POST (tool calls), GET (SSE stream) and
-  // DELETE (terminate). Without this, a client could send another client's
-  // session-id on the optional-auth /mcp path with no/other Authorization and be
-  // served that client's tenant + api key (or read its stream / kill its
-  // session). A session with no bound bearer (the no-bearer ateam_auth flow) has
-  // nothing to match against, so this is a no-op there.
+  // DELETE (terminate).
+  //
+  // This is the second of two layers. mcpAuth (the first) refuses a request
+  // with NO valid bearer. It cannot refuse a request with SOMEONE ELSE'S
+  // bearer: verifyAccessToken checks only the key's shape, so any well-formed
+  // key gets past it. Without this check, such a request would be served the
+  // session owner's tenant and api key, or could read its stream or kill the
+  // session.
+  //
+  // With OAuth on, every LIVE session is bound: seedCredentials binds on every
+  // POST, and the binding lives until the transport closes (the idle sweep keeps
+  // it; see sweepStaleSessions). An id with no binding therefore has no live
+  // session behind it, and stale-recovery gives the caller a fresh session with
+  // its OWN credentials. With ATEAM_OAUTH_DISABLED=1 nothing is bound, so this
+  // check has nothing to compare and lets everything through. That is why the
+  // escape hatch must stay unset on a shared server.
   const denySessionReuse = (req, res, sessionId) => {
     if (sessionId && !bearerOwnershipOk(getSessionBearer(sessionId), req.auth?.token)) {
       console.warn(`[Auth] DENY session reuse: bearer mismatch for session ${sessionId} (presented=${req.auth?.token ? "other-bearer" : "none"})`);
@@ -409,7 +435,9 @@ export function startHttpServer(port = 3100) {
   const mcpGet = async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     if (!sessionId || !transports[sessionId]) {
-      // No session: return health-check JSON (for ChatGPT connector validation)
+      // No live session: answer with health-check JSON. Added (6b81137) for an
+      // anonymous connector-validation probe; with OAuth on that probe now gets
+      // mcpAuth's 401 challenge, so only a bearer-authenticated GET reaches here.
       res.json({ ok: true, service: "ateam-mcp", transport: "http" });
       return;
     }
