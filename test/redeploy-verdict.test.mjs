@@ -348,3 +348,50 @@ test("ateam_patch: a clean redeploy is still '✅ Patched … + redeployed.'", a
   assert.match(out._status, /^✅ Patched on Builder store \(local\) \+ redeployed\./, `summarized as: ${out._status}`);
   assert.equal(out.phases.find((p) => p.phase === "redeploy")?.code, undefined);
 });
+
+// ─── #18 re-review ───────────────────────────────────────────────────────────
+
+test("prod single-skill (ok:false, no error): the Builder's own sentence is quoted — not 'gave no reason'", async () => {
+  // Prod's runFn RETURNED ok:false with deploySkillToADAS's message and no
+  // `error`. The summary said it "named no skill and gave no reason" while the
+  // reason sat in the same object.
+  const { r, out } = await redeploy({ skill_id: "k" }, {
+    "POST /deploy/solutions/sol/skills/k/redeploy": { body: { ok: true, async: true, job_id: "job-prod-msg" } },
+    "GET /deploy/jobs/job-prod-msg": { body: finishedJob("job-prod-msg", { single: true }, {
+      ok: false, skill_id: "k", status: "deployed_with_errors",
+      message: 'Skill "k" tool import PARTIAL: connector weather-mcp contributed no tools',
+    }) },
+  });
+  assert.doesNotMatch(out.message, /gave no reason/, `the reason was in the job and the summary denied it: ${out.message}`);
+  assert.match(out.message, /Skill "k" tool import PARTIAL: connector weather-mcp contributed no tools\./);
+  assert.equal(out.ok, false, "the Builder's ok:false is still a failure");
+  assert.equal(r.isError, true);
+});
+
+test("a BULK job's leftover message is still never quoted as the reason", async () => {
+  const { out } = await redeploy({}, {
+    "POST /deploy/solutions/sol/redeploy": { body: { ok: true, async: true, job_id: "job-bulk-false" } },
+    "GET /deploy/jobs/job-bulk-false": { body: finishedJob("job-bulk-false", { single: false }, { ok: false }) },
+  });
+  assert.doesNotMatch(out.message, /Calling Builder bulk-redeploy/, `progress text quoted as a verdict: ${out.message}`);
+});
+
+test("ok:true WITH a top-level error is a failure, not a success", async () => {
+  const { r, out } = await redeploy({ skill_id: "k" }, {
+    "POST /deploy/solutions/sol/skills/k/redeploy": { body: {
+      ok: true, skill_id: "k", deployed: 1, failed: 0, total: 1, status: "deployed",
+      skills: [{ id: "k", ok: true }], error: "Core refused the skill manifest",
+    } },
+  });
+  assert.equal(out.ok, false, `a body that reported an error was summarized as: ${out.message}`);
+  assert.equal(out.message, "Re-deploy failed: Core refused the skill manifest");
+  assert.doesNotMatch(out.message, /successfully/);
+  assert.equal(r.isError, true);
+});
+
+test("the quoted Builder sentence ends before 'See verification.' begins", async () => {
+  const { out } = await redeploy({ skill_id: "k" }, {
+    "POST /deploy/solutions/sol/skills/k/redeploy": { body: DEGRADED_SKILL },
+  });
+  assert.match(out.message, /contributed no tools\. See verification\.$/, `run-on sentence: ${out.message}`);
+});

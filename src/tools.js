@@ -125,10 +125,27 @@ const JOB_LIFECYCLE_STATUSES = new Set(["in_progress", "done", "failed"]);
 const CLEAN_REDEPLOY_OUTCOMES = new Set(["deployed"]);
 
 /**
- * @param {object} result  a finished job entry, a sync body, or pollDeployJob's timeout object
- * @returns {{ failed: boolean, degraded: boolean, outcome: string|undefined }}
+ * THE DEPLOY'S OWN SENTENCE, OR NOTHING. A job entry's `message` is either what
+ * the deploy said or the leftover PROGRESS text ("Redeploying skill from GitHub
+ * or Builder FS..."), and quoting the second as a verdict is a false report. It
+ * is the deploy's sentence only when a SINGLE-skill runFn RETURNED: every
+ * Builder's single-skill result carries one (the normaliser always writes it;
+ * prod spreads deploySkillToADAS's, which always has one). A bulk runFn returns
+ * none, and a runFn that THREW returned nothing at all, so in both cases the
+ * progress text is what is left standing.
  */
-function redeployVerdict(result) {
+function deploySentence(r, single) {
+  return single && typeof r.message === "string" && r.message.trim() ? r.message.trim() : undefined;
+}
+
+/**
+ * @param {object} result  a finished job entry, a sync body, or pollDeployJob's timeout object
+ * @param {{ single?: boolean }} [opts]  a single-skill redeploy (see deploySentence)
+ * @returns {{ failed: boolean, degraded: boolean, outcome: string|undefined, reason: string|undefined }}
+ *   `reason` is the deploy's own explanation, when it gave one: its error, or
+ *   (single-skill only) its message.
+ */
+function redeployVerdict(result, { single = false } = {}) {
   const r = result && typeof result === "object" ? result : {};
   // What the deploy itself STATED. Never a lifecycle word.
   const stated = r.deploy_status ?? (JOB_LIFECYCLE_STATUSES.has(r.status) ? undefined : r.status);
@@ -139,7 +156,18 @@ function redeployVerdict(result) {
   //    NO ok key and the progress text still standing — `ok !== false` read
   //    that as "reached Core WITH ERRORS". Lifecycle 'failed' alone is not the
   //    test: pollDeployJob's timeout is ok:false with no status at all.
-  if (r.ok !== true) return { failed: true, degraded: false, outcome: stated ?? "failed" };
+  //    And ok:true is not the whole statement either: a body that ALSO carries
+  //    a top-level `error` has told us something failed, and a verdict that
+  //    reads only `ok` would call it a clean success.
+  if (r.ok !== true || r.error) {
+    // ok === false EXPLICITLY means the runFn RETURNED — prod (2e8cab5, no
+    // normaliser) hands back deploySkillToADAS's own ok:false with its own
+    // message and no `error`. That sentence is the reason; "gave no reason"
+    // would be false. A crashed job has no ok key, so it never gets here with
+    // only a message.
+    const reason = r.error || (r.ok === false ? deploySentence(r, single) : undefined);
+    return { failed: true, degraded: false, outcome: stated ?? "failed", reason };
+  }
 
   // 2. DEGRADED. With no stated outcome (a Builder before #44, async path),
   //    re-derive it by the Builder's OWN rule — deploySkillToADAS:
@@ -158,7 +186,18 @@ function redeployVerdict(result) {
   const outcome = stated ?? inferred;
   const degraded = (Number(r.failed) || 0) > 0
     || (outcome != null && !CLEAN_REDEPLOY_OUTCOMES.has(outcome));
-  return { failed: false, degraded, outcome: outcome ?? (degraded ? "deployed_with_errors" : undefined) };
+  return {
+    failed: false,
+    degraded,
+    outcome: outcome ?? (degraded ? "deployed_with_errors" : undefined),
+    reason: degraded ? deploySentence(r, single) : undefined,
+  };
+}
+
+/** A quoted sentence that ends like one, so the next sentence does not run into it. */
+function asSentence(text) {
+  const t = String(text).trim();
+  return /[.!?]$/.test(t) ? t : `${t}.`;
 }
 
 /**
@@ -6564,7 +6603,7 @@ export const handlers = {
       };
     }
     if (!result) result = { ok: false, error: 'Redeploy returned no result' };
-    const verdict = redeployVerdict(result);
+    const verdict = redeployVerdict(result, { single: Boolean(skill_id) });
     // Pull through the underlying error/message instead of fabricating "0/0/0
     // success-shaped" output. Old wrapper hid backend errors (e.g. validator
     // failures from sentinel files in user repos) and reported `total: 0` with
@@ -6603,16 +6642,14 @@ export const handlers = {
       // Branches on the VERDICT, not on `ok` alone — `ok` is true for a deploy
       // that landed with errors, and this sentence is what an agent reads first.
       //
-      // `result.message` is quoted in ONE place: a degraded single skill. A
-      // degraded verdict needs ok === true, i.e. the runFn RETURNED, and every
-      // Builder's single-skill runFn result carries the deploy's own sentence
-      // (the normaliser always writes one; prod spreads deploySkillToADAS's,
-      // which always has one). Everywhere else the job entry's message can be
-      // the leftover PROGRESS text — a bulk runFn returns none, and a runFn
-      // that threw returned nothing — so it is never the verdict.
+      // The deploy's own words come from verdict.reason and nowhere else:
+      // redeployVerdict alone decides when a job's `message` is the deploy's
+      // sentence and when it is leftover progress text (see deploySentence).
       message: verdict.failed
         ? (result.error
             ? `Re-deploy failed: ${result.error}${result.hint ? ` — ${result.hint}` : ''}`
+            : verdict.reason
+              ? `Re-deploy of skill "${skill_id}" failed. Builder: ${asSentence(verdict.reason)}`
             // "Check skills array" was the advice given WHILE the skills array
             // was empty — the async branch never populated it. Say what is
             // actually known, and only mention the array when there is one.
@@ -6624,7 +6661,7 @@ export const handlers = {
         : verdict.degraded
         ? (skill_id
             ? `Re-deployed skill "${skill_id}" WITH ERRORS (status: ${verdict.outcome}) — it reached Core but did not come up clean.`
-              + (result.message ? ` Builder: ${result.message}` : "")
+              + (verdict.reason ? ` Builder: ${asSentence(verdict.reason)}` : "")
               + " See verification."
             : `Re-deployed ${deployedCount} of ${totalCount} skill(s) WITH ERRORS (${failedCount} failed`
               + `, status: ${verdict.outcome}) — see skills[] and verification.`)
