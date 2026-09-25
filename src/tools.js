@@ -2287,7 +2287,10 @@ export const tools = [
       "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
       "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
       "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
-      "After one, run ateam_github_sync_from_main so `dev` has it too. Until then the Builder keeps the hotfix as a change `dev` lacks: the next iterate deploy of that file ships it and writes it to `dev`, and a deploy is refused if `dev`'s copy of the same file changed meanwhile.",
+      "After one, run ateam_github_sync_from_main so `dev` has it too. Until `dev` holds the same content, the Builder's copy of that file is `main` content `dev` does not have: " +
+      "ateam_redeploy and ateam_patch refuse to deploy it and name it (they never ship `dev`'s older copy over the hotfix, nor write the hotfix over `dev`), and ateam_build_and_run deploys it from `main`. " +
+      "Connector code has no such check: ateam_upload_connector deploys `dev`'s code, so sync before the next upload of that connector. " +
+      "The reply's fs_mirror says what the Builder did with the file (a note when it did NOT copy it: its own copy had a change of its own).",
     inputSchema: {
       type: "object",
       properties: {
@@ -4886,7 +4889,15 @@ export const handlers = {
           message,
         }, sid, { timeoutMs: 30_000 });
         writeBranch = ghResp?.branch || writeBranch;
-        phases.push({ phase: "github_write", status: "done", branch: writeBranch });
+        // The Builder may have left its own copy of the file alone (it had a
+        // change the commit did not carry — a hotfix from main, a save that
+        // never reached GitHub), or now hold main content dev lacks. Its note
+        // says so and what to do; the redeploy below refuses that file.
+        const fsMirror = ghResp?.fs_mirror;
+        phases.push({
+          phase: "github_write", status: "done", branch: writeBranch,
+          ...((fsMirror?.mirrored === false || fsMirror?.other_branch) && fsMirror.note && { builder_copy: fsMirror.note }),
+        });
       }
     } catch (err) {
       const store = isLocal ? "Builder store (local)" : "GitHub";
@@ -4959,6 +4970,12 @@ export const handlers = {
         phase: "redeploy",
         status: rd.failed ? "error" : "done",
         ...(rd.failed && rd.reason && { error: rd.reason }),
+        // A REFUSAL carries its code and its way out (the Builder's pre-deploy
+        // check: DRIFT_DETECTED, naming the file changed on both sides and how
+        // to choose). Only the bare reason used to reach the caller — "Pre-
+        // deploy consistency check failed" — with the file and the hint dropped.
+        ...(rd.failed && redeployResult?.code && { code: redeployResult.code }),
+        ...(rd.failed && redeployResult?.hint && { hint: redeployResult.hint }),
         ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome, ...(rd.reason && { reason: rd.reason }) }),
       });
     } catch (err) {
@@ -5062,18 +5079,25 @@ export const handlers = {
     // and `patch_persisted` carries the "nothing was lost" fact as a field,
     // where a caller can act on it, instead of as a lie in the status.
     const lifecycleOk = redeployResult === undefined ? true : redeployOk;
+    // The redeploy was REFUSED (it carries a hint), not merely unfinished: a
+    // retry of ateam_redeploy is refused the same way until the caller acts.
+    const refused = phases.find((p) => p.phase === "redeploy" && p.status === "error" && p.hint);
 
     return {
       ok: lifecycleOk,
       ...(!lifecycleOk && {
         patch_persisted: true,
         phase: "redeploy",
-        error:
-          `The edit was saved to ${store} but the redeploy did not complete, so the skill's ` +
-          `connector-derived tools were NOT rebuilt. Nothing is lost and nothing needs re-patching — ` +
-          `the definition is stored. Finish it with ateam_redeploy(solution_id` +
-          (skill_id ? `, skill_id: "${skill_id}"` : "") + `). Until then Builder and Core disagree ` +
-          `about this skill's tools.`,
+        error: refused
+          ? `The edit was saved to ${store}, but the redeploy was REFUSED${refused.code ? ` (${refused.code})` : ""}: ` +
+            `${asSentence(refused.error || "the Builder refused it")} Nothing is lost — the definition is stored. ` +
+            `Core still runs the previous deploy. ${refused.hint}`
+          : `The edit was saved to ${store} but the redeploy did not complete, so the skill's ` +
+            `connector-derived tools were NOT rebuilt. Nothing is lost and nothing needs re-patching — ` +
+            `the definition is stored. Finish it with ateam_redeploy(solution_id` +
+            (skill_id ? `, skill_id: "${skill_id}"` : "") + `). Until then Builder and Core disagree ` +
+            `about this skill's tools.`,
+        ...(refused && { hint: refused.hint, ...(refused.code && { code: refused.code }) }),
       }),
       solution_id,
       source: isLocal ? "local" : "github",
@@ -5109,7 +5133,9 @@ export const handlers = {
         ? (widget_health && !widget_health.ok
             ? `${redeployedLine} ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
             : redeployedLine)
-        : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
+        : refused
+          ? `⚠️ Patched on ${store} ✅ but the redeploy was REFUSED${refused.code ? ` (${refused.code})` : ''} — see error and hint.`
+          : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
         : 'Your changes are on `dev`. They are NOT in production until you promote: ateam_github_promote(solution_id) merges dev → main (dry_run:true to preview), then ateam_build_and_run to deploy.',

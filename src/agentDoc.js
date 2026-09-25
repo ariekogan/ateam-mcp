@@ -165,8 +165,10 @@ Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same br
 next iterate deploy (\`ateam_redeploy\`, \`ateam_patch\`, \`ateam_upload_connector\`) picks the change
 up from \`${BRANCH_WORKFLOW.write_branch}\`: the tools also copy it into the Builder at once, and a hand push is
 pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed since the two
-last agreed (for example main content a build_and_run deployed that \`${BRANCH_WORKFLOW.write_branch}\` lacks). Then the
-deploy is refused and names the file instead of picking a side.
+last agreed (a Builder save that never reached GitHub), or holds main content \`${BRANCH_WORKFLOW.write_branch}\` lacks (a hotfix
+or rollback a build_and_run deployed). Then the tools leave the Builder's copy alone, and \`ateam_redeploy\` and
+\`ateam_patch\` refuse that file and name it instead of picking a side. (\`ateam_upload_connector\` reads
+\`${BRANCH_WORKFLOW.write_branch}\` directly and has no such check.)
 
 **First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
 

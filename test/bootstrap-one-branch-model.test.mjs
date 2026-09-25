@@ -379,13 +379,30 @@ check("ateam_redeploy is described as the Builder's copy, refreshed from dev —
 // not by updated_at. Three claims follow from that and were missing or false.
 check("ateam_redeploy's line says a change on BOTH sides is refused, not picked",
       BRANCH_WORKFLOW.iterate_without_promote.some((l) => /^ateam_redeploy/.test(l) && /ALSO changed/.test(l) && /refused/.test(l)));
-check("the CLAUDE.md hand-edit paragraph says the same",
-      /a hand push is\s+pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed[\s\S]{0,200}refused/.test(AGENT_DOC));
-check("the ref:'main' hotfix path says to bring dev along, and what the Builder does until then",
-      /ref:'main' only for emergency hotfixes[\s\S]*ateam_github_sync_from_main[\s\S]*keeps the hotfix as a change `dev` lacks/
-        .test(tools.find((t) => t.name === "ateam_github_patch").description));
-check("rollback no longer claims ateam_redeploy undoes it (the Builder keeps main's copy as dev's missing change)",
-      !/ateam_redeploy deploys the rolled-back change again/.test(BRANCH_WORKFLOW.rollback));
+// Builder #50 (review round 4): a Builder copy of `main` content dev lacks (a
+// hotfix or rollback a build_and_run deployed) is REFUSED until dev has it —
+// it is not "kept and carried to dev" (nothing says main's copy is newer), and
+// a dev patch does not overwrite it. And ateam_upload_connector has no check.
+check("ateam_redeploy's line names main content dev lacks as refused too",
+      BRANCH_WORKFLOW.iterate_without_promote.some((l) => /^ateam_redeploy/.test(l) && /`main` content `dev` does not have/.test(l) && /refused/.test(l)));
+check("the CLAUDE.md hand-edit paragraph says which tools refuse, and that upload_connector does not",
+      /a hand push is\s+pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed[\s\S]{0,400}`ateam_redeploy` and\s+`ateam_patch` refuse that file[\s\S]{0,120}`ateam_upload_connector` reads/.test(AGENT_DOC));
+check("the CLAUDE.md no longer says every iterate deploy (upload_connector included) is refused",
+      !/Then the\s+deploy is refused and names the file instead of picking a side/.test(AGENT_DOC));
+{
+  const gp = tools.find((t) => t.name === "ateam_github_patch").description;
+  check("the ref:'main' hotfix path says to bring dev along, and that iterate deploys refuse the file until then",
+        /ref:'main' only for emergency hotfixes[\s\S]*ateam_github_sync_from_main[\s\S]*ateam_redeploy and ateam_patch refuse to deploy it/.test(gp));
+  check("  and no longer promises the Builder ships the hotfix and writes it to dev",
+        !/keeps the hotfix as a change `dev` lacks/.test(gp) && !/ships it and writes it to `dev`/.test(gp));
+  check("  and says connector code has no such check",
+        /Connector code has no such check: ateam_upload_connector deploys `dev`'s code/.test(gp));
+}
+check("rollback no longer claims ateam_redeploy undoes it (the Builder refuses the rolled-back files until dev has them)",
+      !/ateam_redeploy deploys the rolled-back change again/.test(BRANCH_WORKFLOW.rollback)
+      && /ateam_redeploy and ateam_patch refuse the rolled-back files/.test(BRANCH_WORKFLOW.rollback));
+check("rollback says ateam_upload_connector deploys dev's code again until the sync",
+      /ateam_upload_connector deploys `dev`'s connector code — the rolled-back change — again/.test(BRANCH_WORKFLOW.rollback));
 check("rollback says to bring dev along (the iterate tools deploy dev)",
       /ateam_github_sync_from_main/.test(BRANCH_WORKFLOW.rollback)
       && tools.find((t) => t.name === "ateam_github_rollback").description.includes("ateam_github_sync_from_main"));
