@@ -131,7 +131,7 @@ ${BRANCH_WORKFLOW.write_side}
 > \`${BRANCH_WORKFLOW.write_branch}\` may not exist yet in this repo. The platform creates it from
 > \`${BRANCH_WORKFLOW.deploy_branch}\` on the first write it makes (ensureDevBranch), so a repo that has
 > only ever been written to by hand will not have it until then — hence the
-> \`|| git checkout -b\` in step 1.
+> \`|| git checkout -b\` on the clone line under "Editing files by hand" below.
 
 ${BRANCH_WORKFLOW.deploy_side}
 

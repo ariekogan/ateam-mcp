@@ -289,5 +289,47 @@ check("step 6 renders from the owner",
       dl[5].description.includes(BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint));
 check("step 5 tells you to test BEFORE shipping", /Test BEFORE you ship/.test(dl[4].description));
 
+console.log("the iterate loop and the ship loop say only true things about each other");
+// #19's first cut added the iterate loop and left the old sentences beside it.
+// The rendered CLAUDE.md said "Nothing on `dev` is live" a few lines above
+// "These deploy to Core from `dev`". Every fact below was checked against the
+// Builder: ateam_patch(target:"skill") and ateam_redeploy read the skill from
+// `dev` (the skill redeploy route, resolveBranch iterative); target:"solution"
+// runs the BULK redeploy of every skill; ateam_upload_connector(github:true)
+// deploys the connector's `dev` files and leaves skills alone.
+const everyText = [...ALL.map((s) => s.text), AGENT_DOC].join("\n");
+check("nobody says `dev` is not live — the iterate tools deploy it",
+      !/Nothing on `?dev`? is live/i.test(everyText));
+check("the silent mistake no longer claims NOTHING you wrote is running (false once ateam_patch ran)",
+      !/nothing you wrote is running/i.test(BRANCH_WORKFLOW.the_silent_mistake));
+check("  it names the real trap: build_and_run REPLACES what the iterate tools deployed",
+      /REPLACES/.test(BRANCH_WORKFLOW.the_silent_mistake)
+      && ["ateam_patch", "ateam_upload_connector"].every((t) => BRANCH_WORKFLOW.the_silent_mistake.includes(t)));
+check("the agent doc points at a step that exists (there is no numbered step 1 any more)",
+      !/in step 1\b/.test(AGENT_DOC) && /Editing files by hand/.test(AGENT_DOC));
+check("iterate_note stands on its own — no \"These\" pointing at a list that is not beside it",
+      !/^\s*These\b/.test(BRANCH_WORKFLOW.iterate_note) && !/\bThese deploy\b/.test(dl[4].description));
+check("ateam_patch's redeploy scope is stated per target: \"solution\" redeploys the WHOLE solution",
+      BRANCH_WORKFLOW.iterate_without_promote.some((l) => /target: "solution"/.test(l) && /WHOLE solution/.test(l))
+      && BRANCH_WORKFLOW.iterate_without_promote.some((l) => /target: "skill"/.test(l) && /THAT skill/.test(l))
+      && !BRANCH_WORKFLOW.iterate_without_promote.some((l) => /ateam_patch\(solution_id, target, updates\)/.test(l)));
+{
+  // Codex on #19: the rendered lines mixed `solution_id: "x"` with bare
+  // placeholders (`c`, `target`, `updates`), so a copied line is not a call.
+  const block = AGENT_DOC.slice(AGENT_DOC.indexOf("### Iterate"), AGENT_DOC.indexOf("### Ship"));
+  const calls = block.split("\n").filter((l) => /^ateam_\w+\(/.test(l));
+  const bare = calls.filter((l) => l.slice(l.indexOf("(") + 1, l.indexOf(")")).split(",").some((a) => !a.includes(":")));
+  check("every rendered iterate call names every argument", calls.length >= 4 && bare.length === 0,
+        bare.join(" | ") || `${calls.length} calls`);
+}
+check("developer_loop step 4 is the ITERATE loop, not the ship loop",
+      !dl[3].tools.includes(BRANCH_WORKFLOW.promote_tool) && !dl[3].tools.includes("ateam_build_and_run")
+      && dl[3].tools.includes("ateam_upload_connector") && dl[3].tools.includes("ateam_patch")
+      && !dl[3].description.includes(BRANCH_WORKFLOW.one_line), JSON.stringify(dl[3].tools));
+check("  and the ship step is where promote → build_and_run lives",
+      dl[5].tools.includes(BRANCH_WORKFLOW.promote_tool) && dl[5].tools.includes("ateam_build_and_run"));
+check("the behaviour contract does not call an ateam_patch \"not live yet\"",
+      !ALL.some((s) => /After any write, say the change is not live/i.test(s.text)));
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

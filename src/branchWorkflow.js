@@ -42,11 +42,21 @@ export const BRANCH_WORKFLOW = Object.freeze({
     '4. DEPLOY  ateam_build_and_run(solution_id)                        → deploys `main`',
   ]),
 
-  write_side: 'Every write lands on `dev`: ateam_github_patch, ateam_github_write and ateam_patch all default there. Nothing on `dev` is live.',
+  // "Nothing on `dev` is live" used to end this line, a few lines above the
+  // iterate loop that deploys `dev` to Core. Both were rendered into the same
+  // CLAUDE.md. What is true: a repo-only write deploys nothing, ateam_patch
+  // deploys what it patched, and `main` moves only on a promote.
+  write_side: 'Every write lands on `dev`: ateam_github_patch, ateam_github_write and ateam_patch all default there. '
+    + 'ateam_github_patch and ateam_github_write only change the repo; nothing is deployed until a deploy tool runs. '
+    + 'ateam_patch also redeploys what it patched, from `dev`. Nothing reaches `main` without a promote.',
   deploy_side: '`main` is production, and ONLY ateam_github_promote writes it. ateam_build_and_run deploys `main` — there is no ref parameter.',
+  // It used to say "NOTHING you wrote is running". That is false the moment
+  // ateam_patch has run: it deploys from `dev`. The real trap is the next step.
+  // build_and_run then deploys `main` over what was just tested.
   the_silent_mistake:
-    'Skipping the promote. Your patches succeed, build_and_run reports success, and NOTHING you wrote is running — because `main` never moved. ' +
-    'If a deploy behaves as though your changes do not exist, that is this. ateam_build_and_run now refuses with MAIN_BEHIND_DEV and names the tool rather than letting you find out by reading a diff.',
+    'Running ateam_build_and_run before promoting. It deploys `main`, so whatever is still only on `dev` is NOT in this deploy, '
+    + 'and it REPLACES what ateam_patch, ateam_upload_connector or ateam_redeploy had already deployed from `dev`. The change you just tested disappears from Core while the deploy reports success. '
+    + 'A build_and_run that pulls from the repo now refuses with MAIN_BEHIND_DEV and names the tool, so you are not left to find out from a diff.',
   // Deliberately does NOT quote the wrong framing. An earlier version said
   // 'calling it "create a checkpoint" is what left agents believing…' — which
   // put the misleading phrase back into the very response meant to retire it,
@@ -60,16 +70,24 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // production. That is false, and the doc that said it shipped into a tenant
   // repo. ateam_patch and ateam_upload_connector deploy to Core from `dev`
   // WITHOUT a promote — that is how you test before shipping.
+  //
+  // Every argument is NAMED, so a line copied from the rendered CLAUDE.md is a
+  // valid call once the <placeholders> are filled in. agentDoc fills in
+  // solution_id. The scope of each redeploy is stated because it differs:
+  // target:"solution" redeploys the whole solution, not one skill.
   iterate_without_promote: Object.freeze([
-    'ateam_patch(solution_id, target, updates)     — skill/solution definition: writes `dev` AND redeploys that skill to Core',
-    'ateam_upload_connector(solution_id, c, github:true) — connector code: deploys the `dev` state, skills untouched',
-    'ateam_redeploy(solution_id, skill_id)         — redeploy one skill with no definition change',
-    'then ateam_conversation / ateam_test_skill / ateam_test_voice against the running solution',
+    'ateam_patch(solution_id, target: "skill", skill_id: "<skill-id>", updates: {…}) — writes `dev`, then redeploys THAT skill from `dev`',
+    'ateam_patch(solution_id, target: "solution", updates: {…}) — writes `dev`, then redeploys the WHOLE solution, every skill, from the Builder\'s copy of `dev`',
+    'ateam_upload_connector(solution_id, connector_id: "<connector-id>", github: true) — deploys that connector\'s code from `dev`; skills untouched',
+    'ateam_redeploy(solution_id, skill_id: "<skill-id>") — redeploys one skill from `dev`, no definition change',
+    'then test with ateam_conversation / ateam_test_skill / ateam_test_voice against the running solution',
   ]),
+  // Self-contained on purpose. It opened with "These deploy…" and was also
+  // rendered into developer_loop step 5, where no list precedes it.
   iterate_note:
-    'These deploy to Core from `dev` without touching `main`. Test here, promote when it is right. '
-    + 'ateam_build_and_run is the HEAVY full path (first deploy, or a multi-file change) and it deploys `main` — '
-    + 'on a solution with 5+ skills it can hit the 100s edge timeout, which is the other reason not to reach for it every iteration.',
+    'ateam_patch, ateam_upload_connector and ateam_redeploy deploy to Core from `dev` without touching `main`: test there, and promote when it is right. '
+    + 'ateam_build_and_run is the HEAVY full path (the first deploy, or deploying `main` after a promote) and it deploys `main`. '
+    + 'On a solution with 5+ skills it can hit the 100s edge timeout, which is the other reason not to reach for it every iteration.',
 
   rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history.',
   no_git_at_all:
