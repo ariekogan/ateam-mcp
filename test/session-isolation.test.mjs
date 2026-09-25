@@ -28,6 +28,10 @@
 // each tenant in with ateam_auth. Its sessions are owned like any other, by a
 // principal no bearer can equal, and it is not a master key: a tenant tool on a
 // platform session is refused until ateam_auth puts that tenant's key in.
+// Section 5b runs tenants in turn on ONE platform session, as the proxy does,
+// and checks nothing of one tenant (url, master key, actor, context) reaches the
+// next. Section 5c checks that only the auth gate marks a refusal as "before the
+// tool ran", which is the one signal the proxy may replay a call on.
 //
 // HISTORY — why the old "no-bearer" checks are gone and must not come back.
 // Until 39ff024, "/mcp" was optional-auth (704206e), and this file asserted
@@ -52,15 +56,37 @@ import { randomBytes } from "node:crypto";
 
 // The fake validator. src/api.js reads ADAS_API_URL once, at import, so this
 // runs first and the import below is dynamic.
+//
+// `seen` records every call it gets; `elsewhere` records calls to a second fake
+// host, the url a tenant's agent may pass to ateam_auth (section 5b). `answers`
+// lets a check make a path fail AFTER the work was done (section 5c).
 const seen = [];
-const fake = http.createServer((req, res) => {
-  seen.push({ path: req.url, key: req.headers["x-api-key"] || null, tenant: req.headers["x-adas-tenant"] || null, platform: "x-adas-token" in req.headers });
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ ok: true, solutions: [] }));
+const elsewhere = [];
+const answers = new Map(); // path substring → { status, body }
+const record = (req) => ({
+  path: req.url,
+  key: req.headers["x-api-key"] || null,
+  tenant: req.headers["x-adas-tenant"] || null,
+  platform: "x-adas-token" in req.headers,
+  actor: req.headers["x-adas-actor-id"] || null,
 });
+function fakeHost(log) {
+  const srv = http.createServer((req, res) => {
+    log.push(record(req));
+    const hit = [...answers].find(([p]) => req.url.includes(p));
+    const { status, body } = hit ? hit[1] : { status: 200, body: { ok: true, solutions: [] } };
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(typeof body === "string" ? body : JSON.stringify(body));
+  });
+  srv.unref();
+  return srv;
+}
+const fake = fakeHost(seen);
+const fakeElsewhere = fakeHost(elsewhere);
 await new Promise((r) => fake.listen(0, "127.0.0.1", r));
-fake.unref();
+await new Promise((r) => fakeElsewhere.listen(0, "127.0.0.1", r));
 process.env.ADAS_API_URL = `http://127.0.0.1:${fake.address().port}`;
+const ELSEWHERE_URL = `http://127.0.0.1:${fakeElsewhere.address().port}`;
 const {
   sessionOwnershipOk, getSessionOwner, sweepStaleSessions,
   presentsPlatformSecret, PLATFORM_PRINCIPAL, getAuthOverride,
@@ -345,17 +371,20 @@ const call = (s, name, args = {}) => mcp("POST", {
 });
 const resultOf = (r) => { try { return JSON.parse(r.text).result || null; } catch { return null; } };
 const succeeded = (r) => { const x = resultOf(r); return r.status === 200 && !!x && x.isError !== true; };
-// The exact signal ateam-proxy-mcp re-authenticates on (upstreamAuthFailure.js),
-// given by the dispatcher's auth gate BEFORE any upstream call. `seen` staying
-// empty is what tells that apart from an upstream 401 relayed with the same code.
-const unauthenticated = (r) => {
+// The exact signal ateam-proxy-mcp signs in again and replays on
+// (upstreamAuthFailure.js refusedAtAuthGate), given by the dispatcher's auth
+// gate BEFORE the tool runs. The code alone cannot say that: a tool that ran and
+// then failed with "401" in its text gets the same code (section 5c). The stage
+// does, and `seen` staying empty confirms that nothing ran.
+const refusedAtGate = (r) => {
   const x = resultOf(r);
-  return r.status === 200 && x?.isError === true && x?.structuredContent?.code === "UNAUTHENTICATED";
+  return r.status === 200 && x?.isError === true &&
+    x?.structuredContent?.code === "UNAUTHENTICATED" && x?.structuredContent?.stage === "auth_gate";
 };
 async function refusedAtTheGate(s) {
   seen.length = 0;
   const r = await call(s, "ateam_list_solutions");
-  return unauthenticated(r) && seen.length === 0;
+  return refusedAtGate(r) && seen.length === 0;
 }
 async function listAs(s) {
   seen.length = 0;
@@ -398,6 +427,125 @@ check("P1 ateam_auth again → ok", succeeded(await call(P1, "ateam_auth", { api
 {
   const a = await listAs(P1);
   check("P1 lists as tenant A again", a.ok && onlyKey(a.calls, KEY_A, "tenanta"));
+}
+
+// ─── 5b. ONE platform session, tenants in turn ──────────────────────────────
+// How ateam-proxy-mcp really uses it. Core keeps one MCP session per connector,
+// so every tenant's calls share ONE platform session, and the proxy signs each
+// tenant in (ateam_auth, that tenant's own key, no url) before that tenant's
+// calls. P1/P2 above are two sessions, a setup the proxy never has.
+//
+// ateam_auth used to MERGE into the record it found, so the next tenant got the
+// last one's url, master key, actor and context. Tenant A below leaves every one
+// of them behind: a url of its own choosing, a solution worked on as a named
+// actor, a (made-up) master key. Each "reached A" check is the positive control
+// that makes the "did not reach B" check after it mean something.
+console.log("ONE platform session, tenants in turn: nothing of one tenant reaches the next");
+const SHARED = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+const bootstrapText = async (s) => JSON.stringify(resultOf(await call(s, "ateam_bootstrap")) || {});
+const reset = () => { seen.length = 0; elsewhere.length = 0; };
+// Over the calls to BOTH hosts, and never vacuous: no calls at all is a failure.
+const noActor = (calls) => calls.length > 0 && calls.every((c) => c.actor === null);
+
+reset();
+check("A signs in with a url of its own → ok",
+  succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A, url: ELSEWHERE_URL })));
+check("A works on a solution as a named actor → ok",
+  succeeded(await call(SHARED, "ateam_get_solution", { solution_id: "tenant-a-secret-solution", view: "definition", actor_id: "actor-of-tenant-a" })));
+check("(control) A's calls went to A's url, with A's actor", elsewhere.some((c) => c.key === KEY_A && c.actor === "actor-of-tenant-a"));
+check("(control) A's bootstrap shows A's active solution", (await bootstrapText(SHARED)).includes("tenant-a-secret-solution"));
+
+reset();
+check("B signs in (the proxy's own sign-in: B's key, no url) → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_B })));
+{
+  const b = await listAs(SHARED);
+  check("B lists with B's key alone", b.ok && onlyKey(b.calls, KEY_B, "tenantb"));
+  check("B's calls carry no actor of A's", noActor([...b.calls, ...elsewhere]));
+}
+check("B's key never went to the url A chose", elsewhere.length === 0);
+{
+  const boot = await bootstrapText(SHARED);
+  check("B's bootstrap shows nothing of A's (no active solution, no actor)",
+    !boot.includes("tenant-a-secret-solution") && !boot.includes("actor-of-tenant-a"));
+}
+
+check("B works on its own solution as its own actor → ok",
+  succeeded(await call(SHARED, "ateam_get_solution", { solution_id: "tenant-b-secret-solution", view: "definition", actor_id: "actor-of-tenant-b" })));
+reset();
+check("A signs in again, no url → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A })));
+{
+  const a = await listAs(SHARED);
+  check("A lists with A's key alone, at the default host (A's earlier url is gone too)",
+    a.ok && onlyKey(a.calls, KEY_A, "tenanta") && elsewhere.length === 0);
+  check("A's calls carry no actor of B's", noActor([...a.calls, ...elsewhere]));
+  check("A's bootstrap shows nothing of B's", !(await bootstrapText(SHARED)).includes("tenant-b-secret-solution"));
+}
+
+reset();
+check("A signs in with a master key → ok",
+  succeeded(await call(SHARED, "ateam_auth", { master_key: "made-up-master-key", tenant: "tenanta" })));
+check("(control) the master key went out as x-adas-token", seen.some((c) => c.platform));
+reset();
+check("B signs in → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_B })));
+{
+  const b = await listAs(SHARED);
+  check("B's calls carry B's key, and no x-adas-token (A's master key is gone)", b.ok && onlyKey(b.calls, KEY_B, "tenantb"));
+}
+
+// A sign-in that fails leaves NOBODY signed in, not the tenant before. The proxy
+// drops its own record on a failed sign-in, and the session must agree.
+check("an ateam_auth with no key fails", !succeeded(await call(SHARED, "ateam_auth", {})));
+check("…and B is no longer signed in: refused at the gate, nothing sent", await refusedAtTheGate(SHARED));
+check("the shared session is still the platform's", getSessionOwner(SHARED) === PLATFORM_PRINCIPAL);
+check("still no override stored for the platform principal", getAuthOverride(PLATFORM_PRINCIPAL) === null);
+{
+  // A bearer's session is ONE user, and keeps the merge: its own ateam_auth
+  // keeps its own context. Starting afresh is for platform sessions only.
+  const callA = (name, args = {}) => mcp("POST", {
+    headers: { ...sid(SID_A), ...bearer(BEARER_A) },
+    body: { jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } },
+  });
+  await callA("ateam_get_solution", { solution_id: "bearer-a-solution", view: "definition" });
+  check("A's bearer session signs in again → ok", succeeded(await callA("ateam_auth", { api_key: BEARER_A })));
+  check("…and keeps its own context: resetPlatformSession left the bearer session alone",
+    JSON.stringify(resultOf(await callA("ateam_bootstrap")) || {}).includes("bearer-a-solution"));
+}
+
+// ─── 5c. Only the auth gate says "the tool did not run" ─────────────────────
+// ateam-proxy-mcp signs in again and REPLAYS a call refused at the gate. A tool
+// that ran and then failed with auth-sounding text ("GitHub 401 Bad credentials"
+// after a promote had merged) also gets code UNAUTHENTICATED from
+// deriveErrorCode. Replaying that runs the tool twice, so the gate's refusal
+// carries `stage: "auth_gate"` and a failure after the run never does.
+console.log("auth gate: the refusal before the run is marked; a failure after the run is not");
+check("B signs in → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_B })));
+const ranAndFailed = async (name, args, path, answer) => {
+  answers.set(path, answer);
+  seen.length = 0;
+  try {
+    const x = resultOf(await call(SHARED, name, args));
+    return { x, ran: seen.filter((c) => c.path.includes(path)).length };
+  } finally { answers.delete(path); }
+};
+{
+  const { x, ran } = await ranAndFailed("ateam_github_promote", { solution_id: "sol-b" }, "/promote",
+    { status: 200, body: { ok: false, merged: true, error: "merged dev→main, but pushing the safe-* tag failed: GitHub 401 Bad credentials" } });
+  check("(control) the promote ran once upstream", ran === 1);
+  check("(control) its returned failure is UNAUTHENTICATED by its text", x?.isError === true && x?.structuredContent?.code === "UNAUTHENTICATED");
+  check("…and is NOT marked as refused at the gate", x?.structuredContent?.stage === undefined);
+}
+{
+  const { x, ran } = await ranAndFailed("ateam_github_patch", { solution_id: "sol-b", path: "a.txt", content: "x" }, "/github/patch",
+    { status: 500, body: { error: "GitHub 401 Bad credentials" } });
+  check("(control) the GitHub write ran once upstream", ran === 1);
+  check("(control) its thrown failure is UNAUTHENTICATED by its text", x?.isError === true && x?.structuredContent?.code === "UNAUTHENTICATED");
+  check("…and is NOT marked as refused at the gate", x?.structuredContent?.stage === undefined);
+}
+{
+  const P6 = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+  seen.length = 0;
+  const r = await call(P6, "ateam_github_patch", { solution_id: "sol-b", path: "a.txt", content: "x" });
+  check("a tenant tool on a session nobody signed in to → marked stage auth_gate, nothing ran", refusedAtGate(r) && seen.length === 0);
 }
 
 // ─── 6. Layer 1's one exception: token auto-injection ───────────────────────

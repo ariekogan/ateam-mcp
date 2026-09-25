@@ -59,7 +59,9 @@ const sessionOwners = new Map();
  *   - ateam_auth, which is how each tenant's own key gets into the session.
  * It carries NO tenant and NO key. It is not a master key: a tenant tool on a
  * platform session is refused until ateam_auth puts that tenant's credential
- * in, exactly as for any other session.
+ * in, exactly as for any other session. And since many tenants take turns on
+ * one platform session, each ateam_auth there replaces the last tenant's record
+ * instead of merging into it (resetPlatformSession).
  *
  * A Symbol, never a string, so it cannot equal any bearer a client presents.
  * It is never a key in authOverrides (see bearerOf): overrides are per bearer
@@ -487,6 +489,39 @@ export function bindSessionPlatform(sessionId) {
 }
 
 /**
+ * ON A PLATFORM SESSION, EVERY ateam_auth STARTS FROM NOTHING. Called first
+ * thing in ateam_auth; a no-op on any other session.
+ *
+ * setSessionCredentials MERGES into the record it finds: it keeps the previous
+ * apiUrl (57007d3), masterKey (94b9bc0) and context (4dc8f17), which holds the
+ * active solution, the last skill and the bound actor (touchSession). On a
+ * bearer's session that is ONE user signing in again, and keeping them is the
+ * point. A platform session is the opposite. ateam-proxy-mcp keeps ONE session
+ * for EVERY tenant (Core holds one MCP session per connector) and signs each
+ * tenant in before its calls, so the merge handed the next tenant what the last
+ * one left:
+ *   - its url: a key that names no environment went to a host the previous
+ *     tenant's agent had chosen, and every call after it too;
+ *   - its master key: the next tenant's calls went out as x-adas-token = that
+ *     value, and without the next tenant's own key;
+ *   - its actor: the next tenant's calls carried X-ADAS-ACTOR-ID of the
+ *     previous tenant's user;
+ *   - its context: the next tenant's ateam_bootstrap showed the previous
+ *     tenant's active solution.
+ * So the record is dropped BEFORE ateam_auth reads anything (its whoami base is
+ * getBaseUrl, which reads the record), and it stays dropped if the sign-in then
+ * fails: a failed sign-in leaves nobody signed in, never the tenant before.
+ * The owner binding stays; only the credentials and the context go.
+ */
+export function resetPlatformSession(sessionId) {
+  if (!sessionId || sessionOwners.get(sessionId) !== PLATFORM_PRINCIPAL) return false;
+  if (sessions.delete(sessionId)) {
+    console.log(`[Auth] Platform session ${sessionId}: previous sign-in dropped before ateam_auth`);
+  }
+  return true;
+}
+
+/**
  * The owner a session is bound to — a bearer string or PLATFORM_PRINCIPAL — or
  * null if there is none. Used by the HTTP transport to enforce that a bound
  * session can only be reused by a request presenting the SAME owner: a
@@ -656,9 +691,11 @@ export function hasBearerAuth(sessionId) {
  * from its bearer. The binding goes when the transport does (clearSession).
  *
  * A PLATFORM session is not re-seeded: it has no bearer and no override, by
- * design. After an idle hour its tenant tools answer UNAUTHENTICATED (isError +
- * structuredContent.code), and ateam-proxy-mcp re-runs ateam_auth on exactly
- * that signal. test/session-isolation.test.mjs pins that contract.
+ * design. After an idle hour its tenant tools are refused at the dispatcher's
+ * auth gate (isError, structuredContent { code: "UNAUTHENTICATED", stage:
+ * "auth_gate" }), and ateam-proxy-mcp re-runs ateam_auth and replays on exactly
+ * that signal: the stage says the tool did not run. test/session-isolation.test.mjs
+ * pins that contract.
  */
 export function sweepStaleSessions() {
   const now = Date.now();

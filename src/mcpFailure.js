@@ -23,6 +23,11 @@ export const AUTH_SIGNAL_RX = /\b(unauthenticated|authentication required|authen
  * Map a failure to a machine-readable code. An explicit code (set by a handler
  * or carried on a thrown error) always wins; otherwise recognize the auth
  * signal at this single boundary; otherwise a generic TOOL_FAILED.
+ *
+ * Its UNAUTHENTICATED says the failure TEXT reads like auth. It is given AFTER
+ * the tool ran, so it never says the tool did not run: "GitHub 401 Bad
+ * credentials" after a merge gets it too. Only the dispatcher's auth gate says
+ * that, with `stage: "auth_gate"` (tools.js handleToolCall).
  * @param {string|object} source  the message/result the failure came with
  * @param {string} [explicit]     a code the handler/error already set
  * @returns {string}

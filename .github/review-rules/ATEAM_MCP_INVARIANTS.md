@@ -68,6 +68,15 @@
     tenant and no override. A tenant tool on a platform session is refused until
     `ateam_auth` puts that tenant's own key in. Widening it into a master key
     (a tenant, a key, or access to another owner's session) ⇒ BLOCKING.
+  - replaced, never merged: the proxy runs EVERY tenant on ONE platform session,
+    so `ateam_auth` there starts from an empty record (`resetPlatformSession`,
+    before anything reads it). Merging keeps the last tenant's url, master key,
+    actor and context for the next ⇒ BLOCKING.
+- `stage: "auth_gate"` on the dispatcher's auth-gate refusal is a contract with
+  ateam-proxy-mcp: it signs in again and REPLAYS a call on that mark alone, because
+  only the gate knows the tool did not run (`deriveErrorCode` also says
+  UNAUTHENTICATED for a tool that ran and failed with "401" in its text). Setting
+  it anywhere else, or dropping it from the gate ⇒ BLOCKING.
 - Every POST must be Accept-normalized to include `application/json` +
   `text/event-stream` (on parsed headers AND `rawHeaders`) or the SDK rejects requests.
 - OAuth `resourceServerUrl` / PRM `resource` MUST equal the connector ROOT URL (not
