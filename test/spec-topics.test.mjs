@@ -264,18 +264,34 @@ if (typeof formatResultForTest !== "function") {
 //
 // The /spec index self-reports `topics_served_here`, derived from its own
 // router — so this compares against what is actually mounted.
+//
+// OPT-IN, AND ABLE TO FAIL. This used to run inside `npm test` and, when the
+// deployment was unreachable, print "SKIPPED" and exit 0 — a check that could
+// not fail, in a suite that could not run offline. It now runs only with
+// --live (`npm run test:live`); asked for and unreachable, it FAILS by name.
+// test/spec-live-gate.test.mjs proves both halves.
 console.log("the map vs the DEPLOYMENT");
+const LIVE = process.argv.includes("--live");
 const SPEC_BASE = process.env.ATEAM_SPEC_BASE || "https://dev-api.ateam-ai.com";
 let servedTopics = null;
-try {
-  const r = await fetch(`${SPEC_BASE}/spec`, { signal: AbortSignal.timeout(15_000) });
-  if (r.ok) servedTopics = (await r.json())?._this_deployment?.topics_served_here || null;
-} catch { /* offline — reported below, never silently passed */ }
-
-if (!Array.isArray(servedTopics)) {
-  // Loud, and does NOT count as a pass. A check that cannot fail is a label.
-  console.log(`  ⚠ SKIPPED — could not reach ${SPEC_BASE}. This check did NOT run.`);
+if (!LIVE) {
+  console.log("  – not requested: this compares against a live deployment. Run it with `npm run test:live`.");
 } else {
+  let reason = null;
+  try {
+    const r = await fetch(`${SPEC_BASE}/spec`, { signal: AbortSignal.timeout(15_000) });
+    if (r.ok) servedTopics = (await r.json())?._this_deployment?.topics_served_here || null;
+    else reason = `HTTP ${r.status}`;
+    if (r.ok && !Array.isArray(servedTopics)) reason = "the /spec index carried no _this_deployment.topics_served_here";
+  } catch (err) { reason = err.message; }
+  if (!Array.isArray(servedTopics)) {
+    console.error(`  ✗ SPEC_BASE_UNREACHABLE — the live drift check was requested and could NOT run against ${SPEC_BASE}`
+      + ` (${reason || "no topic list"}). Fix the base URL (ATEAM_SPEC_BASE) or the deployment, then rerun npm run test:live.`);
+    failures++;
+  }
+}
+
+if (Array.isArray(servedTopics)) {
   const mapped = new Set(
     [...mapBody.slice(0, mapBody.indexOf("\n};")).matchAll(/^\s{2}"?[\w-]+"?:\s*"(\/spec[^"]*)"/gm)]
       .map((m) => m[1].replace(/^\/spec\/?/, "") || "overview")
