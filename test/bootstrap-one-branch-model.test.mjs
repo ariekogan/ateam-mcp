@@ -386,13 +386,13 @@ check("ateam_redeploy's line says a change on BOTH sides is refused, not picked"
 check("ateam_redeploy's line names main content dev lacks as refused too",
       BRANCH_WORKFLOW.iterate_without_promote.some((l) => /^ateam_redeploy/.test(l) && /`main` content `dev` does not have/.test(l) && /refused/.test(l)));
 check("the CLAUDE.md hand-edit paragraph says which tools refuse, and that upload_connector does not",
-      /a hand push is\s+pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed[\s\S]{0,400}`ateam_redeploy` and\s+`ateam_patch` refuse that file[\s\S]{0,120}`ateam_upload_connector` reads/.test(AGENT_DOC));
+      /a hand push is\s+pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed[\s\S]{0,400}`ateam_redeploy` and\s+`ateam_patch` refuse to deploy the solution[\s\S]{0,160}`ateam_upload_connector` reads/.test(AGENT_DOC));
 check("the CLAUDE.md no longer says every iterate deploy (upload_connector included) is refused",
       !/Then the\s+deploy is refused and names the file instead of picking a side/.test(AGENT_DOC));
 {
   const gp = tools.find((t) => t.name === "ateam_github_patch").description;
   check("the ref:'main' hotfix path says to bring dev along, and that iterate deploys refuse the file until then",
-        /ref:'main' only for emergency hotfixes[\s\S]*ateam_github_sync_from_main[\s\S]*ateam_redeploy and ateam_patch refuse to deploy it/.test(gp));
+        /ref:'main' only for emergency hotfixes[\s\S]*ateam_github_sync_from_main[\s\S]*ateam_redeploy and ateam_patch refuse to deploy the solution/.test(gp));
   check("  and no longer promises the Builder ships the hotfix and writes it to dev",
         !/keeps the hotfix as a change `dev` lacks/.test(gp) && !/ships it and writes it to `dev`/.test(gp));
   check("  and says connector code has no such check",
@@ -400,12 +400,32 @@ check("the CLAUDE.md no longer says every iterate deploy (upload_connector inclu
 }
 check("rollback no longer claims ateam_redeploy undoes it (the Builder refuses the rolled-back files until dev has them)",
       !/ateam_redeploy deploys the rolled-back change again/.test(BRANCH_WORKFLOW.rollback)
-      && /ateam_redeploy and ateam_patch refuse the rolled-back files/.test(BRANCH_WORKFLOW.rollback));
+      && /ateam_redeploy and ateam_patch refuse to deploy the solution and name the rolled-back files/.test(BRANCH_WORKFLOW.rollback));
 check("rollback says ateam_upload_connector deploys dev's code again until the sync",
       /ateam_upload_connector deploys `dev`'s connector code — the rolled-back change — again/.test(BRANCH_WORKFLOW.rollback));
 check("rollback says to bring dev along (the iterate tools deploy dev)",
       /ateam_github_sync_from_main/.test(BRANCH_WORKFLOW.rollback)
       && tools.find((t) => t.name === "ateam_github_rollback").description.includes("ateam_github_sync_from_main"));
+// Builder #50 (review round 5). The Builder's refusal after a hotfix or a
+// rollback is SOLUTION-WIDE — its guard walks every file, so a redeploy of an
+// unrelated skill is refused too. "refuse that file" understated it.
+check("the iterate refusal after a hotfix/rollback is described as solution-wide, everywhere it is described",
+      /refuse to deploy the solution — any skill of it, not only that file's/.test(AGENT_DOC)
+      && BRANCH_WORKFLOW.iterate_without_promote.some((l) => /^ateam_redeploy/.test(l) && /every redeploy of the solution is refused/.test(l))
+      && /refuse to deploy the solution — any skill of it, not only that file's/.test(tools.find((t) => t.name === "ateam_github_patch").description));
+// Builder #50 (review round 5). A Builder save held off dev (or whose push
+// failed) is never overwritten by build_and_run: it is refused, 409
+// UNPUSHED_BUILDER_CHANGE, and only ateam_github_pull replaces it on purpose.
+{
+  const bar = tools.find((t) => t.name === "ateam_build_and_run").description;
+  check("build_and_run's description names the UNPUSHED_BUILDER_CHANGE refusal and both ways out",
+        /UNPUSHED_BUILDER_CHANGE/.test(bar) && /ateam_redeploy writes the Builder's copy to `dev`/.test(bar)
+        && /ateam_github_sync_from_main/.test(bar) && /ateam_github_pull replaces the Builder's copy/.test(bar));
+  check("ateam_github_pull says it replaces a Builder change that never reached GitHub",
+        /REPLACES the Builder's copy[\s\S]*never reached GitHub/.test(tools.find((t) => t.name === "ateam_github_pull").description));
+  check("the CLAUDE.md says a save that did not reach dev stays in the Builder and blocks build_and_run",
+        /NOT_WRITTEN_TO_GITHUB[\s\S]{0,200}`ateam_build_and_run` is refused\s+\(UNPUSHED_BUILDER_CHANGE\)/.test(AGENT_DOC));
+}
 check("the upload description names the deployed floor of the merge",
       /files Core ALREADY runs/.test(tools.find((t) => t.name === "ateam_upload_connector").description));
 {

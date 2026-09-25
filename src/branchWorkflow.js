@@ -92,7 +92,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
     'ateam_patch(solution_id, target: "skill", skill_id: "<skill-id>", updates: {…}) — writes `dev`, then redeploys THAT skill from `dev`',
     'ateam_patch(solution_id, target: "solution", updates: {…}) — writes `dev`, then redeploys the WHOLE solution, every skill, from the Builder\'s copy of `dev`',
     'ateam_upload_connector(solution_id, connector_id: "<connector-id>", github: true) — deploys that connector\'s code from `dev`, laid over the files Core already runs for it; skills untouched',
-    'ateam_redeploy(solution_id, skill_id: "<skill-id>") — redeploys one skill from the Builder\'s copy, which the pre-deploy check first refreshes from `dev` (a change pushed to `dev` by hand or by ateam_github_patch is picked up; if the Builder\'s copy of that file ALSO changed since the two last agreed, or holds `main` content `dev` does not have — a hotfix or rollback a build_and_run deployed — the redeploy is refused and names the file rather than pick a side); no definition change',
+    'ateam_redeploy(solution_id, skill_id: "<skill-id>") — redeploys one skill from the Builder\'s copy, which the pre-deploy check first refreshes from `dev` (a change pushed to `dev` by hand or by ateam_github_patch is picked up; if the Builder\'s copy of that file ALSO changed since the two last agreed, or holds `main` content `dev` does not have — a hotfix or rollback a build_and_run deployed — every redeploy of the solution is refused, not only that file\'s, and names the file rather than pick a side); no definition change',
     'then test with ateam_conversation / ateam_test_skill / ateam_test_voice against the running solution',
   ]),
   // Self-contained on purpose. It opened with "These deploy…" and was also
@@ -105,13 +105,13 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // Rollback writes `main` only. A deploy used to paper over that by writing
   // what it deployed back to `dev`; since Builder #50 it does not. The Builder
   // records the rolled-back copy as `main` content `dev` does not have (its
-  // sync record), and refuses to deploy that file from the Builder until `dev`
-  // has it too — neither shipping dev's copy over the rollback nor writing the
-  // rollback over dev. ateam_upload_connector reads `dev` directly and has no
+  // sync record), and refuses to deploy the solution from the Builder until
+  // `dev` has it too (its guard walks every file) — neither shipping dev's copy
+  // over the rollback nor writing the rollback over dev. ateam_upload_connector reads `dev` directly and has no
   // such check.
   rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history. '
     + 'Then ateam_build_and_run(solution_id) deploys it, and ateam_github_sync_from_main(solution_id) brings `dev` along. Until then `dev` still holds the rolled-back change: '
-    + 'ateam_redeploy and ateam_patch refuse the rolled-back files and name them, an ateam_github_patch of one of them on `dev` is committed but not copied into the Builder, '
+    + 'ateam_redeploy and ateam_patch refuse to deploy the solution and name the rolled-back files, an ateam_github_patch of one of them on `dev` is committed but not copied into the Builder, '
     + 'and ateam_upload_connector deploys `dev`\'s connector code — the rolled-back change — again.',
   no_git_at_all:
     'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',

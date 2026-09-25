@@ -167,8 +167,12 @@ up from \`${BRANCH_WORKFLOW.write_branch}\`: the tools also copy it into the Bui
 pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed since the two
 last agreed (a Builder save that never reached GitHub), or holds main content \`${BRANCH_WORKFLOW.write_branch}\` lacks (a hotfix
 or rollback a build_and_run deployed). Then the tools leave the Builder's copy alone, and \`ateam_redeploy\` and
-\`ateam_patch\` refuse that file and name it instead of picking a side. (\`ateam_upload_connector\` reads
-\`${BRANCH_WORKFLOW.write_branch}\` directly and has no such check.)
+\`ateam_patch\` refuse to deploy the solution — any skill of it, not only that file's — and name the file instead of
+picking a side. (\`ateam_upload_connector\` reads \`${BRANCH_WORKFLOW.write_branch}\` directly and has no such check.)
+A Builder save that did not reach \`${BRANCH_WORKFLOW.write_branch}\` (held for that reason, or its push failed) stays in the
+Builder and its reply says so (NOT_WRITTEN_TO_GITHUB); until it is placed, \`ateam_build_and_run\` is refused
+(UNPUSHED_BUILDER_CHANGE) rather than overwrite it. \`ateam_redeploy\` writes it to \`${BRANCH_WORKFLOW.write_branch}\`;
+\`ateam_github_pull\` drops it for \`${BRANCH_WORKFLOW.write_branch}\`'s copy.
 
 **First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
 

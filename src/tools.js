@@ -879,7 +879,9 @@ export const tools = [
       "  3. Ship dev → main → ateam_github_promote (merges + auto-tags `prod-YYYY-MM-DD-NNN`)\n" +
       "  4. Deploy main to Core → ateam_build_and_run\n\n" +
       "Whatever you do not pass inline comes from the `main` branch — there is no `ref` parameter. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
-      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.",
+      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.\n\n" +
+      "REFUSED, before anything is saved or deployed (409 UNPUSHED_BUILDER_CHANGE, naming the files), while a solution or skill file it would take from `main` holds a Builder change that no branch has: a Builder save held off `dev` (after a ref:'main' hotfix or a rollback) or one whose push to GitHub failed. Deploying would overwrite it and it would exist nowhere. " +
+      "Place it: ateam_redeploy writes the Builder's copy to `dev` (run ateam_github_sync_from_main first when the file holds a hotfix — ateam_redeploy says so), then ateam_github_promote and deploy again. Or drop it: ateam_github_pull replaces the Builder's copy with `dev`'s.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2219,7 +2221,8 @@ export const tools = [
     name: "ateam_github_pull",
     core: true,
     description:
-      "Deploy a solution FROM its GitHub repo. Reads .ateam/export.json + connector source from the repo and feeds it into the deploy pipeline. Use this to restore a previous version or deploy from GitHub as the source of truth.",
+      "Deploy a solution FROM its GitHub repo. Reads .ateam/export.json + connector source from the repo and feeds it into the deploy pipeline. Use this to restore a previous version or deploy from GitHub as the source of truth. " +
+      "It REPLACES the Builder's copy of each file with the repo's (`dev`), including a Builder change that never reached GitHub — the explicit way to take `dev`'s copy of a file changed on both sides, or to drop such a change. Every other deploy of GitHub content (ateam_build_and_run) refuses to overwrite one.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2288,7 +2291,8 @@ export const tools = [
       "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
       "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
       "After one, run ateam_github_sync_from_main so `dev` has it too. Until `dev` holds the same content, the Builder's copy of that file is `main` content `dev` does not have: " +
-      "ateam_redeploy and ateam_patch refuse to deploy it and name it (they never ship `dev`'s older copy over the hotfix, nor write the hotfix over `dev`), and ateam_build_and_run deploys it from `main`. " +
+      "ateam_redeploy and ateam_patch refuse to deploy the solution — any skill of it, not only that file's — and name the file (they never ship `dev`'s older copy over the hotfix, nor write the hotfix over `dev`), and ateam_build_and_run deploys it from `main`. " +
+      "A Builder save of that file meanwhile stays in the Builder (its reply says NOT_WRITTEN_TO_GITHUB), and ateam_build_and_run is refused (UNPUSHED_BUILDER_CHANGE) until it is placed. " +
       "Connector code has no such check: ateam_upload_connector deploys `dev`'s code, so sync before the next upload of that connector. " +
       "The reply's fs_mirror says what the Builder did with the file (a note when it did NOT copy it: its own copy had a change of its own).",
     inputSchema: {
@@ -4892,7 +4896,7 @@ export const handlers = {
         // The Builder may have left its own copy of the file alone (it had a
         // change the commit did not carry — a hotfix from main, a save that
         // never reached GitHub), or now hold main content dev lacks. Its note
-        // says so and what to do; the redeploy below refuses that file.
+        // says so and what to do; the redeploy below is refused and names it.
         const fsMirror = ghResp?.fs_mirror;
         phases.push({
           phase: "github_write", status: "done", branch: writeBranch,
