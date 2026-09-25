@@ -161,7 +161,10 @@ git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
 
 **${BRANCH_WORKFLOW.the_silent_mistake}**
 
-Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same effect, same branch.
+Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same branch. Either way the
+next iterate deploy (\`ateam_redeploy\`, \`ateam_patch\`, \`ateam_upload_connector\`) picks the change
+up from \`${BRANCH_WORKFLOW.write_branch}\`: the tools also copy it into the Builder at once, and a hand push is
+pulled in by the pre-deploy check.
 
 **First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
 
@@ -171,7 +174,7 @@ Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same ef
 
 ${tools}
 
-**Rule:** prefer \`ateam_patch\` over \`ateam_github_patch\` + \`ateam_build_and_run\` when changing skill definitions — it's one call and always redeploys.
+**Rule:** prefer \`ateam_patch\` over \`ateam_github_patch\` + a deploy when changing skill definitions — it's one call, and it redeploys what it patched. Read its \`redeploy\` phase: a redeploy that failed is reported there, and the edit is kept either way.
 
 ---
 
@@ -257,17 +260,22 @@ function buildToolTable() {
   return [
     "| Task | Tool |",
     "|------|------|",
-    "| Edit connector source code | `ateam_github_patch` / `ateam_github_write` → `ateam_build_and_run(github:true)` |",
+    // It said github_patch → build_and_run(github:true). build_and_run
+    // deploys `main`, so that sequence is refused (MAIN_BEHIND_DEV) or ships
+    // without the edit. Test from dev; ship with promote.
+    "| Edit connector source code | `ateam_github_patch` / `ateam_github_write`, then `ateam_upload_connector(solution_id, connector_id, github:true)` to test it from `dev` |",
     "| Edit skill definition (persona, tools, intents, guardrails) | `ateam_patch(target:\"skill\", skill_id, updates)` |",
     "| Edit solution definition | `ateam_patch(target:\"solution\", updates)` |",
-    "| First deploy / redeploy from GitHub | `ateam_build_and_run(github:true)` |",
+    "| First deploy (with `mcp_store`) / deploy `main` after a promote | `ateam_build_and_run(solution_id)` |",
     "| Run a skill end-to-end | `ateam_test_skill(solution_id, skill_id, message)` |",
     "| Call one connector tool in isolation | `ateam_test_connector(solution_id, connector_id, tool, args)` |",
     "| Inspect deployed state | `ateam_get_solution(solution_id, view: \"definition\"|\"skills\"|\"health\")` |",
     "| Read file from repo | `ateam_github_read(solution_id, path)` |",
-    "| Checkpoint | `ateam_github_promote(solution_id, label)` |",
-    "| Rollback | `ateam_github_rollback(solution_id, tag)` |",
-    "| List checkpoints | `ateam_github_list_versions(solution_id)` |",
+    // promote SHIPS (dev → main); calling it "Checkpoint" is the framing
+    // BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint retires.
+    "| Ship `dev` → `main` | `ateam_github_promote(solution_id)` (`dry_run:true` first shows what would ship) |",
+    "| Rollback `main` | `ateam_github_rollback(solution_id, target)`, then `ateam_github_sync_from_main(solution_id)` |",
+    "| List shipped versions | `ateam_github_list_versions(solution_id)` |",
   ].join("\n");
 }
 
@@ -275,7 +283,7 @@ function buildUniversalPitfalls() {
   return [
     "- **`ateam_test_connector` runs as `_system_service`.** Core strips user-provided `_adas_actor` when you call via the test harness. Use it for connector-level bugs; use `ateam_test_skill` / `ateam_conversation` for per-user-actor flows.",
     "- **`.ateam/export.json` is auto-generated.** Never hand-edit. Deploys read it, so stale copies silently break things.",
-    "- **Prefer `ateam_patch` over `github_patch` + `build_and_run`** for skill-definition edits. One call, guaranteed redeploy, no drift.",
+    "- **Prefer `ateam_patch` over `github_patch` + a deploy** for skill-definition edits. One call that writes `dev` and redeploys what it patched; check its `redeploy` phase, which reports a failed redeploy (the edit is kept).",
     "- **Always refetch dynamic ids.** Corpus ids, job ids, actor ids change. Call `docs.corpus.list` / `ateam_list_solutions` / etc. in the current job — don't reuse ids from memory or previous sessions.",
     "- **MCP tool param names are strict.** `top_k` (not `k`), `corpus_id` (not `corpus`). Passing wrong names silently fails zod validation.",
     "- **Don't count `{ok:false}` as success.** When calling one MCP from another, always check `result.ok` before incrementing a success counter.",

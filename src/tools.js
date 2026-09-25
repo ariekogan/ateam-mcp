@@ -872,13 +872,13 @@ export const tools = [
     name: "ateam_build_and_run",
     core: true,
     description:
-      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → auto-pushes to GitHub.\n\n" +
+      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → on a FIRST deploy (no repo yet) creates the GitHub repo and pushes to it.\n\n" +
       "🌳 DEV/PROD WORKFLOW:\n" +
       "  1. Edit files → ateam_github_patch (writes to `dev` branch by default)\n" +
       "  2. (Optional) Preview what's about to ship → ateam_github_diff\n" +
       "  3. Ship dev → main → ateam_github_promote (merges + auto-tags `prod-YYYY-MM-DD-NNN`)\n" +
       "  4. Deploy main to Core → ateam_build_and_run\n\n" +
-      "This tool ALWAYS deploys the `main` branch — there is no `ref` parameter. To deploy in-progress dev work, first promote it.\n\n" +
+      "Whatever you do not pass inline comes from the `main` branch — there is no `ref` parameter. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
       "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.",
     inputSchema: {
       type: "object",
@@ -1535,11 +1535,11 @@ export const tools = [
     core: true,
     description:
       "Upload connector code to Core and restart — WITHOUT redeploying skills.\n\n" +
-      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved from GitHub. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
+      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
       "Modes:\n" +
       "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
       "  • github:true + files:[]        — GitHub state at `ref` as BASE, your files overlay on top (incoming wins).\n" +
-      "  • files:[] (no github)          — default MERGE with GitHub state at `ref`. Refuses if no GitHub base exists (no silent nuke).\n" +
+      "  • files:[] (no github)          — default MERGE: your files over the GitHub state at `ref`, which is itself laid over the files Core ALREADY runs for this connector. So a file that exists only in the deployed copy SURVIVES this mode. Refuses if no base exists at all (no silent nuke).\n" +
       "  • files:[] + replace:true       — full replace. Wipes connector dir + writes only the provided files. Use deliberately.\n\n" +
       "Multi-file connectors (server.js + dashboard HTML + RN bundle + package/manifest): pass each file with content_base64 (a single-line, escape-safe base64 string) instead of content — so you don't hand-escape ~90KB of HTML/JS/JSON inside one tool call. This is the CANONICAL agent path for a full connector; do NOT hand-roll `curl` against the raw endpoint (that skips connector registration / PAT provisioning).\n\n" +
       "Common traps this design prevents:\n" +
@@ -2528,7 +2528,7 @@ export const tools = [
     description:
       "Roll prod (`main` branch) back to a previous state.\n\n" +
       "ADDITIVE — does NOT destroy history. Creates a new commit on top of main whose tree matches the target's tree. The history of everything between target and current main is preserved (you can roll back the rollback).\n\n" +
-      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run (deploys the reverted state). ${BRANCH_WORKFLOW.legacy_tag_note}`,
+      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run(solution_id) (deploys the reverted state) → 4) ateam_github_sync_from_main(solution_id), so \`dev\` carries it too: the iterate tools deploy from \`dev\`. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3540,21 +3540,27 @@ export const handlers = {
         "connectors/{connector-id}/server.js": "Connector MCP server code",
         "connectors/{connector-id}/package.json": "Connector dependencies",
       },
-      branch: `${BRANCH_WORKFLOW.write_branch} for every write; ${BRANCH_WORKFLOW.deploy_branch} for every deploy. ${BRANCH_WORKFLOW.promote_tool} is the ONLY thing that moves work from one to the other.`,
+      // It said "main for every deploy" and "promote is the ONLY thing that
+      // moves work", in the same response as the iterate loop that deploys dev
+      // with no promote. Rendered from the owner now, like `branching`.
+      branch: `${BRANCH_WORKFLOW.write_side} ${BRANCH_WORKFLOW.deploy_side}`,
       checkpoints: `${BRANCH_WORKFLOW.tag_format} tags are created automatically by each promote. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint}`,
       iteration_workflow: {
         the_loop: BRANCH_WORKFLOW.loop,
-        code_changes: `ateam_github_patch (ONE FILE PER CALL) → ${BRANCH_WORKFLOW.promote_tool}(solution_id) → ateam_build_and_run()`,
-        definition_changes: `ateam_patch → ${BRANCH_WORKFLOW.promote_tool}(solution_id) when you want it in production`,
+        // ITERATE, THEN SHIP. code_changes was the ship loop under the label
+        // "iteration" (github_patch → promote → build_and_run), the defect
+        // developer_loop step 4 was fixed for.
+        code_changes: `ateam_github_patch (ONE FILE PER CALL) → ateam_upload_connector(solution_id, connector_id, github: true) deploys it from \`${BRANCH_WORKFLOW.write_branch}\` to test. Ship when it is right: ${BRANCH_WORKFLOW.promote_tool}(solution_id) → ateam_build_and_run(solution_id).`,
+        definition_changes: `ateam_patch writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call → test → ${BRANCH_WORKFLOW.promote_tool}(solution_id) when you want it in production`,
         first_deploy: "Must include mcp_store — this creates the GitHub repo",
-        after_first_deploy: "NEVER pass mcp_store again. Write files via ateam_github_patch, promote, then ateam_build_and_run() auto-detects the repo.",
+        after_first_deploy: `NEVER pass mcp_store again. Write files via ateam_github_patch and test them with ateam_upload_connector; to ship, promote, then ateam_build_and_run(solution_id) auto-detects the repo and deploys \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
         do_not_skip_promote: BRANCH_WORKFLOW.the_silent_mistake,
       },
       when_to_use_what: {
         ateam_github_write: `Write/create connector files on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
         ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
         ateam_patch: `Edit skill definitions (intents, tools, policy) — auto-pushes to \`${BRANCH_WORKFLOW.write_branch}\`. Promote when you want it in production.`,
-        "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
+        "ateam_build_and_run()": `Deploy \`${BRANCH_WORKFLOW.deploy_branch}\` (after a promote) — auto-pulls from GitHub if the repo exists. No need to pass mcp_store or github flag.`,
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
         ateam_github_promote: `SHIP ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} dry_run:true previews what would ship.`,
         ateam_github_rollback: BRANCH_WORKFLOW.rollback,
@@ -3709,7 +3715,10 @@ export const handlers = {
         "Explain Skill vs Solution vs Connector in plain words before building",
         "Use ateam_build_and_run for the full lifecycle (validates automatically)",
         "Use ateam_patch for skill/solution definition changes (updates + redeploys automatically)",
-        "Use ateam_github_patch + ateam_build_and_run(github:true) for connector code changes after first deploy",
+        // It said ateam_github_patch + ateam_build_and_run(github:true), four
+        // lines above the rule below. build_and_run deploys `main`, so it
+        // either refuses (MAIN_BEHIND_DEV) or deploys without the patch.
+        "Use ateam_github_patch + ateam_upload_connector(solution_id, connector_id, github:true) for connector code changes after first deploy; promote + ateam_build_and_run(solution_id) only to ship",
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear — one at a time, with choices",
         "Deliver the FULL ask, including any requested UI/widget; stage only with the user's agreement",
@@ -4350,9 +4359,12 @@ export const handlers = {
         }
         try {
           // THE MERGE BASE IS THE BRANCH THESE FILES CAME FROM. The upload
-          // merges `files` over the connector's GitHub state at `ref`, which
-          // defaults to `dev`. For files pulled from `main` that let dev-only
-          // files ride into a run that says it deploys main. An inline
+          // merges `files` over the connector's GitHub state at `ref` (default
+          // `dev`), laid over the files Core already runs. With the default,
+          // files that exist only on dev rode into a run that says it deploys
+          // main. ref:main keeps those out. It does NOT remove a file that is
+          // already running in Core (the deployed copy is the floor of the
+          // merge), e.g. one a dev iteration uploaded earlier. An inline
           // mcp_store keeps the default: those files are the caller's
           // iteration, and dev is where iteration lives.
           const uploadResult = await post(
@@ -6628,7 +6640,10 @@ export const handlers = {
         ok: false,
         error: lastErr.message,
         ...(notFound && {
-          hint: "Skill not found in Builder storage. Edit the skill on GitHub with ateam_github_patch(solution_id, path: 'skills/<skill-id>/skill.json', search: '...', replace: '...'), then use ateam_build_and_run(solution_id, github: true) or ask the platform operator to deploy the single skill.",
+          // It said "then use ateam_build_and_run(solution_id, github: true)",
+          // which deploys `main`: without a promote it is refused
+          // (MAIN_BEHIND_DEV) or ships main's copy without the edit.
+          hint: "Skill not found in Builder storage. Write it to the repo with ateam_github_write(solution_id, path: 'skills/<skill-id>/skill.json', content) (or ateam_github_patch for an edit), which also puts it in the Builder, then retry this ateam_redeploy. To ship it: ateam_github_promote, then ateam_build_and_run(solution_id).",
         }),
         ...(isTimeout && {
           hint: "Redeploy timed out even after async polling (15min). Use ateam_redeploy(solution_id, skill_id: '<specific-skill>') to redeploy one skill at a time.",

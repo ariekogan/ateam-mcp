@@ -171,7 +171,12 @@ check("promote does not advertise the retired safe-* tag name", safeTag.length =
 console.log("the real loop is stated");
 const joined = ALL.map((s) => s.text).join("\n");
 check("it names dev as where writes land", /lands? on `?dev`?|writes? (?:go to|land on) `?dev`?/i.test(joined));
-check("it names promote as the only thing that moves work to main", /ONLY ateam_github_promote|only .{0,20}promote .{0,20}writes it/i.test(joined));
+// It checked for "ONLY ateam_github_promote writes it". That claim was false:
+// ateam_github_rollback writes main, and so does any write that names
+// ref:'main' (ateam_github_patch's own emergency-hotfix path). The true fact is
+// that nothing writes main BY DEFAULT, and promote is how work gets there.
+check("it names promote as how work reaches main, and nothing writes main by default",
+      /nothing writes it by default/i.test(joined) && /Work reaches it through ateam_github_promote/.test(joined));
 check("it says build_and_run deploys MAIN", /build_and_run deploys MAIN|deploys `?main`?/i.test(joined));
 check("it warns that skipping promote is silent", /NOT deployed|not live until|is NOT in this deploy|nothing you wrote is running/i.test(joined));
 
@@ -293,10 +298,15 @@ console.log("the iterate loop and the ship loop say only true things about each 
 // #19's first cut added the iterate loop and left the old sentences beside it.
 // The rendered CLAUDE.md said "Nothing on `dev` is live" a few lines above
 // "These deploy to Core from `dev`". Every fact below was checked against the
-// Builder: ateam_patch(target:"skill") and ateam_redeploy read the skill from
-// `dev` (the skill redeploy route, resolveBranch iterative); target:"solution"
-// runs the BULK redeploy of every skill; ateam_upload_connector(github:true)
-// deploys the connector's `dev` files and leaves skills alone.
+// Builder. ateam_patch and ateam_redeploy post {async:true}, and the skill
+// redeploy route's async exit deploys the BUILDER'S copy of the skill (the
+// resolveBranch-iterative read of `dev` is on its sync exit only). That copy
+// is `dev` because every Builder save pushes to dev, and because the
+// pre-deploy check heals it from dev first: a mirrored deploy keeps GitHub's
+// updated_at (Builder #50, gitSync.stampFor), so a hand push to dev wins that
+// heal. target:"solution" runs the BULK redeploy of every skill;
+// ateam_upload_connector(github:true) deploys the connector's `dev` files and
+// leaves skills alone.
 const everyText = [...ALL.map((s) => s.text), AGENT_DOC].join("\n");
 check("nobody says `dev` is not live — the iterate tools deploy it",
       !/Nothing on `?dev`? is live/i.test(everyText));
@@ -330,6 +340,53 @@ check("  and the ship step is where promote → build_and_run lives",
       dl[5].tools.includes(BRANCH_WORKFLOW.promote_tool) && dl[5].tools.includes("ateam_build_and_run"));
 check("the behaviour contract does not call an ateam_patch \"not live yet\"",
       !ALL.some((s) => /After any write, say the change is not live/i.test(s.text)));
+
+console.log("no claim in the same response contradicts the iterate loop (second review of #19)");
+// Each of these was in the SAME bootstrap result, or the same rendered
+// CLAUDE.md, as the iterate loop, and this file passed with all of them in it.
+const CONTRADICTIONS = [
+  { re: /for every deploy/i, why: '"main for every deploy" (the iterate tools deploy dev)' },
+  { re: /is the ONLY thing that moves work/i, why: '"promote is the ONLY thing that moves work"' },
+  { re: /ONLY ateam_github_promote writes/i, why: '"ONLY promote writes main" (rollback and ref:main write it too)' },
+  { re: /Nothing reaches `?main`? without a promote/i, why: '"nothing reaches main without a promote"' },
+  { re: /github_patch[^.|]{0,60}build_and_run\(github:\s*true\)/i, why: "github_patch → build_and_run(github:true) (refused, or ships main without the patch)" },
+  { re: /ALWAYS deploys the `?main`? branch/i, why: '"ALWAYS deploys main" (inline parts deploy as sent)' },
+  { re: /auto-pushes to GitHub/i, why: '"auto-pushes to GitHub" (only a first deploy creates and pushes the repo)' },
+  { re: /\bCheckpoint \|/, why: 'the tool table calling promote "Checkpoint"' },
+  { re: /guaranteed redeploy|always redeploys/i, why: '"ateam_patch always redeploys" (its redeploy can fail; the phase says so)' },
+];
+const SURFACES = [...ALL.map((s) => ({ where: s.path, text: s.text })),
+  ...TOOL_STRINGS.map((s) => ({ where: `tools${s.path}`, text: s.text })),
+  { where: "CLAUDE.md", text: AGENT_DOC }];
+for (const { re, why } of CONTRADICTIONS) {
+  const hits = SURFACES.filter((x) => re.test(x.text));
+  check(`${why} appears nowhere`, hits.length === 0, hits.map((h) => h.where).join(", "));
+}
+check("github_tools.branch renders from the owner (it restated the model, falsely)",
+      boot.github_tools.branch === `${BRANCH_WORKFLOW.write_side} ${BRANCH_WORKFLOW.deploy_side}`);
+check("iteration_workflow.code_changes tests from dev BEFORE the ship step",
+      /upload_connector[\s\S]*Ship[\s\S]*promote/.test(boot.github_tools.iteration_workflow.code_changes),
+      boot.github_tools.iteration_workflow.code_changes);
+check("the behaviour contract's connector rule is the iterate rule",
+      boot.assistant_behavior_contract.always.some((l) => /ateam_github_patch \+ ateam_upload_connector/.test(l)));
+check("the silent mistake is a sentence on its own (developer_loop step 6 renders it after another one)",
+      /^The silent mistake is /.test(BRANCH_WORKFLOW.the_silent_mistake));
+check("  and does not promise a refusal every Builder gives",
+      /older Builder deploys it and reports success/.test(BRANCH_WORKFLOW.the_silent_mistake));
+check("ateam_redeploy is described as the Builder's copy, refreshed from dev — not as a read of dev",
+      BRANCH_WORKFLOW.iterate_without_promote.some((l) => /^ateam_redeploy/.test(l) && /Builder's copy/.test(l) && /refreshes from `dev`/.test(l)));
+check("rollback says to bring dev along (the iterate tools deploy dev)",
+      /ateam_github_sync_from_main/.test(BRANCH_WORKFLOW.rollback)
+      && tools.find((t) => t.name === "ateam_github_rollback").description.includes("ateam_github_sync_from_main"));
+check("the upload description names the deployed floor of the merge",
+      /files Core ALREADY runs/.test(tools.find((t) => t.name === "ateam_upload_connector").description));
+{
+  // A handler RESPONSE, not bootstrap: ateam_redeploy's 404 hint told the
+  // agent to github_patch and then build_and_run(solution_id, github:true).
+  const at = SRC.indexOf("Skill not found in Builder storage.");
+  check("ateam_redeploy's not-found hint does not route through build_and_run(github:true)",
+        at > 0 && !/build_and_run\(solution_id, github: ?true\)/.test(SRC.slice(at, at + 400)));
+}
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
