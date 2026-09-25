@@ -368,6 +368,23 @@ test("prod single-skill (ok:false, no error): the Builder's own sentence is quot
   assert.equal(r.isError, true);
 });
 
+test("ateam_patch (skill target) quotes the same prod single-skill sentence in its redeploy phase", async () => {
+  // It called redeployVerdict without {single}, so the phase recorded
+  // status:"error" and no reason while the reason sat in the job.
+  const { out } = await patchSkill({
+    "POST /deploy/solutions/sol/skills/k/redeploy": { body: { ok: true, async: true, job_id: "job-p-prod" } },
+    "GET /deploy/jobs/job-p-prod": { body: finishedJob("job-p-prod", { single: true }, {
+      ok: false, skill_id: "k", status: "deployed_with_errors",
+      message: 'Skill "k" tool import PARTIAL: connector weather-mcp contributed no tools',
+    }) },
+  });
+  const phase = out.phases.find((p) => p.phase === "redeploy");
+  assert.equal(phase?.status, "error");
+  assert.equal(phase.error, 'Skill "k" tool import PARTIAL: connector weather-mcp contributed no tools',
+    `the redeploy phase gave no reason: ${JSON.stringify(phase)}`);
+  assert.equal(out.ok, false);
+});
+
 test("a BULK job's leftover message is still never quoted as the reason", async () => {
   const { out } = await redeploy({}, {
     "POST /deploy/solutions/sol/redeploy": { body: { ok: true, async: true, job_id: "job-bulk-false" } },

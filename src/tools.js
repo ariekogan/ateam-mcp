@@ -4949,12 +4949,15 @@ export const handlers = {
       // The SAME verdict ateam_redeploy reports. This was its own copy,
       // `ok === false ? "error" : "done"`, so a job that crashed (no ok at all)
       // read as a completed rebuild, and a degraded one as a clean one.
-      const rd = redeployVerdict(redeployResult);
+      // `single` for a skill target, as ateam_redeploy passes it: a prod
+      // Builder's single-skill job states its reason only in `message`, and
+      // without it this phase said nothing about why.
+      const rd = redeployVerdict(redeployResult, { single: target === "skill" && Boolean(skill_id) });
       phases.push({
         phase: "redeploy",
         status: rd.failed ? "error" : "done",
-        ...(rd.failed && redeployResult?.error && { error: redeployResult.error }),
-        ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome }),
+        ...(rd.failed && rd.reason && { error: rd.reason }),
+        ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome, ...(rd.reason && { reason: rd.reason }) }),
       });
     } catch (err) {
       // Partial success: patch is saved to GitHub, only redeploy failed.
