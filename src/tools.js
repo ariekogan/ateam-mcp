@@ -100,12 +100,66 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   };
 }
 
-// The redeploy outcomes that mean "came up clean". An allow-list on purpose:
-// an outcome this code has never heard of is reported as degraded, never as a
-// success. 'deployed' is the Builder's clean verdict; 'done' is only the job
-// LIFECYCLE word, which an older Builder leaves as the sole `status` on the
-// async path (it sends no deploy_status) — alone it says nothing was wrong.
-const CLEAN_REDEPLOY_OUTCOMES = new Set(["deployed", "done"]);
+// ─── The redeploy verdict ───────────────────────────────────────────
+//
+// ONE answer to "did this redeploy work?" — ateam_redeploy's summary and
+// ateam_patch's rebuild phase both ask it — on every path (async job, sync
+// body, poll timeout) and against every Builder in service:
+//
+//   Builder #44+ (dev)   the async job carries the deploy's own outcome as
+//                        `deploy_status`; `status` is only the job lifecycle.
+//   Builder c6c20d3      (mac1 dev) normalizeSkillRedeploy, but NO
+//                        deploy_status — the job runner overwrites the
+//                        outcome with the lifecycle word 'done'.
+//   Builder 2e8cab5      (prod) no normaliser: a degraded skill arrives as
+//                        ok:false, lifecycle 'failed'.
+//
+// Three verdicts: failed | degraded (reached Core, did not come up clean) | clean.
+
+// The words startAsyncDeployJob writes into `status` OVER the deploy's own:
+// they say the JOB stopped, never what the deploy decided.
+const JOB_LIFECYCLE_STATUSES = new Set(["in_progress", "done", "failed"]);
+
+// The stated outcomes that mean "came up clean". An allow-list on purpose: an
+// outcome this code has never heard of is degraded, never a success.
+const CLEAN_REDEPLOY_OUTCOMES = new Set(["deployed"]);
+
+/**
+ * @param {object} result  a finished job entry, a sync body, or pollDeployJob's timeout object
+ * @returns {{ failed: boolean, degraded: boolean, outcome: string|undefined }}
+ */
+function redeployVerdict(result) {
+  const r = result && typeof result === "object" ? result : {};
+  // What the deploy itself STATED. Never a lifecycle word.
+  const stated = r.deploy_status ?? (JOB_LIFECYCLE_STATUSES.has(r.status) ? undefined : r.status);
+
+  // 1. FAILED — decided first. A success is STATED: ok === true. A job whose
+  //    runFn THREW (the Builder answered an HTML 502, so resp.json() threw; or
+  //    the 300s AbortSignal fired) is written as {status:'failed', error} with
+  //    NO ok key and the progress text still standing — `ok !== false` read
+  //    that as "reached Core WITH ERRORS". Lifecycle 'failed' alone is not the
+  //    test: pollDeployJob's timeout is ok:false with no status at all.
+  if (r.ok !== true) return { failed: true, degraded: false, outcome: stated ?? "failed" };
+
+  // 2. DEGRADED. With no stated outcome (a Builder before #44, async path),
+  //    re-derive it by the Builder's OWN rule — deploySkillToADAS:
+  //    `degraded = uiHardFail || importBad`, importBad being
+  //    tool_import.verdict !== 'SUCCESS'. uiHardFail cannot occur on a redeploy:
+  //    a skill-only deploy skips connector sync, leaving no healthy connector to
+  //    run UI verification against; a bulk one reports a degraded skill as
+  //    failed (ok:false). So tool_import IS the verdict on this path.
+  //    NOT verification.needs_attention: the Builder sets it on EVERY deploy
+  //    (it defaults hasGetSkillDefinition to false, and Core's deploy-mcp has
+  //    not returned that field since b6a83a035) — it would call every
+  //    redeploy degraded.
+  const importVerdict = r.verification?.tool_import?.verdict;
+  const inferred = importVerdict == null ? undefined
+    : importVerdict === "SUCCESS" ? "deployed" : "deployed_with_errors";
+  const outcome = stated ?? inferred;
+  const degraded = (Number(r.failed) || 0) > 0
+    || (outcome != null && !CLEAN_REDEPLOY_OUTCOMES.has(outcome));
+  return { failed: false, degraded, outcome: outcome ?? (degraded ? "deployed_with_errors" : undefined) };
+}
 
 /**
  * Is GitHub connected for this tenant? ONE answer to one question: ateam_patch
@@ -4756,7 +4810,16 @@ export const handlers = {
       redeployResult = (kicked?.async && kicked.job_id)
         ? await pollDeployJob(kicked.job_id, sid, { label: skill_id ? `redeploy-skill ${skill_id}` : "redeploy-bulk", maxMs: 15 * 60_000, intervalMs: 2000 })
         : kicked;
-      phases.push({ phase: "redeploy", status: redeployResult?.ok === false ? "error" : "done" });
+      // The SAME verdict ateam_redeploy reports. This was its own copy,
+      // `ok === false ? "error" : "done"`, so a job that crashed (no ok at all)
+      // read as a completed rebuild, and a degraded one as a clean one.
+      const rd = redeployVerdict(redeployResult);
+      phases.push({
+        phase: "redeploy",
+        status: rd.failed ? "error" : "done",
+        ...(rd.failed && redeployResult?.error && { error: redeployResult.error }),
+        ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome }),
+      });
     } catch (err) {
       // Partial success: patch is saved to GitHub, only redeploy failed.
       // Return ok:true so the agent doesn't think the patch was lost.
@@ -4783,7 +4846,13 @@ export const handlers = {
     }
 
     const redeployOk = phases.some(p => p.phase === "redeploy" && p.status === "done");
+    const redeployDegraded = phases.some(p => p.phase === "redeploy" && p.code === "DEPLOYED_WITH_ERRORS");
     const store = isLocal ? "Builder store (local)" : "GitHub";
+    // The rebuild RAN either way — the edit is live — so a degraded one keeps
+    // ok, but it is not a ✅.
+    const redeployedLine = redeployDegraded
+      ? `⚠️ Patched on ${store} + redeployed WITH ERRORS — it reached Core but did not come up clean; see redeploy.verification.`
+      : `✅ Patched on ${store} + redeployed.`;
 
     // Widget health — if the redeploy landed and the solution declares UI
     // plugins, verify each renders (Core discovered it + has a render block).
@@ -4897,8 +4966,8 @@ export const handlers = {
       ...(test_result && { test_result }),
       _status: (redeployOk
         ? (widget_health && !widget_health.ok
-            ? `✅ Patched on ${store} + redeployed. ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
-            : `✅ Patched on ${store} + redeployed.`)
+            ? `${redeployedLine} ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
+            : redeployedLine)
         : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
@@ -6443,69 +6512,54 @@ export const handlers = {
       };
     }
     if (!result) result = { ok: false, error: 'Redeploy returned no result' };
+    const verdict = redeployVerdict(result);
     // Pull through the underlying error/message instead of fabricating "0/0/0
     // success-shaped" output. Old wrapper hid backend errors (e.g. validator
     // failures from sentinel files in user repos) and reported `total: 0` with
     // no clue why — the agent was left thinking redeploy was a no-op when in
     // fact it was a hard failure.
-    const failedCount = !result.ok
+    const failedCount = verdict.failed
       ? (result.failed ?? (result.skills?.length ? result.skills.filter(s => s.ok === false).length : 1))
       : (result.failed || 0);
-    const deployedCount = result.deployed ?? (result.ok ? (skill_id ? 1 : (result.skills?.filter(s => s.ok !== false).length || 0)) : 0);
+    const deployedCount = result.deployed ?? (verdict.failed ? 0 : (skill_id ? 1 : (result.skills?.filter(s => s.ok !== false).length || 0)));
     const totalCount = result.total ?? (deployedCount + failedCount);
 
-    // THE OUTCOME, NOT THE TRANSPORT. On the async path the job entry's
-    // `status` is its LIFECYCLE ('done' | 'failed') — the Builder overwrites the
-    // deploy's own status with it so pollers stop — and the outcome travels as
-    // `deploy_status` ('deployed' | 'deployed_with_errors'). An older Builder
-    // sends no deploy_status; only then is `status` the fallback.
-    const outcome = result.deploy_status ?? result.status;
-    // Anything but a clean verdict is degraded — including a status this code
-    // has never heard of. Never "successfully" unless the deploy said so.
-    const degraded = result.ok !== false
-      && (failedCount > 0 || (outcome != null && !CLEAN_REDEPLOY_OUTCOMES.has(outcome)));
-
     const out = {
-      ok: result.ok,
+      // The verdict's, not result.ok: a crashed job has no ok at all, and
+      // passing `undefined` through is what kept isError off it.
+      ok: !verdict.failed,
       solution_id,
       ...(skill_id && { skill_id }),
       deployed: deployedCount,
       failed: failedCount,
       total: totalCount,
       skills: result.skills || [],
-      // PASS THROUGH what the Builder decided: `status` is the outcome above
+      // PASS THROUGH what the Builder decided: `status` is the deploy's OUTCOME
       // (deployed_with_errors is a real outcome, neither a clean success nor a
-      // failure) and `verification` carries why.
-      ...(outcome && { status: outcome }),
+      // failure) — never the job lifecycle word — and `verification` carries why.
+      ...(verdict.outcome && { status: verdict.outcome }),
       ...(result.verification && { verification: result.verification }),
       // Machine-readable, so a caller (the ateam-proxy connector) does not have
       // to parse the sentence below. Not isError: the Builder's ok:true stands.
-      ...(degraded && { code: "DEPLOYED_WITH_ERRORS" }),
+      ...(verdict.degraded && { code: "DEPLOYED_WITH_ERRORS" }),
       // Surface the underlying error when the request failed — the most
       // common cause is a validator failure (e.g. broken connector source
       // in the GitHub repo), and hiding it makes diagnosis impossible.
-      ...(!result.ok && result.error && { error: result.error }),
-      ...(!result.ok && result.details && { details: result.details }),
-      ...(!result.ok && result.hint && { hint: result.hint }),
+      ...(verdict.failed && result.error && { error: result.error }),
+      ...(verdict.failed && result.details && { details: result.details }),
+      ...(verdict.failed && result.hint && { hint: result.hint }),
       // Branches on the VERDICT, not on `ok` alone — `ok` is true for a deploy
       // that landed with errors, and this sentence is what an agent reads first.
-      message: degraded
-        ? (skill_id
-            // A single-skill result's `message` is the Builder's own verdict
-            // sentence (normalizeSkillRedeploy always writes one). A BULK job's
-            // is not: its runFn returns none, so the job entry still carries
-            // the progress text ("Calling Builder bulk-redeploy...") — never
-            // quote that as a reason.
-            ? `Re-deployed skill "${skill_id}" WITH ERRORS (status: ${outcome ?? "unknown"}) — it reached Core but did not come up clean.`
-              + (result.message ? ` Builder: ${result.message}` : "")
-              + " See verification."
-            : `Re-deployed ${deployedCount} of ${totalCount} skill(s) WITH ERRORS (${failedCount} failed`
-              + (outcome ? `, status: ${outcome}` : "") + ") — see skills[] and verification.")
-        : result.ok
-        ? skill_id
-          ? `Re-deployed skill "${skill_id}" successfully.`
-          : `Re-deployed ${deployedCount} skill(s) successfully.`
-        : (result.error
+      //
+      // `result.message` is quoted in ONE place: a degraded single skill. A
+      // degraded verdict needs ok === true, i.e. the runFn RETURNED, and every
+      // Builder's single-skill runFn result carries the deploy's own sentence
+      // (the normaliser always writes one; prod spreads deploySkillToADAS's,
+      // which always has one). Everywhere else the job entry's message can be
+      // the leftover PROGRESS text — a bulk runFn returns none, and a runFn
+      // that threw returned nothing — so it is never the verdict.
+      message: verdict.failed
+        ? (result.error
             ? `Re-deploy failed: ${result.error}${result.hint ? ` — ${result.hint}` : ''}`
             // "Check skills array" was the advice given WHILE the skills array
             // was empty — the async branch never populated it. Say what is
@@ -6514,12 +6568,22 @@ export const handlers = {
                 ? `Re-deploy had ${failedCount} failure(s) — see skills[].`
                 : `Re-deploy reported ${failedCount} failure(s) but named no skill and gave no reason. `
                   + `That is a reporting fault, not necessarily a deploy fault: check ateam_get_solution(view:"status") `
-                  + `before redeploying, in case the skill actually landed.`)),
+                  + `before redeploying, in case the skill actually landed.`))
+        : verdict.degraded
+        ? (skill_id
+            ? `Re-deployed skill "${skill_id}" WITH ERRORS (status: ${verdict.outcome}) — it reached Core but did not come up clean.`
+              + (result.message ? ` Builder: ${result.message}` : "")
+              + " See verification."
+            : `Re-deployed ${deployedCount} of ${totalCount} skill(s) WITH ERRORS (${failedCount} failed`
+              + `, status: ${verdict.outcome}) — see skills[] and verification.`)
+        : skill_id
+          ? `Re-deployed skill "${skill_id}" successfully.`
+          : `Re-deployed ${deployedCount} skill(s) successfully.`,
     };
     // If the deploy landed and the solution declares widgets, verify each one
     // actually renders (discovered by Core + has a render block). A silently
     // non-rendering widget is a common, hard-to-notice failure — surface it here.
-    if (result.ok) {
+    if (!verdict.failed) {
       try {
         const wh = await verifyWidgetHealth(solution_id, sid);
         if (wh) {
