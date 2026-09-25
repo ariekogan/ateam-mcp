@@ -75,6 +75,19 @@ check(
   brokenPointers.length === 0
 );
 
+// ── A topic nobody is told about is a topic nobody asks for ────────────────
+// The enum says what may be requested; the description is the only place an
+// agent learns what each topic IS. 360fb78 added five topics to the enum and
+// none to the description — and seven more had been undescribed since long
+// before. Read from the REAL tool object, not from the source text.
+const { tools: TOOL_LIST } = await import("../src/tools.js");
+const specTool = TOOL_LIST.find((t) => t.name === "ateam_get_spec");
+const topicSchema = specTool?.inputSchema?.properties?.topic;
+check("the live get_spec topic schema was found", Array.isArray(topicSchema?.enum) && topicSchema.enum.length > 5);
+const undescribed = (topicSchema?.enum || []).filter((t) => !topicSchema.description.includes(`'${t}' =`));
+check(`every enum topic is described${undescribed.length ? ` — undescribed: ${undescribed.join(", ")}` : ""}`,
+  undescribed.length === 0);
+
 // The device matrix is the answer to "can the phone do X". It is reachable, or
 // a builder is back to reading whichever topic happens to mention the camera.
 check("the generated device capability matrix is reachable", enumValues.includes("device-capabilities"));
@@ -184,6 +197,62 @@ if (typeof formatResultForTest !== "function") {
   const small = formatResultForTest({ topic: "enums", a: 1 }, "ateam_get_spec");
   check("a small spec response is passed through unchanged",
     JSON.parse(small).a === 1 && JSON.parse(small)._truncation === undefined);
+
+  // ── THE CAP IS A CEILING, WHATEVER THE SHAPE (754f2b2111) ──
+  // 360fb78 replaced the old `.slice(0, MAX_RESPONSE_CHARS)` with a budget
+  // check that charged 2 chars for a _truncation sentence of hundreds, ran
+  // BEFORE the partial-array wrapper was substituted, never considered a
+  // STRING section, and listed every omitted id. The one fixture above
+  // happened to fit. These are the shapes that did not.
+  const CAP = 50_000;
+  const shapes = {
+    "1,000 small entries": { topic: "capabilities", questions: Array.from({ length: 1000 }, (_, i) => ({ id: `e${i}`, body: "x".repeat(40) })) },
+    "60 entries just over budget": { topic: "capabilities", questions: Array.from({ length: 60 }, (_, i) => ({ id: `e${i}`, body: "x".repeat(900) })) },
+    "one 300KB string section": { topic: "sdk", guide: "y".repeat(300_000) },
+    "200,000 id-only entries": { topic: "capabilities", questions: Array.from({ length: 200_000 }, (_, i) => ({ id: `e${i}` })) },
+    "40 medium sections": { topic: "skill", ...Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`s${i}`, { text: "z".repeat(2_000) }])) },
+    // No single section is worth stubbing — only an index-only answer fits.
+    "3,000 small string sections": { topic: "enums", ...Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`key_${i}`, "v".repeat(30)])) },
+  };
+  for (const [label, shape] of Object.entries(shapes)) {
+    const t0 = Date.now();
+    const s = formatResultForTest(shape, "ateam_get_spec");
+    let ok = null; try { ok = JSON.parse(s); } catch { /* stays null */ }
+    check(`${label}: ≤ ${CAP.toLocaleString()} chars (${s.length.toLocaleString()}), valid JSON, ${Date.now() - t0}ms`,
+      s.length <= CAP && ok !== null && Date.now() - t0 < 5_000);
+    if (label === "one 300KB string section" && ok) {
+      check("  the oversized STRING section is indexed, not returned whole",
+        typeof ok.guide === "object" && /guide/.test(ok._truncation || ""));
+    }
+    // The index-only backstop is for documents nothing else can shrink. An
+    // array that can be partially included must be — a budget that miscounts
+    // would otherwise hide behind the backstop and still "pass" the cap.
+    if (Array.isArray(shape.questions) && ok) {
+      check("  and it still carries whole entries, not just an index",
+        (ok.questions?.included?.length || 0) > 0);
+    }
+  }
+
+  // ── THE INDEX IS TOTAL (998c07488a) ──
+  // Omitted entries with no id/q/name used to be dropped from not_included_ids
+  // by `.filter(Boolean)` — while the document said "the rest are indexed
+  // below" over an EMPTY array. The union check above passes only because its
+  // fixture gives every entry an `id`.
+  const idless = formatResultForTest({
+    topic: "capabilities",
+    questions: Array.from({ length: 20 }, (_, i) => ({ question: `q${i}?`, body: "w".repeat(4000) })),
+  }, "ateam_get_spec");
+  const iq = JSON.parse(idless).questions;
+  check(`id-less entries: included + indexed = all 20 (${iq?.included?.length} + ${iq?.not_included_ids?.length})`,
+    (iq?.included?.length || 0) + (iq?.not_included_ids?.length || 0) === 20
+      && iq?.not_included_count === 20 - (iq?.included?.length || 0));
+
+  // A bounded index still ADDS UP: the count is exact even when the list of
+  // names is capped.
+  const many = JSON.parse(formatResultForTest(shapes["200,000 id-only entries"], "ateam_get_spec")).questions;
+  check("a capped index still states the exact omitted count",
+    many && typeof many.not_included_count === "number"
+      && (many.included?.length || 0) + many.not_included_count === 200_000);
 }
 
 // ── The two lists must match the SERVER, not just each other ────────────────

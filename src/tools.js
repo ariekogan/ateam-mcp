@@ -677,7 +677,7 @@ export const tools = [
           type: "string",
           enum: ["capabilities", "realizations", "overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "host-contract", "platform-connectors", "platform-truth", "sdk", "workflows", "monitoring"],
           description:
-            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
+            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'mobile-connector' = building functional connectors (background services) for ateam-mobile that use device capabilities through the Native Bridge SDK. 'actor-storage' = per-actor storage (dev-preview): a per-(tenant, actor, skill) SQLite database served by the actorstore-mcp platform connector — read this instead of hand-rolling per-user isolation in a connector. 'consumer-roles' = role-based access for your solution's END-USERS: you declare the config, the platform resolves and enforces one RoleProfile per request (roles decide WHO may act; actor-storage decides WHOSE data they touch). 'triggers' = the ONLY way a skill acts proactively — on a schedule or an event, with no user message; read before designing anything that must happen by itself. 'sub-agent' = sub-agents are a TOOL CALL (sys.callAiWithTools with a curated toolNames set), not a definition-level construct; caveats stated inline. 'voice' = the voice channel: phone (Twilio) and web/mobile callers reach the SAME skill runtime as chat — what you control (solution.voice, routing.voice.default_skill, a per-skill voice block, ateam_test_voice) and what you do not. 'voice-native' = the exception to that model: a `voice_native` block puts a skill inside the live audio loop (persona layer, one server skill tool, plus local device tools), with the boundaries that come with it. 'platform-connectors' = the built-in platform connectors (memory, browser, gmail, whatsapp, …) with their LIVE tool schemas and the inter-connector calling pattern — read before writing a connector that duplicates one. 'sdk' = the @ateam/sdk runtime API reference (platform, context, memory, progress, log, llm) for custom connector and skill code. 'host-contract' = the normative boundary between a host shell (mobile app, web shell, kiosk, watch) and the solutions it renders: ownership matrix, forbidden host behaviours, host capability allow-list — read when reviewing a host or designing a portable solution. 'platform-truth' = does this deployment's published sys.* tools and platform connectors agree with what the RUNNING Core exposes (including planner visibility)? Answers agrees:null when Core cannot be reached, never silence. 'workflows' = the Builder's step-by-step state machines for building skills and solutions (the same document ateam_get_workflows returns). 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
         section: {
           type: "string",
@@ -6662,65 +6662,9 @@ function summarizeLargeResult(result, toolName) {
   //
   // Sections are dropped largest-first, each replaced by a stub that says what
   // it was and how to fetch it, until the whole thing fits. Valid JSON, and
-  // nothing vanishes silently.
+  // nothing vanishes silently — see summarizeSpecResult.
   if (toolName === "ateam_get_spec" && result && typeof result === "object" && !Array.isArray(result)) {
-    const out = { ...result };
-    const omitted = [];
-    const sizeOf = (v) => JSON.stringify(v ?? null).length;
-    const fits = () => JSON.stringify({ _truncation: "", sections: Object.keys(result), ...out }, null, 2).length <= MAX_RESPONSE_CHARS;
-
-    // Largest first — dropping one 45KB section beats dropping ten small ones.
-    const bySize = Object.keys(out)
-      .filter((k) => typeof out[k] === "object" && out[k] !== null)
-      .sort((a, b) => sizeOf(out[b]) - sizeOf(out[a]));
-
-    for (const key of bySize) {
-      if (fits()) break;
-      const value = out[key];
-      const idOf = (e) => e?.id || e?.q || e?.name;
-      const whole = sizeOf(value);
-      const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
-
-      if (Array.isArray(value)) {
-        // Fill the remaining budget with WHOLE entries rather than dropping
-        // all of them — the cap is 50K and this section is usually the only
-        // thing over it, so most of it fits. Partial beats absent, as long as
-        // the reader is told which entries are missing.
-        const kept = [];
-        out[key] = kept;
-        for (const entry of value) {
-          kept.push(entry);
-          if (!fits()) { kept.pop(); break; }
-        }
-        if (kept.length === value.length) continue;   // it all fit after all
-        const missing = value.slice(kept.length).map(idOf).filter(Boolean);
-        omitted.push(`${key} (${kept.length}/${value.length} included)`);
-        out[key] = {
-          _partial: `${kept.length} of ${value.length} entries included; the rest are indexed below (${whole.toLocaleString()} chars whole).`,
-          _how_to_read_the_rest: how,
-          not_included_ids: missing,
-          included: kept,
-        };
-      } else {
-        omitted.push(key);
-        out[key] = {
-          _omitted: `too large to inline (${whole.toLocaleString()} chars)`,
-          _how_to_read_it: how,
-          // The index survives even when the content cannot — knowing WHAT is
-          // in there is most of the value, and it is what the tail-slice ate.
-          count: Object.keys(value).length,
-          keys: Object.keys(value),
-        };
-      }
-    }
-
-    return JSON.stringify({
-      _truncation: omitted.length
-        ? `${omitted.length} section(s) were too large to inline and are indexed rather than included: ${omitted.join(", ")}. EVERY OTHER SECTION BELOW IS COMPLETE.`
-        : "nothing omitted",
-      sections: Object.keys(result),
-      ...out,
-    }, null, 2);
+    return summarizeSpecResult(result);
   }
 
   // Validation results — keep errors/warnings, trim echoed input
@@ -6744,6 +6688,146 @@ function summarizeLargeResult(result, toolName) {
 
   // Generic fallback — truncate
   return JSON.stringify(result, null, 2).slice(0, MAX_RESPONSE_CHARS);
+}
+
+// How many names (omitted-entry ids, stubbed-object keys, section names) an
+// index may LIST. The index exists so nothing vanishes silently; it must not
+// itself become what blows the cap — 200,000 omitted ids listed in full came
+// to 3.3MB. Every list is capped here and paired with an EXACT count.
+const MAX_INDEX_NAMES = 200;
+
+/**
+ * Fit an oversized spec document under MAX_RESPONSE_CHARS without ever cutting
+ * mid-token. The CAP IS A CEILING: this returns valid JSON of at most
+ * MAX_RESPONSE_CHARS characters for ANY input object.
+ *
+ * 360fb78 replaced the old `.slice(0, MAX_RESPONSE_CHARS)` with a budget check
+ * that could not enforce it: it charged 2 chars for a _truncation sentence of
+ * hundreds, ran BEFORE the partial-array wrapper replaced the raw array, never
+ * considered a STRING section, and listed every omitted id. So "fits" was a
+ * guess, and a 300KB string section came back whole under "nothing omitted".
+ * Now every check measures the document that will actually be returned.
+ */
+function summarizeSpecResult(result) {
+  const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
+  const sizeOf = (v) => JSON.stringify(v ?? null).length;
+  // The pretty-printed length of one top-level entry. Swapping a section's
+  // value changes the whole document's length by exactly the difference of
+  // this, which is what lets the budget be tracked without re-rendering the
+  // document for every candidate (3,000 small sections took 6s that way).
+  const entryLen = (k, v) => JSON.stringify({ [k]: v }, null, 2).length;
+  // Names at most MAX_SENTENCE_NAMES sections — the sentence is part of the
+  // budget too, and thousands of names would blow it on their own.
+  const MAX_SENTENCE_NAMES = 20;
+  const sentence = (list) => list.length
+    ? `${list.length} section(s) were too large to inline and are indexed rather than included: ${list.slice(0, MAX_SENTENCE_NAMES).join(", ")}`
+      + (list.length > MAX_SENTENCE_NAMES ? `, and ${list.length - MAX_SENTENCE_NAMES} more, each stubbed in place` : "")
+      + ". EVERY OTHER SECTION BELOW IS COMPLETE."
+    : "nothing omitted";
+  const out = { ...result };
+  let omitted = [];
+  const render = () => JSON.stringify({ _truncation: sentence(omitted), sections: Object.keys(result), ...out }, null, 2);
+  // Exact length of render(), kept current by entry differences. The final
+  // render below is still measured for real before anything is returned.
+  let size = render().length;
+  const sentenceDelta = (list) => entryLen("_truncation", sentence(list)) - entryLen("_truncation", sentence(omitted));
+
+  // TOTAL, not best-effort: an entry with no id/q/name is named by its
+  // position. `.filter(Boolean)` used to drop it, and the document then said
+  // "the rest are indexed below" over an empty array.
+  const idOf = (e, i) => {
+    const v = e && typeof e === "object" ? (e.id ?? e.q ?? e.name) : undefined;
+    return v === undefined || v === null || v === "" ? `#${i}` : String(v);
+  };
+  const partial = (value, k, whole) => {
+    const missing = value.length - k;
+    const named = value.slice(k, k + MAX_INDEX_NAMES).map((e, i) => idOf(e, k + i));
+    return {
+      _partial: `${k} of ${value.length} entries included; the other ${missing} are indexed below (${whole.toLocaleString()} chars whole).`,
+      _how_to_read_the_rest: how,
+      not_included_count: missing,
+      not_included_ids: named,
+      ...(missing > named.length && { not_included_ids_note: `${missing - named.length} more not listed by id — ${how}` }),
+      included: value.slice(0, k),
+    };
+  };
+  const stub = (value, whole) => {
+    if (typeof value === "string") {
+      return { _omitted: `too large to inline (${whole.toLocaleString()} chars of text)`, _how_to_read_it: how, length: value.length };
+    }
+    const keys = Object.keys(value);
+    return {
+      _omitted: `too large to inline (${whole.toLocaleString()} chars)`,
+      _how_to_read_it: how,
+      // The index survives even when the content cannot — knowing WHAT is in
+      // there is most of the value, and it is what the tail-slice ate.
+      count: keys.length,
+      keys: keys.slice(0, MAX_INDEX_NAMES),
+      ...(keys.length > MAX_INDEX_NAMES && { keys_note: `${keys.length - MAX_INDEX_NAMES} more not listed` }),
+    };
+  };
+
+  // Largest first — dropping one 45KB section beats dropping ten small ones.
+  // STRINGS count: a document whose bulk is one text section used to have no
+  // reduction candidate at all.
+  const bySize = Object.keys(out)
+    .filter((k) => (typeof out[k] === "object" && out[k] !== null) || typeof out[k] === "string")
+    .sort((a, b) => sizeOf(out[b]) - sizeOf(out[a]));
+
+  for (const key of bySize) {
+    if (size <= MAX_RESPONSE_CHARS) break;
+    const value = out[key];
+    const whole = sizeOf(value);
+    const current = entryLen(key, value);
+
+    if (Array.isArray(value)) {
+      // Fill the remaining budget with WHOLE entries rather than dropping all
+      // of them — partial beats absent, as long as the reader is told which
+      // entries are missing. Binary search over the kept count; every trial is
+      // costed with the real wrapper AND the real _truncation sentence.
+      const trial = (k) => {
+        const wrapped = partial(value, k, whole);
+        const list = [...omitted, `${key} (${k}/${value.length} included)`];
+        return { wrapped, list, size: size - current + entryLen(key, wrapped) + sentenceDelta(list) };
+      };
+      let lo = 0, hi = value.length - 1, best = null;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const t = trial(mid);
+        if (t.size <= MAX_RESPONSE_CHARS) { best = t; lo = mid + 1; } else hi = mid - 1;
+      }
+      const chosen = best || trial(0);
+      if (chosen.size >= size) continue;   // wrapping saves nothing
+      out[key] = chosen.wrapped; size = chosen.size; omitted = chosen.list;
+    } else {
+      const replacement = stub(value, whole);
+      const list = [...omitted, key];
+      const next = size - current + entryLen(key, replacement) + sentenceDelta(list);
+      if (next >= size) continue;          // a stub bigger than the section saves nothing
+      out[key] = replacement; size = next; omitted = list;
+    }
+  }
+
+  const text = render();
+  if (text.length <= MAX_RESPONSE_CHARS) return text;
+
+  // THE BACKSTOP. Every large section is already indexed and it is STILL over
+  // (thousands of small sections, say). Return the index alone — still valid
+  // JSON, still naming the sections, never a mid-token cut.
+  const names = Object.keys(result);
+  const index = {
+    _truncation: `This spec document is ${sizeOf(result).toLocaleString()} chars and exceeds the ${MAX_RESPONSE_CHARS.toLocaleString()}-char response cap even with its large sections indexed, so only its index is returned. ${how}`,
+    ...(typeof result.topic === "string" && result.topic.length <= 100 && { topic: result.topic }),
+    section_count: names.length,
+    sections: names.slice(0, MAX_INDEX_NAMES),
+    ...(names.length > MAX_INDEX_NAMES && { sections_note: `${names.length - MAX_INDEX_NAMES} more not listed` }),
+  };
+  const indexText = JSON.stringify(index, null, 2);
+  if (indexText.length <= MAX_RESPONSE_CHARS) return indexText;
+  // Only section NAMES long enough to blow the cap on their own get here.
+  delete index.sections;
+  index.sections_note = `${names.length} section names, too long to list`;
+  return JSON.stringify(index, null, 2);
 }
 
 // Failure classification (isError + a machine-readable code, WITHOUT parsing
