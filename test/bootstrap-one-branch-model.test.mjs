@@ -415,12 +415,15 @@ check("the iterate refusal after a hotfix/rollback is described as solution-wide
       && /refuse to deploy the solution — any skill of it, not only that file's/.test(tools.find((t) => t.name === "ateam_github_patch").description));
 // Builder #50 (review round 5). A Builder save held off dev (or whose push
 // failed) is never overwritten by build_and_run: it is refused, 409
-// UNPUSHED_BUILDER_CHANGE, and only ateam_github_pull replaces it on purpose.
+// UNPUSHED_BUILDER_CHANGE. Round 6: ateam_redeploy(solution_id) places it,
+// solution.json included, and ateam_github_pull drops it only when told
+// (discard_builder_changes:true) — see pull-discards-only-when-told.test.mjs.
 {
   const bar = tools.find((t) => t.name === "ateam_build_and_run").description;
   check("build_and_run's description names the UNPUSHED_BUILDER_CHANGE refusal and both ways out",
-        /UNPUSHED_BUILDER_CHANGE/.test(bar) && /ateam_redeploy writes the Builder's copy to `dev`/.test(bar)
-        && /ateam_github_sync_from_main/.test(bar) && /ateam_github_pull replaces the Builder's copy/.test(bar));
+        /UNPUSHED_BUILDER_CHANGE/.test(bar) && /ateam_redeploy\(solution_id\)[\s\S]{0,120}writes the Builder's copy of solution\.json and of every skill to `dev`/.test(bar)
+        && /ateam_github_sync_from_main/.test(bar)
+        && /ateam_github_pull\(solution_id, discard_builder_changes:true\) replaces the Builder's copy/.test(bar));
   check("ateam_github_pull says it replaces a Builder change that never reached GitHub",
         /REPLACES the Builder's copy[\s\S]*never reached GitHub/.test(tools.find((t) => t.name === "ateam_github_pull").description));
   check("the CLAUDE.md says a save that did not reach dev stays in the Builder and blocks build_and_run",

@@ -171,8 +171,9 @@ or rollback a build_and_run deployed). Then the tools leave the Builder's copy a
 picking a side. (\`ateam_upload_connector\` reads \`${BRANCH_WORKFLOW.write_branch}\` directly and has no such check.)
 A Builder save that did not reach \`${BRANCH_WORKFLOW.write_branch}\` (held for that reason, or its push failed) stays in the
 Builder and its reply says so (NOT_WRITTEN_TO_GITHUB); until it is placed, \`ateam_build_and_run\` is refused
-(UNPUSHED_BUILDER_CHANGE) rather than overwrite it. \`ateam_redeploy\` writes it to \`${BRANCH_WORKFLOW.write_branch}\`;
-\`ateam_github_pull\` drops it for \`${BRANCH_WORKFLOW.write_branch}\`'s copy.
+(UNPUSHED_BUILDER_CHANGE) rather than overwrite it, and so is \`ateam_github_pull\`. \`ateam_redeploy(solution_id)\` writes
+it to \`${BRANCH_WORKFLOW.write_branch}\` (solution.json and every skill); \`ateam_github_pull(solution_id, discard_builder_changes: true)\`
+drops it for \`${BRANCH_WORKFLOW.write_branch}\`'s copy.
 
 **First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
 

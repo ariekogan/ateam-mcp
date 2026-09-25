@@ -881,7 +881,7 @@ export const tools = [
       "Whatever you do not pass inline comes from the `main` branch — there is no `ref` parameter. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
       "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.\n\n" +
       "REFUSED, before anything is saved or deployed (409 UNPUSHED_BUILDER_CHANGE, naming the files), while a solution or skill file it would take from `main` holds a Builder change that no branch has: a Builder save held off `dev` (after a ref:'main' hotfix or a rollback) or one whose push to GitHub failed. Deploying would overwrite it and it would exist nowhere. " +
-      "Place it: ateam_redeploy writes the Builder's copy to `dev` (run ateam_github_sync_from_main first when the file holds a hotfix — ateam_redeploy says so), then ateam_github_promote and deploy again. Or drop it: ateam_github_pull replaces the Builder's copy with `dev`'s.",
+      "Place it: ateam_redeploy(solution_id) — the whole solution, not one skill — writes the Builder's copy of solution.json and of every skill to `dev` (run ateam_github_sync_from_main first when the file holds a hotfix — ateam_redeploy says so; its not_written_to_github says what it could not place), then ateam_github_promote and deploy again. Or drop it: ateam_github_pull(solution_id, discard_builder_changes:true) replaces the Builder's copy with `dev`'s.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2222,13 +2222,18 @@ export const tools = [
     core: true,
     description:
       "Deploy a solution FROM its GitHub repo. Reads .ateam/export.json + connector source from the repo and feeds it into the deploy pipeline. Use this to restore a previous version or deploy from GitHub as the source of truth. " +
-      "It REPLACES the Builder's copy of each file with the repo's (`dev`), including a Builder change that never reached GitHub — the explicit way to take `dev`'s copy of a file changed on both sides, or to drop such a change. Every other deploy of GitHub content (ateam_build_and_run) refuses to overwrite one.",
+      "It REPLACES the Builder's copy of each file with the repo's (`dev`). Where the Builder holds a change that never reached GitHub (a save held off `dev`, one whose push failed, a file changed on both sides), that change would exist nowhere afterwards, so the pull is REFUSED (409 UNPUSHED_BUILDER_CHANGE, naming the files) before anything is uploaded or deployed — " +
+      "unless you pass discard_builder_changes:true, the explicit way to take `dev`'s copy of a file changed on both sides, or to drop such a change. To keep the change instead, ateam_redeploy(solution_id) writes it to `dev` first.",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: {
           type: "string",
           description: "The solution ID to pull and deploy from GitHub",
+        },
+        discard_builder_changes: {
+          type: "boolean",
+          description: "true = drop any Builder change that never reached GitHub, replacing it with the repo's copy. Only when you mean to lose it: without it, a pull that would drop one is refused and names the files.",
         },
       },
       required: ["solution_id"],
@@ -2292,7 +2297,7 @@ export const tools = [
       "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
       "After one, run ateam_github_sync_from_main so `dev` has it too. Until `dev` holds the same content, the Builder's copy of that file is `main` content `dev` does not have: " +
       "ateam_redeploy and ateam_patch refuse to deploy the solution — any skill of it, not only that file's — and name the file (they never ship `dev`'s older copy over the hotfix, nor write the hotfix over `dev`), and ateam_build_and_run deploys it from `main`. " +
-      "A Builder save of that file meanwhile stays in the Builder (its reply says NOT_WRITTEN_TO_GITHUB), and ateam_build_and_run is refused (UNPUSHED_BUILDER_CHANGE) until it is placed. " +
+      "A Builder save of that file meanwhile stays in the Builder (its reply says NOT_WRITTEN_TO_GITHUB), and ateam_build_and_run is refused (UNPUSHED_BUILDER_CHANGE) until it is placed — ateam_github_pull too, unless told discard_builder_changes:true. " +
       "Connector code has no such check: ateam_upload_connector deploys `dev`'s code, so sync before the next upload of that connector. " +
       "The reply's fs_mirror says what the Builder did with the file (a note when it did NOT copy it: its own copy had a change of its own).",
     inputSchema: {
@@ -6219,16 +6224,20 @@ export const handlers = {
   ateam_github_push: async ({ solution_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/github/push`, { push_to_github: true, message }, sid, { timeoutMs: 60_000 }),
 
-  ateam_github_pull: async ({ solution_id }, sid) => {
+  ateam_github_pull: async ({ solution_id, discard_builder_changes }, sid) => {
+    // Dropping a Builder change that never reached GitHub is the caller's
+    // decision, stated on every door (the async job and the sync fallback):
+    // without it the Builder refuses a pull that would drop one.
+    const discard = discard_builder_changes === true ? { discard_builder_changes: true } : {};
     // Async-first: github_pull is the #1 Cloudflare-524 culprit on large
     // solutions. Kick the job off, then poll. Falls back to sync if the
     // backend doesn't support async (older deployments).
     let kicked;
     try {
-      kicked = await post(`/deploy/solutions/${solution_id}/github/pull`, { async: true }, sid, { timeoutMs: 30_000 });
+      kicked = await post(`/deploy/solutions/${solution_id}/github/pull`, { async: true, ...discard }, sid, { timeoutMs: 30_000 });
     } catch (err) {
       // Sync fallback (older backend without async support)
-      return await post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000, retries: 2 });
+      return await post(`/deploy/solutions/${solution_id}/github/pull`, { ...discard }, sid, { timeoutMs: 300_000, retries: 2 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async — return as-is
     return await pollDeployJob(kicked.job_id, sid, { label: 'github-pull', maxMs: 15 * 60_000, intervalMs: 2000 });
@@ -6716,6 +6725,10 @@ export const handlers = {
       // Machine-readable, so a caller (the ateam-proxy connector) does not have
       // to parse the sentence below. Not isError: the Builder's ok:true stands.
       ...(verdict.degraded && { code: "DEPLOYED_WITH_ERRORS" }),
+      // What this redeploy could NOT write to `dev` (a file still held, or a
+      // push that failed). It is the way out an UNPUSHED_BUILDER_CHANGE
+      // refusal names, so the caller must see when it did not work.
+      ...(result.not_written_to_github?.length > 0 && { not_written_to_github: result.not_written_to_github }),
       // Surface the underlying error when the request failed — the most
       // common cause is a validator failure (e.g. broken connector source
       // in the GitHub repo), and hiding it makes diagnosis impossible.
