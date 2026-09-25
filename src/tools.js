@@ -3319,7 +3319,13 @@ module.exports.default = plugin;
       description: `${prettyName} plugin — replace with your real description.`,
       render,
       channels: ["command"],
-      capabilities: { commands: [] },
+      // THE GRANT. The phone grants a plugin from THIS manifest (what
+      // ui.getPlugin returns) — since @ateam-ai-mobile/plugin-runtime 0.1.8 the
+      // bundle's own `capabilities` block grants nothing. The RN template calls
+      // native.haptics, so haptics is granted here, not only claimed there.
+      // `capabilities` is the key (the legacy `native` cannot carry commands or
+      // device_tools); see /spec/ui-plugins manifest_schema.
+      capabilities: { ...(kind === "iframe" ? {} : { haptics: true }), commands: [] },
     }, null, 2) + "\n",
   });
 
@@ -3356,6 +3362,66 @@ function chainTreeOf(resp) {
 // test EXECUTE it instead of asserting against this file's source text, which
 // is the difference between proving behaviour and matching a string that a
 // rename would quietly satisfy.
+/**
+ * One ateam_get_widget_catalog entry. Exported for tests.
+ *
+ * DEVICE GRANT: `native` is the LEGACY spelling of the device flags in
+ * `capabilities`. The phone grants {...native, ...capabilities}
+ * (plugin-runtime 0.1.8 mergeCaps), `capabilities` winning per flag. This
+ * projection used to copy `capabilities` only, so a plugin declaring its
+ * flags under `native` read here as "capabilities": null — and that reading
+ * is how a Builder change (32bdb26) concluded Core drops `capabilities`, when
+ * the grant was in fact never shown. The declared key is now shown as-is.
+ */
+export function _widgetCatalogEntry(p, wantSummary) {
+  const id = p?.id || "";
+  const shortId = id.split(":").pop() || id;
+  // origin classification: platform vs solution vs skill
+  const src = p?._source || "";
+  const inferredOrigin = src === "mcp_introspection" ? "platform"
+    : src === "skill_declared" ? "skill"
+    : "solution";
+  const opener = Array.isArray(p?.capabilities?.commands) && p.capabilities.commands.length > 0
+    ? `ui.${shortId}.${p.capabilities.commands[0].name || "open"}({ /* args per input_schema */ })`
+    : `sys.focusUiPlugin({ plugin_id: "${id}" })`;
+  const entry = {
+    id,
+    name: p?.name,
+    version: p?.version,
+    description: p?.description,
+    type: p?.type || "ui",
+    origin: inferredOrigin,
+    owned_by_connector: p?._connector_id,
+    render: p?.render,
+    surface: p?.surface,
+    capabilities: p?.capabilities,
+    ...(p?.native ? {
+      native: p.native,
+      native_is_legacy:
+        "Device flags declared under `native`, the legacy key. The phone still grants them (merged with " +
+        "`capabilities`, which wins per flag), but `native` cannot carry device_tools or commands and the phone's " +
+        "Plugins tab ignores it. Move the flags into `capabilities` in the connector's ui.getPlugin manifest.",
+    } : {}),
+    channels: p?.channels,
+    commands: p?.capabilities?.commands || p?.commands || [],
+    uiActions: p?.uiActions,
+  };
+  if (!wantSummary) {
+    entry.how_to_use = {
+      solution_json_snippet: { id, name: p?.name, version: p?.version, render: p?.render },
+      opener_call: opener,
+      persona_phrasing: `When the user wants to view ${(p?.description || p?.name || shortId).toString().toLowerCase()}, call ${opener.split("(")[0]}.`,
+      binding_notes: {
+        commands_input_schemas: (p?.capabilities?.commands || []).map(c => ({ command: c.name, schema: c.input_schema })),
+        deeplink_template: p?.uiActions?.deeplink || null,
+        view_entity_kinds: p?.uiActions?.intents?.view_entity?.entity_kinds || null,
+        host_auto_routes_intents: Object.keys(p?.uiActions?.intents || {}),
+      },
+    };
+  }
+  return entry;
+}
+
 export const handlers = {
   // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
   //
@@ -5586,47 +5652,7 @@ export const handlers = {
     const wantSummary = format === "summary";
     const filterOrigin = origin && origin !== "all" ? origin : null;
 
-    const widgets = plugins.map((p) => {
-      const id = p?.id || "";
-      const shortId = id.split(":").pop() || id;
-      // origin classification: platform vs solution vs skill
-      const src = p?._source || "";
-      const inferredOrigin = src === "mcp_introspection" ? "platform"
-        : src === "skill_declared" ? "skill"
-        : "solution";
-      const opener = Array.isArray(p?.capabilities?.commands) && p.capabilities.commands.length > 0
-        ? `ui.${shortId}.${p.capabilities.commands[0].name || "open"}({ /* args per input_schema */ })`
-        : `sys.focusUiPlugin({ plugin_id: "${id}" })`;
-      const entry = {
-        id,
-        name: p?.name,
-        version: p?.version,
-        description: p?.description,
-        type: p?.type || "ui",
-        origin: inferredOrigin,
-        owned_by_connector: p?._connector_id,
-        render: p?.render,
-        surface: p?.surface,
-        capabilities: p?.capabilities,
-        channels: p?.channels,
-        commands: p?.capabilities?.commands || p?.commands || [],
-        uiActions: p?.uiActions,
-      };
-      if (!wantSummary) {
-        entry.how_to_use = {
-          solution_json_snippet: { id, name: p?.name, version: p?.version, render: p?.render },
-          opener_call: opener,
-          persona_phrasing: `When the user wants to view ${(p?.description || p?.name || shortId).toString().toLowerCase()}, call ${opener.split("(")[0]}.`,
-          binding_notes: {
-            commands_input_schemas: (p?.capabilities?.commands || []).map(c => ({ command: c.name, schema: c.input_schema })),
-            deeplink_template: p?.uiActions?.deeplink || null,
-            view_entity_kinds: p?.uiActions?.intents?.view_entity?.entity_kinds || null,
-            host_auto_routes_intents: Object.keys(p?.uiActions?.intents || {}),
-          },
-        };
-      }
-      return entry;
-    });
+    const widgets = plugins.map((p) => _widgetCatalogEntry(p, wantSummary));
 
     const filtered = filterOrigin ? widgets.filter(w => w.origin === filterOrigin) : widgets;
     const counts = {
@@ -6696,6 +6722,7 @@ const MAX_RESPONSE_CHARS = 50_000;
 // Exported for test/spec-topics.test.mjs: the truncation is asserted against
 // a REAL oversized payload, not against a regex over this file.
 export { formatResult as formatResultForTest };
+export { _scaffoldPluginFiles as _scaffoldPluginFilesForTest };
 
 function formatResult(result, toolName) {
   const json = JSON.stringify(result, null, 2);
