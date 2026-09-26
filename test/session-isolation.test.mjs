@@ -33,7 +33,10 @@
 // next. Section 5c checks that only the auth gate marks a refusal as "before the
 // tool ran", which is the one signal the proxy may replay a call on. Section 5d
 // holds a call in flight while another tenant signs in on the same session, and
-// checks the call finishes as the tenant it started as.
+// checks the call finishes as the tenant it started as, and that within ONE
+// tenant an actor a running call mints still reaches the session. The same
+// property over stdio, for master-key tenant switches and api-key sign-ins, is
+// test/master-tenant-switch.test.mjs.
 //
 // HISTORY — why the old "no-bearer" checks are gone and must not come back.
 // Until 39ff024, "/mcp" was optional-auth (704206e), and this file asserted
@@ -647,6 +650,37 @@ check("A signs in → ok", succeeded(await call(INFLIGHT, "ateam_auth", { api_ke
   check("(control) A's user switched its session to tenant B while its call was held", switched);
   check("A's call finished on the tenant it started on", succeeded(r) && onlyKey(second, BEARER_A, "tenanta"));
   check("(restore) A's user signs back in as A", succeeded(await callBearerA("ateam_auth", { api_key: BEARER_A })));
+}
+{
+  // The other side of that rule. WITHIN one tenant a bearer's record is still
+  // replaced on every request (seedCredentials), but the new record SHARES the
+  // context, so an actor a running call mints reaches the session even when
+  // another request re-seeded it meanwhile. Only a sign-in to ANOTHER tenant
+  // gets a copy (test/master-tenant-switch.test.mjs, over stdio).
+  const callBearerA = (name, args = {}) => mcp("POST", {
+    headers: { ...sid(SID_A), ...bearer(BEARER_A) },
+    body: { jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } },
+  });
+  const path = "/skills/skill-of-bearer/test";
+  answers.set(path, { status: 200, body: { ok: true, job_id: "job-of-bearer", actor_id: "actor-minted-by-bearer-a" } });
+  const letGo = hold(path);
+  try {
+    reset();
+    const pending = callBearerA("ateam_test_skill",
+      { solution_id: "sol-a", skill_id: "skill-of-bearer", message: "hi", wait: false });
+    await until(() => seen.some((c) => c.path.includes(path)), "the bearer's test kickoff");
+    const meanwhile = succeeded(await callBearerA("ateam_list_solutions"));
+    letGo();
+    const x = resultOf(await pending);
+    let out = null;
+    try { out = JSON.parse(x?.content?.[0]?.text || "null"); } catch { /* checked below */ }
+    check("(control) another request re-seeded A's session while its test was held, and the test minted an actor",
+      meanwhile && out?.actor_id === "actor-minted-by-bearer-a");
+  } finally { answers.delete(path); holds.delete(path); }
+  reset();
+  const next = await callBearerA("ateam_list_solutions");
+  check("A's next call carries the actor its running call minted", succeeded(next) &&
+    seen.length > 0 && seen.every((c) => c.key === BEARER_A && c.actor === "actor-minted-by-bearer-a"));
 }
 
 // ─── 6. Layer 1's one exception: token auto-injection ───────────────────────

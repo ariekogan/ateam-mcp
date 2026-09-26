@@ -31,7 +31,8 @@ const SWEEP_INTERVAL = 5 * 60 * 1000; // every 5 minutes
 // Per-session store (sessionId → { tenant, apiKey, lastActivity, context })
 // context: { activeSolutionId, lastSkillId, lastToolName }
 // A record is REPLACED, never edited, when a session signs in again
-// (setSessionCredentials builds a new object), which is what lets a tool call
+// (setSessionCredentials) or a master-key session switches tenant
+// (switchTenant): each builds a new object, which is what lets a tool call
 // already in flight keep the one it started with. See runToolCall.
 const sessions = new Map();
 
@@ -55,10 +56,12 @@ const sessions = new Map();
  *
  * So each tools/call (src/server.js) runs inside runToolCall, which holds the
  * session's record as it was when the call arrived, and sessionRecord answers
- * from it for the whole call, across every await. A sign-in by ANOTHER call
- * replaces the session's record and leaves this one alone. A sign-in by THIS
- * call (ateam_auth) is the one change it adopts: setSessionCredentials and
- * resetPlatformSession update the call's record as well as the session's.
+ * from it for the whole call, across every await. A sign-in or a master-mode
+ * tenant switch by ANOTHER call replaces the session's record and leaves this
+ * one alone. The same by THIS call (ateam_auth, a `tenant` arg in master mode)
+ * is the one change it adopts: setSessionCredentials, resetPlatformSession and
+ * switchTenant update the call's record as well as the session's. A sweep over
+ * tenants (runAsTenant) changes only its own call's record, never the session's.
  *
  * Outside a tool call (seedCredentials on an incoming request, the sweep, a test
  * calling a handler directly) sessionRecord reads the session store, as before.
@@ -342,6 +345,7 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     );
   }
   const existing = sessionRecord(sessionId);
+  const sameTenant = !!existing && existing.tenant === (resolvedTenant || null);
   // A NEW object, never an edit of the old one: a call still in flight holds
   // the old one and must keep it (runToolCall).
   const record = {
@@ -353,7 +357,15 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     authExplicit: explicit || existing?.authExplicit || false,
     masterKey: masterKey || existing?.masterKey || null,
     lastActivity: Date.now(),
-    context: existing?.context || {},
+    // The context (active solution, last skill, bound actor) carries over: on a
+    // bearer's session this is one user signing in again (4dc8f17). It stays
+    // the SAME object while the tenant is the same, because seedCredentials
+    // builds a new record on every HTTP request and an actor a running call
+    // learns (touchSession, which edits the context in place) must still reach
+    // the session. For ANOTHER tenant it is a copy: a shared one let the new
+    // tenant's actor reach the old tenant's call still in flight, and that
+    // call's minted actor reach the new tenant.
+    context: sameTenant ? existing.context : { ...(existing?.context || {}) },
   };
   sessions.set(sessionId, record);
   adoptRecord(sessionId, record);
@@ -363,16 +375,68 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
 }
 
 /**
- * Switch the active tenant for a master-key session (no re-auth needed).
- * Returns true if switched, false if not in master mode.
+ * A MASTER-KEY RECORD ACTING ON `tenant` — the one builder of it, for
+ * switchTenant and runAsTenant.
+ *
+ * A NEW object: the same master key, url and explicit sign-in, the new tenant,
+ * and a context of its own. Two things went wrong while a switch edited the
+ * record instead (`session.tenant = newTenant`, 94b9bc0):
+ *   - every call in flight on the session holds that same object (runToolCall),
+ *     so one call's switch moved the rest of the others' requests — a deploy's
+ *     polls, a GitHub write — onto its tenant;
+ *   - the context came along, and master-mode headers send its actor as
+ *     X-ADAS-ACTOR-ID (852b373), so tenant A's actor went out on tenant B's
+ *     requests. The context belongs to the tenant, as on a platform session
+ *     (resetPlatformSession).
+ * The same tenant is no switch: the record itself comes back.
+ */
+function masterRecordFor(record, tenant) {
+  if (record.tenant === tenant) return record;
+  return { ...record, tenant, lastActivity: Date.now(), context: {} };
+}
+
+/**
+ * Switch the active tenant of a master-key session (no re-auth needed): the
+ * dispatcher's per-call `tenant` override. Returns true if switched, false if
+ * not in master mode.
+ *
+ * Like a sign-in (setSessionCredentials) it REPLACES the session's record and
+ * this call adopts the new one; a call already in flight keeps the record it
+ * started with. The switch stays for the session's later calls, as it always
+ * has. A sweep over tenants uses runAsTenant instead, which moves nothing but
+ * its own call.
  */
 export function switchTenant(sessionId, newTenant) {
-  const session = sessionRecord(sessionId);
-  if (!session?.masterKey) return false;
-  session.tenant = newTenant;
-  session.lastActivity = Date.now();
+  const current = sessionRecord(sessionId);
+  if (!current?.masterKey) return false;
+  const record = masterRecordFor(current, newTenant);
+  if (record !== current) {
+    sessions.set(sessionId, record);
+    adoptRecord(sessionId, record);
+  }
   console.log(`[Auth] Master mode tenant switch: ${newTenant} (session ${sessionId})`);
   return true;
+}
+
+/**
+ * Run `fn` as the master-key session acting on `tenant`, for THIS CALL ALONE.
+ *
+ * ateam_status_all and ateam_sync_all visit every tenant in turn. They used to
+ * switchTenant through all of them, which moved the SESSION: a parallel call
+ * with no `tenant` arg (a GitHub write meant for the session's own tenant) went
+ * out as whichever tenant the sweep had reached, and the sweep left the session
+ * on the last tenant it visited. Here only `fn` sees the other tenant; the
+ * session and every other call keep theirs.
+ *
+ * Throws when the session is not in master mode. Running `fn` as the session's
+ * own tenant instead would label that tenant's data with another tenant's name.
+ */
+export function runAsTenant(sessionId, tenant, fn) {
+  const current = sessionRecord(sessionId);
+  if (!current?.masterKey) {
+    throw new Error(`runAsTenant: session ${sessionId} is not in master mode; refusing to act as tenant "${tenant}".`);
+  }
+  return toolCall.run({ sessionId, record: masterRecordFor(current, tenant) }, fn);
 }
 
 /**
