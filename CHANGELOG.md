@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### HTTP mode
+
+- The 401 on `/mcp` now names `/.well-known/oauth-protected-resource/mcp`,
+  the metadata whose `resource` is `/mcp`. It named the root document on both
+  mounts, so a client checking `resource` against the URL it called (RFC 9728
+  §3.3) was sent to metadata for a different resource. `/` is unchanged.
+- `WWW-Authenticate` is now in `Access-Control-Expose-Headers`, so a
+  browser-hosted client can read the challenge it is sent.
+- A legacy bearer (`adas_<32 hex>`) no longer answers every request with a
+  500. Its tenant is asked of `/auth/whoami` on the server's API; if that
+  cannot place it, the session is left signed out and tenant tools say so.
+
+### Tools
+
+- Every tool declares MCP safety hints (`readOnlyHint`, `destructiveHint`).
+- `ateam_patch`'s validation verdict reaches the caller. It had been read from
+  a route the API has never served, so it was always silently absent.
+
+## 0.4.93 — 2026-09-11
+
+### Breaking (HTTP mode)
+
+**An HTTP request must carry a credential. Anonymous requests to `/mcp` are
+refused.** Until 0.4.93, `/mcp` let a request with no `Authorization` through,
+so a client could initialize anonymously and then call `ateam_auth(api_key)`.
+Both mounts (`/` and `/mcp`) now answer such a request with `401` and a
+`WWW-Authenticate` challenge (RFC 9728) pointing at OAuth discovery.
+
+Why: an OAuth client learns it must send its token only by being refused
+without one. `/mcp` answered anonymous requests with 200, so ChatGPT — which
+had completed OAuth and held a valid token — never sent it, every tenant tool
+refused, and the connector was disabled. An anonymous session also had no
+owner, so anyone holding its id could use the key `ateam_auth` had put into it.
+
+What an HTTP client does now:
+- **OAuth** (Claude.ai, ChatGPT): connect to `https://mcp.ateam-ai.com` or
+  `https://mcp.ateam-ai.com/mcp`; the client follows the challenge.
+- **An API key as a bearer**: send `Authorization: Bearer <your A-Team API key>`.
+  `ateam_auth` still works inside such a session (switching tenants or
+  environments).
+- **Platform sign-in** (0.4.104, A-Team's own in-product Builder only):
+  `x-adas-token`.
+- **Self-hosted, single-user only**: `ATEAM_OAUTH_DISABLED=1` removes the gate
+  for the whole process. Do not set it on a shared server: sessions then have
+  no owner to check.
+
+Stdio (`npx @ateam-ai/mcp`) is unaffected.
+
+## 0.3.32 – 0.4.92, and 0.4.94 onward
+
+Not tracked here. See the commit history (`git log`).
+
 ## 0.3.31 — 2026-04-24
 
 ### Security

@@ -16,7 +16,6 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { tools, handlers } from "../src/tools.js";
 
 const byName = (n) => tools.find((t) => t.name === n);
@@ -226,27 +225,72 @@ describe('build_and_run does not restart a phone-side connector', () => {
   // runtime:"device" connector does have authored source — the RN bundle. So it
   // looked like an ordinary connector, the upload 409'd on the merge, and health
   // then marked it "error": a failed deploy for a connector working as designed.
-  const SRC = readFileSync(new URL('../src/tools.js', import.meta.url), 'utf8');
-  const CODE = SRC.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  //
+  // These used to regex src/tools.js for `deviceConnectorIds.has(connId)` and
+  // `skipped: "device_runtime"` (c1534f6) — satisfied by any code spelling
+  // those, reachable or not (Codex 79ee198bc3, ateam-mcp #13). They now run the
+  // real handler through the fetch stub above and read what it SENT.
+  //
+  // Only the declared path is covered. When connectors[] is omitted and the
+  // bundle is pulled from GitHub, connectors[] is synthesized from mcp_store
+  // keys with no `runtime`, so this skip cannot see a device connector there;
+  // pull-bundle does not return connector manifests to read it from.
+  const PHONE = { id: 'phone-mcp', name: 'Phone', transport: 'stdio', runtime: 'device' };
+  const SERVER = { id: 'weather-mcp', name: 'Weather', transport: 'stdio' };
+  const STORE = {
+    'phone-mcp': [{ path: 'rn-bundle/phone.bundle.js', content: 'module.exports = {};' }],
+    'weather-mcp': [{ path: 'server.js', content: '// server' }],
+  };
 
-  test('the restart loop skips connectors declared runtime:"device"', () => {
-    assert.match(CODE, /deviceConnectorIds\.has\(connId\)/,
-      'Phase 2.5 no longer skips device connectors — it will upload the phone bundle and 409');
+  // One deploy, read three ways (each run waits out the health phase's 2s).
+  let ran = null;
+  const buildAndRun = () => (ran ||= deploy());
+  async function deploy() {
+    stubFetch();
+    const sent = [];
+    try {
+      const res = await withRoute(
+        () => handlers.ateam_build_and_run({
+          solution: { id: 'walkmate', name: 'Walkmate' },
+          skills: [{ id: 'walk-guide', name: 'Walk Guide' }],
+          connectors: [PHONE, SERVER],
+          mcp_store: STORE,
+        }, 'sid'),
+        (url, opts) => {
+          sent.push({ method: opts.method || 'GET', url });
+          if (url.includes('/validate/solution')) return { valid: true, errors: [], warnings: [] };
+          if (url.endsWith('/upload')) return { ok: true, tools: 3 };
+          return { ok: true };
+        },
+      );
+      return { res, sent };
+    } finally { global.fetch = origFetch; }
+  }
+
+  test('the declared device connector is never uploaded; the server connector still is', async () => {
+    const { sent } = await buildAndRun();
+    const uploads = sent.filter((r) => r.method === 'POST' && r.url.endsWith('/upload'));
+    assert.ok(uploads.some((r) => r.url.includes('/connectors/weather-mcp/upload')),
+      'the ordinary connector was not uploaded — the skip swallowed more than the phone');
+    assert.ok(!uploads.some((r) => r.url.includes('/connectors/phone-mcp/')),
+      'the phone bundle was uploaded as a server connector — it will 409 and read as a failed deploy');
   });
 
-  test('and classifies them from the DECLARED connectors, not from Core', () => {
+  test('it is classified from the DECLARED connectors, without asking any service', async () => {
     // Asking Core would put the classification one outage away from re-breaking:
     // an unreachable Core turns the phone back into a server.
-    // Just the CLASSIFICATION, not the loop that follows it — the loop legitimately
-    // posts uploads for ordinary connectors, and including it made this assertion
-    // fail on correct code.
-    const block = CODE.slice(CODE.indexOf('const deviceConnectorIds'), CODE.indexOf('if (effectiveMcpStore'));
-    assert.match(block, /\(connectors \|\| \[\]\)/, 'device ids are not derived from the authored connectors[]');
-    assert.doesNotMatch(block, /await (get|post)\(/, 'the restart phase asks a service to classify a connector');
+    const { sent } = await buildAndRun();
+    const about = sent.filter((r) => r.url.includes('/connectors/phone-mcp'));
+    assert.deepEqual(about, [], `the deploy asked about the device connector: ${JSON.stringify(about)}`);
   });
 
-  test('a skipped device connector is reported, not silently dropped', () => {
-    assert.match(CODE, /skipped: "device_runtime"/,
+  test('a skipped device connector is reported, not silently dropped', async () => {
+    const { res } = await buildAndRun();
+    const restart = (res.phases || []).find((p) => p.phase === 'connector_restart');
+    assert.ok(restart, `no connector_restart phase: ${JSON.stringify(res.phases)}`);
+    const phone = restart.connectors.find((c) => c.id === 'phone-mcp');
+    assert.deepEqual(phone, { id: 'phone-mcp', ok: true, tools: 0, skipped: 'device_runtime' },
       'the skip is invisible in the result — a reader cannot tell it was deliberate');
+    assert.equal(restart.status, 'done', 'a deliberate skip made the restart phase look partial');
   });
 });

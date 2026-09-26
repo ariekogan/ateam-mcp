@@ -90,7 +90,9 @@ Add to `.cursor/mcp.json`, `mcp_config.json`, or `.vscode/mcp.json`:
 
 ### Gemini and other platforms
 
-As MCP adoption grows (it's now governed by the Agentic AI Foundation under the Linux Foundation, co-founded by Anthropic, OpenAI, and Block), every AI platform that implements MCP gets access to ateam-mcp automatically. The remote HTTP endpoint (`https://mcp.ateam-ai.com`) works with any client that supports Streamable HTTP transport.
+As MCP adoption grows (it's now governed by the Agentic AI Foundation under the Linux Foundation, co-founded by Anthropic, OpenAI, and Block), every AI platform that implements MCP gets access to ateam-mcp automatically. The remote HTTP endpoint (`https://mcp.ateam-ai.com`, also at `/mcp`) works with any client that supports Streamable HTTP transport.
+
+The HTTP endpoint needs a credential on every request: OAuth (clients that support it follow the `401` challenge on their own), or your A-Team API key sent as `Authorization: Bearer <key>`. An anonymous request is refused with `401`; since 0.4.93 there is no anonymous session to call `ateam_auth` from. See [CHANGELOG.md](CHANGELOG.md).
 
 ### Discovery
 

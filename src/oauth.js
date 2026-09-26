@@ -285,11 +285,18 @@ function escapeHtml(str) {
  *
  * @param {express.Application} app
  * @param {string} baseUrl - Public URL of the server (e.g. https://mcp.ateam-ai.com)
- * @returns {{ provider: ATeamOAuthProvider, bearerMiddleware: express.RequestHandler }}
+ * @returns {{ provider: ATeamOAuthProvider, bearerMiddlewareFor: (mountPath: string) => express.RequestHandler }}
+ *   bearerMiddlewareFor("/") / ("/mcp"): the bearer gate for that mount, whose
+ *   401 challenge names that mount's protected-resource metadata.
  */
 export function mountOAuth(app, baseUrl) {
   const serverUrl = new URL(baseUrl);
   const provider = new ATeamOAuthProvider();
+  // The PRM document for the resource mounted at `mountPath` ("/" or "/mcp").
+  // The SDK's own rule: /.well-known/oauth-protected-resource + the resource's
+  // path. One function for the route that serves it and the challenge that
+  // points at it.
+  const prmUrlFor = (mountPath) => getOAuthProtectedResourceMetadataUrl(new URL(mountPath, serverUrl));
 
   // Mount SDK OAuth router (/.well-known/*, /authorize, /token, /register)
   // IMPORTANT: resourceServerUrl MUST match the connector URL that users configure
@@ -308,7 +315,9 @@ export function mountOAuth(app, baseUrl) {
   // ─── PRM at /mcp path (RFC 9728 path-based discovery) ──────────────
   // Claude.ai looks for /.well-known/oauth-protected-resource/mcp when
   // connecting to /mcp. The SDK only serves PRM at the root resource path.
-  app.get("/.well-known/oauth-protected-resource/mcp", (_req, res) => {
+  // Its URL comes from the same function as the challenge that points at it
+  // (prmUrlFor below), so the two cannot name different documents.
+  app.get(new URL(prmUrlFor("/mcp")).pathname, (_req, res) => {
     res.json({
       resource: new URL("/mcp", baseUrl).href,
       authorization_servers: [serverUrl.href],
@@ -354,13 +363,21 @@ export function mountOAuth(app, baseUrl) {
     res.redirect(redirectUrl.toString());
   });
 
-  // ─── Bearer middleware for MCP routes ───────────────────────────
-  // resourceMetadataUrl must point to the PRM for the root resource
-  // → /.well-known/oauth-protected-resource (no /mcp suffix)
-  const bearerMiddleware = requireBearerAuth({
+  // ─── Bearer middleware for MCP routes — one per mount ────────────
+  // A 401 names the protected-resource metadata a client should read next
+  // (WWW-Authenticate resource_metadata, RFC 9728), and a client checks that
+  // the document's `resource` is the URL it called (§3.3). So the challenge on
+  // "/" points at the root PRM (resource = the root) and the challenge on
+  // "/mcp" at the /mcp PRM above (resource = …/mcp).
+  //
+  // There was ONE middleware, pointing every challenge at the root PRM
+  // (8661ca0). That was inert while "/mcp" never challenged; since 39ff024 made
+  // "/mcp" strict, every anonymous /mcp request was sent to a document naming a
+  // different resource than the one it asked for.
+  const bearerMiddlewareFor = (mountPath) => requireBearerAuth({
     verifier: provider,
     requiredScopes: [],
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(serverUrl),
+    resourceMetadataUrl: prmUrlFor(mountPath),
   });
 
   // ─── Periodic cleanup of expired entries ────────────────────────
@@ -375,5 +392,5 @@ export function mountOAuth(app, baseUrl) {
   }, 60_000);
   cleanup.unref();
 
-  return { provider, bearerMiddleware };
+  return { provider, bearerMiddlewareFor };
 }

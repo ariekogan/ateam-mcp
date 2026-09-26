@@ -140,6 +140,58 @@ check("Core's 401 Actor \"X\" not found unbinds",
 check("a genuine invalid-key 401 does NOT unbind",
   (await actorAfter(401, { error: "Invalid or unconfigured API key" })) === REAL_ACTOR);
 
+// ─── The hint says only what the code does ───────────────────────────────────
+//
+// It ended "call ateam_auth again to reset the session binding" (35e68ab).
+// ateam_auth never did: setSessionCredentials carries the session's context,
+// actor included, across a sign-in. What drops the binding is request() itself,
+// on the same response, with the same classifier — so by the time the caller
+// reads this, it is already gone, and the remedy is to retry. (Codex c0e497b0ce)
+console.log("the actor-not-found hint prescribes only what actually happens");
+{
+  touchSession(HEAL_SID, { actorId: REAL_ACTOR });
+  nextReply = { status: 401, body: { ok: false, error: `Actor "${REAL_ACTOR}" not found` } };
+  let msg = "";
+  try { await get("/deploy/solutions/s/logs", HEAL_SID); } catch (e) { msg = e.message; }
+  check("the error is classified as the actor", /does not recognise the ACTOR/.test(msg));
+  check("it does not send the caller to ateam_auth to reset the binding",
+    !/ateam_auth/.test(msg) && !/reset the session binding/i.test(msg));
+  check("it says the stale binding was dropped", /has been dropped/.test(msg));
+  check("  …and it was: the session no longer carries the actor", getSessionContext(HEAL_SID)?.actorId === undefined);
+}
+
+// ─── Only a tool that STARTS a run may bind an actor from its result ─────────
+//
+// The dispatcher accepted `actor_id` off ANY tool's result, so one unrelated
+// payload carrying that field repointed the whole session (every later call
+// 401'd with `Actor "dev" not found`). ACTOR_MINTING_TOOLS narrowed it, and
+// nothing tested the gate: a future edit dropping `.has(name)` passed green
+// (Codex b40deae29d, ateam-mcp #13). These go through handleToolCall, the one
+// place the gate lives.
+console.log("only run-starting tools bind an actor from a result");
+{
+  const { handleToolCall } = await import("../src/tools.js");
+  const MINT_SID = "sess-actor-mint";
+  setSessionCredentials(MINT_SID, { apiKey: KEY, apiUrl: API, explicit: true });
+  const INTRUDER = "0b6c1f3e-0000-4000-8000-00000000dead";
+  const MINTED = "7f3a2c10-1111-4111-8111-000000000abc";
+
+  nextReply = { status: 200, body: { ok: true, repo_url: "https://github.com/x/y", actor_id: INTRUDER } };
+  const read = await handleToolCall("ateam_github_status", { solution_id: "s" }, MINT_SID);
+  check("(the non-minting call itself succeeded)", !read.isError);
+  check("a non-minting tool's actor_id does NOT bind an unbound session", getSessionContext(MINT_SID)?.actorId === undefined);
+
+  touchSession(MINT_SID, { actorId: REAL_ACTOR });
+  await handleToolCall("ateam_github_status", { solution_id: "s" }, MINT_SID);
+  check("  …nor displace a real actor already bound", getSessionContext(MINT_SID)?.actorId === REAL_ACTOR);
+
+  nextReply = { status: 200, body: { ok: true, job_id: "job_1", actor_id: MINTED } };
+  const run = await handleToolCall("ateam_test_pipeline", { solution_id: "s", skill_id: "k", message: "hi" }, MINT_SID);
+  check("(the run-starting call itself succeeded)", !run.isError);
+  check("a run-starting tool's actor_id DOES bind — the follow-up reads need it",
+    getSessionContext(MINT_SID)?.actorId === MINTED);
+}
+
 server.close();
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
