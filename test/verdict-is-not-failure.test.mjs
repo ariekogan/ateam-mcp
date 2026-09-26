@@ -23,6 +23,17 @@
 // this MCP ADVERTISED ("ok: false + drifts"), in the second of two definitions
 // of the tool. See tool-registry.test.mjs.
 //
+// AND THE CONVERSE: A PROBE THAT COULD NOT RUN HAS NOT ANSWERED. The verdict
+// rule reads `error` to tell the two apart, so every verdict tool must set it
+// when its probe did not run. The first version of this rule claimed they all
+// did. ateam_verify never did: its catch blocks (95492b6) turn a refused or
+// failed Builder read into a gap, so with a rotated key it returned ok:false
+// with two "unavailable" gaps as a SUCCESSFUL call — and ateam-proxy-mcp, which
+// signs the tenant in again on isError + UNAUTHENTICATED, never heard. Nor did
+// ateam_verify_surface: Core's "inconclusive" (browser-mcp down), "no_probe",
+// "misconfigured", "bad_input" and "forbidden" carry `verdict` and `failures`,
+// never `error`. See section 3.
+//
 // Behavioural: the real dispatcher, against a local server playing the Builder.
 // Run: node --test test/verdict-is-not-failure.test.mjs
 import { test, before, after } from "node:test";
@@ -38,7 +49,7 @@ let server;
 before(async () => {
   server = createServer((req, res) => {
     const key = `${req.method} ${req.url.split("?")[0]}`;
-    const reply = routes[key];
+    const reply = routes[key] || routes["*"];
     res.writeHead(reply?.status || (reply ? 200 : 404), { "Content-Type": "application/json" });
     res.end(JSON.stringify(reply ? reply.body : { error: "no route" }));
   });
@@ -145,3 +156,97 @@ test("(control) an explicit code still wins", async () => {
   });
   assert.equal(res.structuredContent?.code, "MAIN_BEHIND_DEV");
 });
+
+// ─── 3. a probe that could not run is a failed call ──────────────────────────
+
+test("ateam_verify: a key the Builder refuses on EVERY route is a failed call, UNAUTHENTICATED", async () => {
+  // A rotated or expired key. Nothing was verified; not one check ran.
+  const { res, out } = await call("ateam_verify", {}, { "*": { status: 401, body: { error: "Invalid API key" } } });
+  assert.equal(out.ok, false, "(control)");
+  assert.ok(out.gaps.some((g) => /connectors health unavailable/.test(g)), "(control) the gaps still say what could not run");
+  assert.equal(res.isError, true, "a verify that could not run one check came back as a successful call");
+  assert.equal(res.structuredContent?.code, "UNAUTHENTICATED",
+    "the code ateam-proxy-mcp signs the tenant in again on was not given");
+  assert.match(out.error, /could not run/);
+});
+
+test("ateam_verify: a Builder answering 500 on every route is a failed call, TOOL_FAILED", async () => {
+  const { res } = await call("ateam_verify", {}, { "*": { status: 500, body: { error: "boom" } } });
+  assert.equal(res.isError, true, "a verify whose every check failed to run came back as a successful call");
+  assert.equal(res.structuredContent?.code, "TOOL_FAILED");
+});
+
+// ONE check that could not run is enough: the rest of the verdict is partial,
+// and nothing in `gaps` alone says which lines are findings and which are not.
+const HEALTHY_EMPTY = {
+  "GET /deploy/solutions/sol/connectors/health": { body: { connectors: [] } },
+  "GET /deploy/solutions/sol/definition": { body: { solution: {} } },
+  "GET /deploy/solutions/sol/ui-plugins": { body: { plugins: [] } },
+  "GET /deploy/solutions/sol/health": { body: { skills: [] } },
+};
+
+test("(control) ateam_verify: every check ran and found nothing — ok:true, no error", async () => {
+  const { res, out } = await call("ateam_verify", {}, HEALTHY_EMPTY);
+  assert.equal(out.ok, true);
+  assert.equal(out.error, undefined);
+  assert.notEqual(res.isError, true);
+});
+
+test("ateam_verify: only the connectors check refused — still a failed call, UNAUTHENTICATED", async () => {
+  const { res } = await call("ateam_verify", {}, {
+    ...HEALTHY_EMPTY,
+    "GET /deploy/solutions/sol/connectors/health": { status: 401, body: { error: "Invalid API key" } },
+  });
+  assert.equal(res.isError, true);
+  assert.equal(res.structuredContent?.code, "UNAUTHENTICATED");
+});
+
+test("ateam_verify: only the skills check failed — still a failed call", async () => {
+  const { res } = await call("ateam_verify", {}, {
+    ...HEALTHY_EMPTY,
+    "GET /deploy/solutions/sol/health": { status: 500, body: { error: "boom" } },
+  });
+  assert.equal(res.isError, true);
+  assert.equal(res.structuredContent?.code, "TOOL_FAILED");
+});
+
+test("ateam_verify: a widget catalog it could not read is not a pass", async () => {
+  // Everything else healthy; the solution definition read fails. verifyWidgetHealth
+  // answers that with { ok:false, error } and no `issues`, which verify ignored:
+  // no gap, ok:true, "✅ Verified live — … widgets render".
+  const { res, out } = await call("ateam_verify", {}, {
+    "GET /deploy/solutions/sol/connectors/health": { body: { connectors: [] } },
+    "GET /deploy/solutions/sol/definition": { status: 500, body: { error: "boom" } },
+    "GET /deploy/solutions/sol/health": { body: { skills: [] } },
+  });
+  assert.equal(out.ok, false, "verify reported widgets as rendering without having read a single one");
+  assert.ok(out.gaps.some((g) => /widget health unavailable/.test(g)));
+  assert.equal(res.isError, true);
+});
+
+test("ateam_verify: a skill it could not read is not 'a skill that declares no tool'", async () => {
+  const { res, out } = await call("ateam_verify", {}, {
+    "GET /deploy/solutions/sol/connectors/health": { body: { connectors: [{ id: "clinic-mcp", status: "connected", tools: 3 }] } },
+    "GET /deploy/solutions/sol/definition": { body: { solution: {} } },
+    "GET /deploy/solutions/sol/ui-plugins": { body: { plugins: [] } },
+    "GET /deploy/solutions/sol/health": { body: { skills: [{ skill_id: "k", ok: true }] } },
+    "GET /deploy/solutions/sol/skills/k": { status: 500, body: { error: "boom" } },
+  });
+  assert.ok(out.gaps.some((g) => /skill 'k' definition unavailable/.test(g)),
+    "the smoke check blamed the skill for declaring nothing when it was never read");
+  assert.equal(res.isError, true);
+});
+
+for (const verdict of ["inconclusive", "no_probe", "misconfigured", "bad_input", "forbidden"]) {
+  test(`ateam_verify_surface: Core's '${verdict}' is a failed call, not an answer`, async () => {
+    const { res, out } = await call("ateam_verify_surface", { plugin_id: "mcp:clinic-mcp:visits" }, {
+      "POST /deploy/solutions/sol/plugins/mcp%3Aclinic-mcp%3Avisits/verify-surface": {
+        status: verdict === "inconclusive" ? 503 : 422,
+        body: { ok: false, verdict, reason: "probe_unavailable", failures: [`surface_probe: ${verdict}`] },
+      },
+    });
+    assert.equal(out.verdict, verdict, "(control) the body still reaches the caller");
+    assert.equal(res.isError, true, `a probe that never looked at the surface ('${verdict}') came back as its verdict`);
+    assert.equal(res.structuredContent?.code, "TOOL_FAILED");
+  });
+}

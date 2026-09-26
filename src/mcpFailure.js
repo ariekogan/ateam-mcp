@@ -49,8 +49,9 @@ export function deriveErrorCode(source, explicit) {
  * Except for a VERDICT tool (tools.js VERDICT_TOOLS): there the primary `ok` is
  * the answer of a probe that ran — "gaps found", "the surface did not render" —
  * and a probe that finds something has not failed. Its call failed only when
- * the result says so in `error`, which its verdicts never carry and its own
- * refusals ("plugin_id required") always do.
+ * the result says so in `error`. Each verdict tool's handler owes that: its
+ * refusals, and every probe that could not run (a refused key, a Builder 5xx,
+ * browser-mcp down), must carry `error`, or they read as an answer.
  * @param {any} result
  * @param {{ verdict?: boolean }} [opts]  verdict: the tool is a verdict tool
  * @returns {boolean}

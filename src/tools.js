@@ -49,6 +49,13 @@ const STAMP_WHERE_TOOLS = new Set([
 // had worked and found something. A verdict tool's call failed only when it says
 // so in `error` (mcpFailure.isLogicalFailure).
 //
+// THAT IS AN OBLIGATION ON EACH HANDLER, not a property of the payloads: a probe
+// that could not run must set `error`, or it reads as an answer. ateam_verify
+// sets it when any check could not run (a refused or failed Builder read);
+// ateam_verify_surface sets it for every verdict but "surface_failed"; Core's
+// connector.logs already puts its refusal in `error`. A tool added here without
+// that turns a failed call — a rotated key, a Builder 5xx — into a verdict.
+//
 // Not ateam_verify_consistency: its answer is `consistent`, and `ok` is true on
 // every probe that ran (Builder routes/deploy.js /verify, since 9e51bef).
 const VERDICT_TOOLS = new Set([
@@ -2173,7 +2180,7 @@ export const tools = [
     // for a run in flight poll ateam_chain_status and call this once at the end.
     monitoring: { safe: false, cost: "heavy", output: "bounded", use_instead: "ateam_chain_status" },
     description:
-      "ONE call that returns the REAL runtime end-state of a solution — connectors connected + tools discovered, every declared widget actually rendering, skills deployed — with the EXACT failing gaps. Use this instead of guess-and-check after a deploy/patch: it tells you the truth (what's actually live) and names precisely what's broken, not a generic warning. Reliable from any connection (routes through the Builder, not a direct Core call).",
+      "ONE call that returns the REAL runtime end-state of a solution — connectors connected + tools discovered, every declared widget actually rendering, skills deployed — with the EXACT failing gaps. Use this instead of guess-and-check after a deploy/patch: it tells you the truth (what's actually live) and names precisely what's broken, not a generic warning. ok:false with gaps is the answer; a result that also carries `error` means a check could not run (key refused, Builder down) — that is a failed call, not a verdict. Reliable from any connection (routes through the Builder, not a direct Core call).",
     inputSchema: {
       type: "object",
       properties: {
@@ -5409,11 +5416,24 @@ export const handlers = {
       // generic error path turned into "returned 422" — hiding the failures that
       // say WHY the screen is broken, and leaving the caller as blind as before
       // it ran the probe. Hand the verdict back as a result instead of throwing.
+      //
+      // Only "surface_failed" is that answer: the probe rendered the surface and
+      // found it broken. Core's other negative verdicts (ui.surfaceProbe) say the
+      // probe never got that far — "inconclusive" (browser-mcp unavailable; fail-
+      // closed, it cannot certify), "no_probe" (the harness never installed),
+      // "misconfigured" (no probe ticket), "bad_input" / "forbidden" (Core refused
+      // the call). Those are failed calls, and a verdict tool says so in `error`
+      // (mcpFailure.isLogicalFailure) — none of them carries one.
       if (typeof err?.body === "string" && err.body) {
-        try {
-          const parsed = JSON.parse(err.body);
-          if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) return parsed;
-        } catch { /* not the probe's body — fall through */ }
+        let parsed = null;
+        try { parsed = JSON.parse(err.body); } catch { /* not the probe's body — fall through */ }
+        if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) {
+          if (parsed.verdict !== "surface_failed" && parsed.error == null) {
+            const why = Array.isArray(parsed.failures) && parsed.failures.length ? `: ${parsed.failures.join("; ")}` : "";
+            parsed.error = `the surface probe did not run (verdict ${parsed.verdict || "none"})${why}`;
+          }
+          return parsed;
+        }
       }
       throw err;
     }
@@ -6108,6 +6128,15 @@ export const handlers = {
     if (!solution_id) throw new Error("solution_id required");
     const gaps = [];
     const out = { ok: true, solution_id };
+    // A CHECK THAT COULD NOT RUN IS NOT A GAP IT FOUND. Each is still listed in
+    // `gaps` (callers read them there), and ALSO named in `error` below: that is
+    // what tells handleToolCall this verdict tool's CALL failed
+    // (mcpFailure.isLogicalFailure). Without it a verify whose every Builder
+    // read was refused — a rotated or expired key — came back as a successful
+    // call that "found" two gaps, and the UNAUTHENTICATED that sends
+    // ateam-proxy-mcp to sign the tenant in again was never given.
+    const unavailable = [];
+    const couldNotRun = (msg) => { unavailable.push(msg); gaps.push(msg); };
 
     // 1. Connectors — connected + tools discovered.
     try {
@@ -6130,17 +6159,22 @@ export const handlers = {
       }
     } catch (e) {
       out.connectors = { error: e.message };
-      gaps.push(`connectors health unavailable: ${e.message}`);
+      couldNotRun(`connectors health unavailable: ${e.message}`);
     }
 
     // 2. Widgets — every declared ui_plugin actually renders (reliable proxy).
     try {
       const wh = await verifyWidgetHealth(solution_id, sid);
       out.widgets = wh || { checked: 0, note: "no widgets declared" };
-      if (wh && !wh.ok) for (const i of (wh.issues || [])) gaps.push(`widget: ${i}`);
+      // verifyWidgetHealth answers an unreadable definition or plugin catalog
+      // with { ok:false, error } and no `issues` (b3205aa). Reading only
+      // `issues` (95492b6) dropped that on the floor: a verify that could not
+      // look at a single widget said nothing about widgets, and passed.
+      if (wh?.error) couldNotRun(`widget health unavailable: ${wh.error}`);
+      else if (wh && !wh.ok) for (const i of (wh.issues || [])) gaps.push(`widget: ${i}`);
     } catch (e) {
       out.widgets = { error: e.message };
-      gaps.push(`widget health unavailable: ${e.message}`);
+      couldNotRun(`widget health unavailable: ${e.message}`);
     }
 
     // 3. Skills — deployed + registered (from the solution health check).
@@ -6158,7 +6192,7 @@ export const handlers = {
       }
     } catch (e) {
       out.skills = { error: e.message };
-      gaps.push(`solution health unavailable: ${e.message}`);
+      couldNotRun(`solution health unavailable: ${e.message}`);
     }
 
     // 4. SMOKE CALL — actually invoke a tool the SOLUTION depends on.
@@ -6180,7 +6214,13 @@ export const handlers = {
       const wanted = new Map();   // toolName -> connectorId (first skill that declares it)
       for (const sk of Array.isArray(out.skills) ? out.skills : []) {
         if (!sk?.id) continue;
-        const def = await get(`/deploy/solutions/${solution_id}/skills/${sk.id}`, sid).catch(() => null);
+        // An unreadable skill is a check that could not run, not a skill that
+        // declares nothing: swallowing it (.catch(() => null)) produced "no
+        // read-shaped tool declared by any skill" about a skill never read.
+        const def = await get(`/deploy/solutions/${solution_id}/skills/${sk.id}`, sid).catch((e) => {
+          couldNotRun(`skill '${sk.id}' definition unavailable for the smoke check: ${e.message}`);
+          return null;
+        });
         for (const t of (def?.skill?.tools || def?.tools || [])) {
           const name = typeof t === "string" ? t : t?.name;
           if (!name || wanted.has(name)) continue;
@@ -6226,14 +6266,19 @@ export const handlers = {
       }
     } catch (e) {
       out.smoke = { error: e.message };
-      gaps.push(`smoke check could not run: ${e.message}`);
+      couldNotRun(`smoke check could not run: ${e.message}`);
     }
 
     out.gaps = gaps;
     out.ok = gaps.length === 0;
+    if (unavailable.length) {
+      out.error = `${unavailable.length} check(s) could not run, so this is not a verdict: ${unavailable.join("; ")}`;
+    }
     out._status = out.ok
       ? "✅ Verified live — connectors connected AND answering real calls, widgets render, skills deployed."
-      : `⚠️ ${gaps.length} gap(s): ${gaps.slice(0, 5).join("; ")}${gaps.length > 5 ? " …" : ""}`;
+      : out.error
+        ? `❌ Could not verify — ${out.error}`
+        : `⚠️ ${gaps.length} gap(s): ${gaps.slice(0, 5).join("; ")}${gaps.length > 5 ? " …" : ""}`;
     return out;
   },
 
