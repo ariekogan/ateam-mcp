@@ -11,6 +11,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { tools, coreTools, handleToolCall, MCP_VERSION } from "./tools.js";
+import { runToolCall } from "./api.js";
 
 /**
  * @param {string} sessionId — identifier for credential isolation.
@@ -38,9 +39,13 @@ export function createServer(sessionId = "stdio") {
   // This reduces cognitive load from 23+ tools to ~11 in the tool surface.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: coreTools }));
 
+  // Every call runs as its session was when the call ARRIVED: a sign-in by
+  // another call on the same session (ateam-proxy-mcp shares one session among
+  // tenants) must not reach the requests this call has yet to make. See
+  // runToolCall in api.js.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    return handleToolCall(name, args, sessionId);
+    return runToolCall(sessionId, () => handleToolCall(name, args, sessionId));
   });
 
   return server;

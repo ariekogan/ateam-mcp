@@ -31,7 +31,9 @@
 // Section 5b runs tenants in turn on ONE platform session, as the proxy does,
 // and checks nothing of one tenant (url, master key, actor, context) reaches the
 // next. Section 5c checks that only the auth gate marks a refusal as "before the
-// tool ran", which is the one signal the proxy may replay a call on.
+// tool ran", which is the one signal the proxy may replay a call on. Section 5d
+// holds a call in flight while another tenant signs in on the same session, and
+// checks the call finishes as the tenant it started as.
 //
 // HISTORY — why the old "no-bearer" checks are gone and must not come back.
 // Until 39ff024, "/mcp" was optional-auth (704206e), and this file asserted
@@ -59,10 +61,13 @@ import { randomBytes } from "node:crypto";
 //
 // `seen` records every call it gets; `elsewhere` records calls to a second fake
 // host, the url a tenant's agent may pass to ateam_auth (section 5b). `answers`
-// lets a check make a path fail AFTER the work was done (section 5c).
+// lets a check make a path fail AFTER the work was done (section 5c). `holds`
+// keeps a path's reply back until the check lets it go, so a tool call can be
+// held in flight while something else happens on its session (section 5d).
 const seen = [];
 const elsewhere = [];
 const answers = new Map(); // path substring → { status, body }
+const holds = new Map();   // path substring → Promise, resolved to let the reply go
 const record = (req) => ({
   path: req.url,
   key: req.headers["x-api-key"] || null,
@@ -71,8 +76,10 @@ const record = (req) => ({
   actor: req.headers["x-adas-actor-id"] || null,
 });
 function fakeHost(log) {
-  const srv = http.createServer((req, res) => {
+  const srv = http.createServer(async (req, res) => {
     log.push(record(req));
+    const held = [...holds].find(([p]) => req.url.includes(p));
+    if (held) await held[1];
     const hit = [...answers].find(([p]) => req.url.includes(p));
     const { status, body } = hit ? hit[1] : { status: 200, body: { ok: true, solutions: [] } };
     res.writeHead(status, { "content-type": "application/json" });
@@ -546,6 +553,100 @@ const ranAndFailed = async (name, args, path, answer) => {
   seen.length = 0;
   const r = await call(P6, "ateam_github_patch", { solution_id: "sol-b", path: "a.txt", content: "x" });
   check("a tenant tool on a session nobody signed in to → marked stage auth_gate, nothing ran", refusedAtGate(r) && seen.length === 0);
+}
+
+// ─── 5d. A sign-in never reaches a call already in flight ───────────────────
+// 5b signs tenants in BETWEEN calls. The proxy's own lock keeps it that way only
+// while the proxy is still waiting: its forward timeout (330s) is shorter than
+// the tools that poll (a chain wait runs up to 15 minutes), and when it gives up
+// the lock is released with the tool still running here. Every request used to
+// read the session's key when it went out, so the rest of that call ran as
+// whichever tenant signed in next. Each call below is HELD at the fake upstream
+// mid-flight while another tenant signs in on the same session, then let go.
+console.log("ONE platform session: a sign-in never reaches a call already in flight");
+const until = async (cond, what) => {
+  for (let i = 0; i < 300; i++) { if (cond()) return true; await new Promise((r) => setTimeout(r, 10)); }
+  throw new Error(`timed out waiting for ${what}`);
+};
+const hold = (path) => {
+  let release;
+  holds.set(path, new Promise((r) => { release = r; }));
+  return () => { holds.delete(path); release(); };
+};
+const INFLIGHT = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+reset();
+check("A signs in → ok", succeeded(await call(INFLIGHT, "ateam_auth", { api_key: KEY_A })));
+{
+  // Not in-flight yet, but the same mechanism: ateam_auth runs holding the
+  // session's record from before it (none here, the previous tenant's in 5b),
+  // and must make its own check with the key it has just set.
+  const own = seen.filter((c) => c.path.startsWith("/deploy/solutions"));
+  check("ateam_auth's own check went out with the key it had just set", onlyKey(own, KEY_A, "tenanta"));
+}
+{
+  // A call that makes TWO requests: the job, then its chain.
+  const letGo = hold("/test/job-in-flight");
+  reset();
+  const pending = call(INFLIGHT, "ateam_test_status",
+    { solution_id: "sol-a", skill_id: "skill-a", job_id: "job-in-flight", include_chain: true });
+  await until(() => seen.some((c) => c.path.includes("/test/job-in-flight")), "A's first request");
+  const bIn = succeeded(await call(INFLIGHT, "ateam_auth", { api_key: KEY_B }));
+  letGo();
+  const r = await pending;
+  const first = seen.filter((c) => c.path.includes("/test/job-in-flight"));
+  const second = seen.filter((c) => c.path.includes("/deploy/jobs/job-in-flight/chain"));
+  check("(control) B signed in on the same session while A's call was held", bIn);
+  check("(control) A's call finished, and made its second request after B signed in", succeeded(r) && second.length === 1);
+  check("(control) A's first request carried A's key", onlyKey(first, KEY_A, "tenanta"));
+  check("A's second request still carried A's key and tenant, not B's", onlyKey(second, KEY_A, "tenanta"));
+  const b = await listAs(INFLIGHT);
+  check("the session itself is B's now: B's next call carries B's key", b.ok && onlyKey(b.calls, KEY_B, "tenantb"));
+}
+{
+  // A call whose RESULT the dispatcher acts on: ateam_test_skill mints an actor
+  // (learned into the session) and is stamped with where it landed (_where).
+  reset();
+  check("A signs in again → ok", succeeded(await call(INFLIGHT, "ateam_auth", { api_key: KEY_A })));
+  const path = "/skills/skill-in-flight/test";
+  answers.set(path, { status: 200, body: { ok: true, job_id: "job-of-a", actor_id: "actor-minted-for-a" } });
+  const letGo = hold(path);
+  try {
+    const pending = call(INFLIGHT, "ateam_test_skill",
+      { solution_id: "sol-a", skill_id: "skill-in-flight", message: "hi", wait: false });
+    await until(() => seen.some((c) => c.path.includes(path)), "A's test kickoff");
+    const bIn = succeeded(await call(INFLIGHT, "ateam_auth", { api_key: KEY_B }));
+    letGo();
+    const x = resultOf(await pending);
+    let out = null;
+    try { out = JSON.parse(x?.content?.[0]?.text || "null"); } catch { /* checked below */ }
+    check("(control) B signed in while A's test was held, and A's test finished", bIn && out?.job_id === "job-of-a");
+    check("A's result says it landed on A's tenant, not B's", out?._where?.tenant === "tenanta");
+  } finally { answers.delete(path); holds.delete(path); }
+  const b = await listAs(INFLIGHT);
+  check("B's calls carry B's key and NOT the actor A's call minted", b.ok && onlyKey(b.calls, KEY_B, "tenantb") && noActor(b.calls));
+}
+{
+  // The same on a BEARER's session: one user, switching to another of its
+  // tenants while a call of its own is still running. The call finishes on the
+  // tenant it started on. A bearer's session is re-seeded on every request, so
+  // its record is live when the switch lands: this is the case that needs a
+  // sign-in to REPLACE the record, never edit the one a call in flight holds.
+  const callBearerA = (name, args = {}) => mcp("POST", {
+    headers: { ...sid(SID_A), ...bearer(BEARER_A) },
+    body: { jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } },
+  });
+  const letGo = hold("/test/job-of-bearer");
+  reset();
+  const pending = callBearerA("ateam_test_status",
+    { solution_id: "sol-a", skill_id: "skill-a", job_id: "job-of-bearer", include_chain: true });
+  await until(() => seen.some((c) => c.path.includes("/test/job-of-bearer")), "the bearer call's first request");
+  const switched = succeeded(await callBearerA("ateam_auth", { api_key: KEY_B }));
+  letGo();
+  const r = await pending;
+  const second = seen.filter((c) => c.path.includes("/deploy/jobs/job-of-bearer/chain"));
+  check("(control) A's user switched its session to tenant B while its call was held", switched);
+  check("A's call finished on the tenant it started on", succeeded(r) && onlyKey(second, BEARER_A, "tenanta"));
+  check("(restore) A's user signs back in as A", succeeded(await callBearerA("ateam_auth", { api_key: BEARER_A })));
 }
 
 // ─── 6. Layer 1's one exception: token auto-injection ───────────────────────

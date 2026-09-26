@@ -2,15 +2,17 @@
  * A-Team API client — thin HTTP wrapper for the External Agent API.
  *
  * Credentials resolve in this order:
- *   1. Per-session override (set via ateam_auth tool — used by HTTP transport)
+ *   1. Per-session record (set via ateam_auth, or seeded from the bearer), as
+ *      the CURRENT TOOL CALL sees it — see runToolCall
  *   2. Environment variables (ADAS_API_KEY, ADAS_TENANT — used by stdio transport)
- *   3. Defaults (no key, tenant "main")
+ *   3. Nothing: no key and no tenant. There is no default tenant.
  *
  * Sessions also track activity timestamps and optional context (active solution,
  * last skill) to support TTL-based cleanup and smarter UX.
  */
 
 import { timingSafeEqual } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
@@ -28,7 +30,63 @@ const SWEEP_INTERVAL = 5 * 60 * 1000; // every 5 minutes
 
 // Per-session store (sessionId → { tenant, apiKey, lastActivity, context })
 // context: { activeSolutionId, lastSkillId, lastToolName }
+// A record is REPLACED, never edited, when a session signs in again
+// (setSessionCredentials builds a new object), which is what lets a tool call
+// already in flight keep the one it started with. See runToolCall.
 const sessions = new Map();
+
+/**
+ * A TOOL CALL RUNS AS THE SESSION WAS WHEN IT STARTED.
+ *
+ * Every request used to read the session's credentials from `sessions` at the
+ * moment it went out (headers, getBaseUrl — 3d8ec1c, v0.1.4). One session was
+ * one caller then, so "the session's key now" and "the key this call started
+ * with" were the same key. The platform session made them different (f05c750):
+ * ateam-proxy-mcp keeps ONE session for every tenant and signs each one in with
+ * ateam_auth before its calls. A call that makes several requests (a deploy
+ * that then polls, a test that then reads the chain, a 15-minute chain wait)
+ * read the record again for each of them, so once another tenant signed in
+ * during the call, the rest of it went out with THAT tenant's key and tenant
+ * header, its actor landed in that tenant's record, and its `_where` named that
+ * tenant. The proxy serializes sign-in and call under a per-session lock, but
+ * the lock ends when the proxy stops waiting (its forward timeout, 330s), not
+ * when the tool here finishes, and nothing here may depend on a caller's lock
+ * for tenant isolation.
+ *
+ * So each tools/call (src/server.js) runs inside runToolCall, which holds the
+ * session's record as it was when the call arrived, and sessionRecord answers
+ * from it for the whole call, across every await. A sign-in by ANOTHER call
+ * replaces the session's record and leaves this one alone. A sign-in by THIS
+ * call (ateam_auth) is the one change it adopts: setSessionCredentials and
+ * resetPlatformSession update the call's record as well as the session's.
+ *
+ * Outside a tool call (seedCredentials on an incoming request, the sweep, a test
+ * calling a handler directly) sessionRecord reads the session store, as before.
+ */
+const toolCall = new AsyncLocalStorage(); // { sessionId, record }
+
+/** Run one tool call as `sessionId` was when it arrived. */
+export function runToolCall(sessionId, fn) {
+  return toolCall.run({ sessionId, record: sessions.get(sessionId) || null }, fn);
+}
+
+/**
+ * The session record this code acts as: the current tool call's, when it runs
+ * inside one for this session; otherwise the session store's. The ONE read of a
+ * session's credentials and context — every reader below goes through it.
+ */
+function sessionRecord(sessionId) {
+  if (!sessionId) return null;
+  const call = toolCall.getStore();
+  if (call && call.sessionId === sessionId) return call.record;
+  return sessions.get(sessionId) || null;
+}
+
+/** This call changed its own session's record (ateam_auth): it acts as the new one. */
+function adoptRecord(sessionId, record) {
+  const call = toolCall.getStore();
+  if (call && call.sessionId === sessionId) call.record = record;
+}
 
 // ── Bearer-based auth (persistent across sessions) ──────────────
 // The OAuth bearer token IS the user's API key (oauth.js exchangeAuthorizationCode).
@@ -61,7 +119,8 @@ const sessionOwners = new Map();
  * platform session is refused until ateam_auth puts that tenant's credential
  * in, exactly as for any other session. And since many tenants take turns on
  * one platform session, each ateam_auth there replaces the last tenant's record
- * instead of merging into it (resetPlatformSession).
+ * instead of merging into it (resetPlatformSession), and a call already in
+ * flight keeps the record it started with (runToolCall).
  *
  * A Symbol, never a string, so it cannot equal any bearer a client presents.
  * It is never a key in authOverrides (see bearerOf): overrides are per bearer
@@ -282,8 +341,10 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
       `anything that needs the tenant BY NAME must call whoami rather than assume one.`
     );
   }
-  const existing = sessions.get(sessionId);
-  sessions.set(sessionId, {
+  const existing = sessionRecord(sessionId);
+  // A NEW object, never an edit of the old one: a call still in flight holds
+  // the old one and must keep it (runToolCall).
+  const record = {
     // Never `undefined` — a missing tenant is an explicit null, so every reader
     // sees "not resolved" rather than an absent property it might paper over.
     tenant: resolvedTenant || null,
@@ -293,7 +354,9 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     masterKey: masterKey || existing?.masterKey || null,
     lastActivity: Date.now(),
     context: existing?.context || {},
-  });
+  };
+  sessions.set(sessionId, record);
+  adoptRecord(sessionId, record);
   const urlNote = apiUrl ? `, url: ${apiUrl}` : "";
   const masterNote = masterKey ? ", MASTER MODE" : "";
   console.log(`[Auth] Credentials set for session ${sessionId} (tenant: ${resolvedTenant || "unresolved — sealed key"}${explicit ? ", explicit" : ""}${urlNote}${masterNote})`);
@@ -304,7 +367,7 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
  * Returns true if switched, false if not in master mode.
  */
 export function switchTenant(sessionId, newTenant) {
-  const session = sessions.get(sessionId);
+  const session = sessionRecord(sessionId);
   if (!session?.masterKey) return false;
   session.tenant = newTenant;
   session.lastActivity = Date.now();
@@ -316,7 +379,7 @@ export function switchTenant(sessionId, newTenant) {
  * Check if a session is in master key mode.
  */
 export function isMasterMode(sessionId) {
-  const session = sessions.get(sessionId);
+  const session = sessionRecord(sessionId);
   return !!(session?.masterKey);
 }
 
@@ -328,7 +391,7 @@ export function isMasterMode(sessionId) {
  */
 export function getCredentials(sessionId) {
   // 1. Per-session credentials
-  const session = sessionId ? sessions.get(sessionId) : null;
+  const session = sessionRecord(sessionId);
   if (session) {
     return { tenant: session.tenant, apiKey: session.apiKey };
   }
@@ -376,7 +439,7 @@ export function isAuthenticated(sessionId) {
 export function isExplicitlyAuthenticated(sessionId) {
   if (!sessionId) return false;
   // Session has credentials AND they came from ateam_auth (not just seedCredentials)
-  const session = sessions.get(sessionId);
+  const session = sessionRecord(sessionId);
   if (session?.authExplicit) return true;
   // Bearer has an active auth override from a previous session's ateam_auth
   return hasBearerAuth(sessionId);
@@ -399,7 +462,7 @@ export function isExplicitlyAuthenticated(sessionId) {
  * hint telling a human to re-authenticate a key that was never the problem.
  */
 export function clearSessionActor(sessionId, reason = "") {
-  const session = sessionId ? sessions.get(sessionId) : null;
+  const session = sessionRecord(sessionId);
   if (!session?.context?.actorId) return false;
   const had = session.context.actorId;
   delete session.context.actorId;
@@ -408,7 +471,7 @@ export function clearSessionActor(sessionId, reason = "") {
 }
 
 export function touchSession(sessionId, { toolName, solutionId, skillId, actorId } = {}) {
-  const session = sessions.get(sessionId);
+  const session = sessionRecord(sessionId);
   if (!session) return;
 
   session.lastActivity = Date.now();
@@ -457,7 +520,7 @@ export function touchSession(sessionId, { toolName, solutionId, skillId, actorId
  * Returns {} if no session or no context.
  */
 export function getSessionContext(sessionId) {
-  const session = sessions.get(sessionId);
+  const session = sessionRecord(sessionId);
   if (!session) return {};
   return { ...session.context };
 }
@@ -512,12 +575,17 @@ export function bindSessionPlatform(sessionId) {
  * getBaseUrl, which reads the record), and it stays dropped if the sign-in then
  * fails: a failed sign-in leaves nobody signed in, never the tenant before.
  * The owner binding stays; only the credentials and the context go.
+ *
+ * Dropped for the ateam_auth call itself too (it started holding the previous
+ * tenant's record — runToolCall), and ONLY for it: another tenant's call still
+ * in flight on this session keeps its own record to the end.
  */
 export function resetPlatformSession(sessionId) {
   if (!sessionId || sessionOwners.get(sessionId) !== PLATFORM_PRINCIPAL) return false;
   if (sessions.delete(sessionId)) {
     console.log(`[Auth] Platform session ${sessionId}: previous sign-in dropped before ateam_auth`);
   }
+  adoptRecord(sessionId, null);
   return true;
 }
 
@@ -601,7 +669,7 @@ export function getAuthOverride(bearerToken) {
  */
 export function getBaseUrl(sessionId) {
   // 1. Per-session
-  const session = sessionId ? sessions.get(sessionId) : null;
+  const session = sessionRecord(sessionId);
   if (session?.apiUrl) return session.apiUrl;
   // 2. Bearer override
   if (sessionId) {
@@ -750,7 +818,7 @@ export function getSessionStats() {
 }
 
 function headers(sessionId) {
-  const session = sessionId ? sessions.get(sessionId) : null;
+  const session = sessionRecord(sessionId);
 
   // Master mode: use shared secret auth (x-adas-token) instead of API key.
   // A master-mode session MUST have an active tenant (set via ateam_auth or
@@ -1109,7 +1177,7 @@ export async function del(path, sessionId, opts) {
  * public domains without explicit ports).
  */
 export async function listTenants(sessionId) {
-  const session = sessionId ? sessions.get(sessionId) : null;
+  const session = sessionRecord(sessionId);
   if (!session?.masterKey) throw new Error("listTenants requires master key auth");
 
   const controller = new AbortController();
