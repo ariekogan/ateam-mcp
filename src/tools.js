@@ -125,10 +125,27 @@ const JOB_LIFECYCLE_STATUSES = new Set(["in_progress", "done", "failed"]);
 const CLEAN_REDEPLOY_OUTCOMES = new Set(["deployed"]);
 
 /**
- * @param {object} result  a finished job entry, a sync body, or pollDeployJob's timeout object
- * @returns {{ failed: boolean, degraded: boolean, outcome: string|undefined }}
+ * THE DEPLOY'S OWN SENTENCE, OR NOTHING. A job entry's `message` is either what
+ * the deploy said or the leftover PROGRESS text ("Redeploying skill from GitHub
+ * or Builder FS..."), and quoting the second as a verdict is a false report. It
+ * is the deploy's sentence only when a SINGLE-skill runFn RETURNED: every
+ * Builder's single-skill result carries one (the normaliser always writes it;
+ * prod spreads deploySkillToADAS's, which always has one). A bulk runFn returns
+ * none, and a runFn that THREW returned nothing at all, so in both cases the
+ * progress text is what is left standing.
  */
-function redeployVerdict(result) {
+function deploySentence(r, single) {
+  return single && typeof r.message === "string" && r.message.trim() ? r.message.trim() : undefined;
+}
+
+/**
+ * @param {object} result  a finished job entry, a sync body, or pollDeployJob's timeout object
+ * @param {{ single?: boolean }} [opts]  a single-skill redeploy (see deploySentence)
+ * @returns {{ failed: boolean, degraded: boolean, outcome: string|undefined, reason: string|undefined }}
+ *   `reason` is the deploy's own explanation, when it gave one: its error, or
+ *   (single-skill only) its message.
+ */
+function redeployVerdict(result, { single = false } = {}) {
   const r = result && typeof result === "object" ? result : {};
   // What the deploy itself STATED. Never a lifecycle word.
   const stated = r.deploy_status ?? (JOB_LIFECYCLE_STATUSES.has(r.status) ? undefined : r.status);
@@ -139,7 +156,18 @@ function redeployVerdict(result) {
   //    NO ok key and the progress text still standing — `ok !== false` read
   //    that as "reached Core WITH ERRORS". Lifecycle 'failed' alone is not the
   //    test: pollDeployJob's timeout is ok:false with no status at all.
-  if (r.ok !== true) return { failed: true, degraded: false, outcome: stated ?? "failed" };
+  //    And ok:true is not the whole statement either: a body that ALSO carries
+  //    a top-level `error` has told us something failed, and a verdict that
+  //    reads only `ok` would call it a clean success.
+  if (r.ok !== true || r.error) {
+    // ok === false EXPLICITLY means the runFn RETURNED — prod (2e8cab5, no
+    // normaliser) hands back deploySkillToADAS's own ok:false with its own
+    // message and no `error`. That sentence is the reason; "gave no reason"
+    // would be false. A crashed job has no ok key, so it never gets here with
+    // only a message.
+    const reason = r.error || (r.ok === false ? deploySentence(r, single) : undefined);
+    return { failed: true, degraded: false, outcome: stated ?? "failed", reason };
+  }
 
   // 2. DEGRADED. With no stated outcome (a Builder before #44, async path),
   //    re-derive it by the Builder's OWN rule — deploySkillToADAS:
@@ -158,7 +186,18 @@ function redeployVerdict(result) {
   const outcome = stated ?? inferred;
   const degraded = (Number(r.failed) || 0) > 0
     || (outcome != null && !CLEAN_REDEPLOY_OUTCOMES.has(outcome));
-  return { failed: false, degraded, outcome: outcome ?? (degraded ? "deployed_with_errors" : undefined) };
+  return {
+    failed: false,
+    degraded,
+    outcome: outcome ?? (degraded ? "deployed_with_errors" : undefined),
+    reason: degraded ? deploySentence(r, single) : undefined,
+  };
+}
+
+/** A quoted sentence that ends like one, so the next sentence does not run into it. */
+function asSentence(text) {
+  const t = String(text).trim();
+  return /[.!?]$/.test(t) ? t : `${t}.`;
 }
 
 /**
@@ -833,14 +872,16 @@ export const tools = [
     name: "ateam_build_and_run",
     core: true,
     description:
-      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → auto-pushes to GitHub.\n\n" +
+      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → on a FIRST deploy (no repo yet) creates the GitHub repo and pushes to it.\n\n" +
       "🌳 DEV/PROD WORKFLOW:\n" +
       "  1. Edit files → ateam_github_patch (writes to `dev` branch by default)\n" +
       "  2. (Optional) Preview what's about to ship → ateam_github_diff\n" +
       "  3. Ship dev → main → ateam_github_promote (merges + auto-tags `prod-YYYY-MM-DD-NNN`)\n" +
       "  4. Deploy main to Core → ateam_build_and_run\n\n" +
-      "This tool ALWAYS deploys the `main` branch — there is no `ref` parameter. To deploy in-progress dev work, first promote it.\n\n" +
-      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.",
+      "Whatever you do not pass inline comes from the `main` branch — there is no `ref` parameter. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
+      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.\n\n" +
+      "REFUSED, before anything is saved or deployed (409 UNPUSHED_BUILDER_CHANGE, naming the files), while a solution or skill file it would take from `main` holds a Builder change that no branch has: a Builder save held off `dev` (after a ref:'main' hotfix or a rollback) or one whose push to GitHub failed. Deploying would overwrite it and it would exist nowhere. " +
+      "Place it: ateam_redeploy(solution_id) — the whole solution, not one skill — writes the Builder's copy of solution.json and of every skill to `dev` (run ateam_github_sync_from_main first when the file holds a hotfix — ateam_redeploy says so; its not_written_to_github says what it could not place), then ateam_github_promote and deploy again. Or drop it: ateam_github_pull(solution_id, discard_builder_changes:true) replaces the Builder's copy with `dev`'s.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1496,11 +1537,11 @@ export const tools = [
     core: true,
     description:
       "Upload connector code to Core and restart — WITHOUT redeploying skills.\n\n" +
-      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved from GitHub. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
+      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
       "Modes:\n" +
       "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
       "  • github:true + files:[]        — GitHub state at `ref` as BASE, your files overlay on top (incoming wins).\n" +
-      "  • files:[] (no github)          — default MERGE with GitHub state at `ref`. Refuses if no GitHub base exists (no silent nuke).\n" +
+      "  • files:[] (no github)          — default MERGE: your files over the GitHub state at `ref`, which is itself laid over the files Core ALREADY runs for this connector. So a file that exists only in the deployed copy SURVIVES this mode. Refuses if no base exists at all (no silent nuke).\n" +
       "  • files:[] + replace:true       — full replace. Wipes connector dir + writes only the provided files. Use deliberately.\n\n" +
       "Multi-file connectors (server.js + dashboard HTML + RN bundle + package/manifest): pass each file with content_base64 (a single-line, escape-safe base64 string) instead of content — so you don't hand-escape ~90KB of HTML/JS/JSON inside one tool call. This is the CANONICAL agent path for a full connector; do NOT hand-roll `curl` against the raw endpoint (that skips connector registration / PAT provisioning).\n\n" +
       "Common traps this design prevents:\n" +
@@ -2180,13 +2221,19 @@ export const tools = [
     name: "ateam_github_pull",
     core: true,
     description:
-      "Deploy a solution FROM its GitHub repo. Reads .ateam/export.json + connector source from the repo and feeds it into the deploy pipeline. Use this to restore a previous version or deploy from GitHub as the source of truth.",
+      "Deploy a solution FROM its GitHub repo. Reads .ateam/export.json + connector source from the repo and feeds it into the deploy pipeline. Use this to restore a previous version or deploy from GitHub as the source of truth. " +
+      "It REPLACES the Builder's copy of each file with the repo's (`dev`). Where the Builder holds a change that never reached GitHub (a save held off `dev`, one whose push failed, a file changed on both sides), that change would exist nowhere afterwards, so the pull is REFUSED (409 UNPUSHED_BUILDER_CHANGE, naming the files) before anything is uploaded or deployed — " +
+      "unless you pass discard_builder_changes:true, the explicit way to take `dev`'s copy of a file changed on both sides, or to drop such a change. To keep the change instead, ateam_redeploy(solution_id) writes it to `dev` first.",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: {
           type: "string",
           description: "The solution ID to pull and deploy from GitHub",
+        },
+        discard_builder_changes: {
+          type: "boolean",
+          description: "true = drop any Builder change that never reached GitHub, replacing it with the repo's copy. Only when you mean to lose it: without it, a pull that would drop one is refused and names the files.",
         },
       },
       required: ["solution_id"],
@@ -2247,7 +2294,12 @@ export const tools = [
       "1. FULL FILE: provide `content` — replaces entire file (good for new files or small files)\n" +
       "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
       "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
-      "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes.",
+      "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
+      "After one, run ateam_github_sync_from_main so `dev` has it too. Until `dev` holds the same content, the Builder's copy of that file is `main` content `dev` does not have: " +
+      "ateam_redeploy and ateam_patch refuse to deploy the solution — any skill of it, not only that file's — and name the file (they never ship `dev`'s older copy over the hotfix, nor write the hotfix over `dev`), and ateam_build_and_run deploys it from `main`. " +
+      "A Builder save of that file meanwhile stays in the Builder (its reply says NOT_WRITTEN_TO_GITHUB), and ateam_build_and_run is refused (UNPUSHED_BUILDER_CHANGE) until it is placed — ateam_github_pull too, unless told discard_builder_changes:true. " +
+      "Connector code has no such check: ateam_upload_connector deploys `dev`'s code, so sync before the next upload of that connector. " +
+      "The reply's fs_mirror says what the Builder did with the file (a note when it did NOT copy it: its own copy had a change of its own).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2489,7 +2541,7 @@ export const tools = [
     description:
       "Roll prod (`main` branch) back to a previous state.\n\n" +
       "ADDITIVE — does NOT destroy history. Creates a new commit on top of main whose tree matches the target's tree. The history of everything between target and current main is preserved (you can roll back the rollback).\n\n" +
-      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run (deploys the reverted state). ${BRANCH_WORKFLOW.legacy_tag_note}`,
+      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run(solution_id) (deploys the reverted state) → 4) ateam_github_sync_from_main(solution_id), so \`dev\` carries it too: the iterate tools deploy from \`dev\`. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3452,9 +3504,12 @@ export const handlers = {
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
         { step: 3, action: "Version", description: `Writes land on \`${BRANCH_WORKFLOW.write_branch}\`, NOT ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.deploy_side} The repo (one per TENANT) is the source of truth for connector code.`, tools: ["ateam_github_status", "ateam_github_log", BRANCH_WORKFLOW.promote_tool] },
-        { step: 4, action: "Iterate", description: `Edit connector code ONE FILE AT A TIME via ateam_github_patch, then follow the loop: ${BRANCH_WORKFLOW.one_line}. ${BRANCH_WORKFLOW.the_silent_mistake} NEVER re-pass all connector code inline after first deploy. For skill definitions use ateam_patch.`, tools: ["ateam_github_patch", BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_patch"] },
-        { step: 5, action: "Test & Debug", description: "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
-        { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_github_list_versions", "ateam_github_rollback"] },
+        // ITERATE IS NOT SHIP. This step used to carry the ship loop (one_line)
+        // and list promote + build_and_run, so the loop an agent follows most
+        // often told it to ship every change.
+        { step: 4, action: "Iterate", description: `Change it on \`${BRANCH_WORKFLOW.write_branch}\` and deploy it from \`${BRANCH_WORKFLOW.write_branch}\` to test it, with no promote. Connector code: ateam_github_patch, ONE FILE AT A TIME, then ateam_upload_connector(solution_id, connector_id, github:true). Skill or solution definitions: ateam_patch, which writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call. ${BRANCH_WORKFLOW.iterate_note} NEVER re-pass all connector code inline after first deploy.`, tools: ["ateam_github_patch", "ateam_upload_connector", "ateam_patch", "ateam_redeploy"] },
+        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} Then ateam_build_and_run(solution_id) deploys \`${BRANCH_WORKFLOW.deploy_branch}\`. ${BRANCH_WORKFLOW.the_silent_mistake} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
     conversation_flow: {
@@ -3498,21 +3553,27 @@ export const handlers = {
         "connectors/{connector-id}/server.js": "Connector MCP server code",
         "connectors/{connector-id}/package.json": "Connector dependencies",
       },
-      branch: `${BRANCH_WORKFLOW.write_branch} for every write; ${BRANCH_WORKFLOW.deploy_branch} for every deploy. ${BRANCH_WORKFLOW.promote_tool} is the ONLY thing that moves work from one to the other.`,
+      // It said "main for every deploy" and "promote is the ONLY thing that
+      // moves work", in the same response as the iterate loop that deploys dev
+      // with no promote. Rendered from the owner now, like `branching`.
+      branch: `${BRANCH_WORKFLOW.write_side} ${BRANCH_WORKFLOW.deploy_side}`,
       checkpoints: `${BRANCH_WORKFLOW.tag_format} tags are created automatically by each promote. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint}`,
       iteration_workflow: {
         the_loop: BRANCH_WORKFLOW.loop,
-        code_changes: `ateam_github_patch (ONE FILE PER CALL) → ${BRANCH_WORKFLOW.promote_tool}(solution_id) → ateam_build_and_run()`,
-        definition_changes: `ateam_patch → ${BRANCH_WORKFLOW.promote_tool}(solution_id) when you want it in production`,
+        // ITERATE, THEN SHIP. code_changes was the ship loop under the label
+        // "iteration" (github_patch → promote → build_and_run), the defect
+        // developer_loop step 4 was fixed for.
+        code_changes: `ateam_github_patch (ONE FILE PER CALL) → ateam_upload_connector(solution_id, connector_id, github: true) deploys it from \`${BRANCH_WORKFLOW.write_branch}\` to test. Ship when it is right: ${BRANCH_WORKFLOW.promote_tool}(solution_id) → ateam_build_and_run(solution_id).`,
+        definition_changes: `ateam_patch writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call → test → ${BRANCH_WORKFLOW.promote_tool}(solution_id) when you want it in production`,
         first_deploy: "Must include mcp_store — this creates the GitHub repo",
-        after_first_deploy: "NEVER pass mcp_store again. Write files via ateam_github_patch, promote, then ateam_build_and_run() auto-detects the repo.",
+        after_first_deploy: `NEVER pass mcp_store again. Write files via ateam_github_patch and test them with ateam_upload_connector; to ship, promote, then ateam_build_and_run(solution_id) auto-detects the repo and deploys \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
         do_not_skip_promote: BRANCH_WORKFLOW.the_silent_mistake,
       },
       when_to_use_what: {
         ateam_github_write: `Write/create connector files on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
         ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
         ateam_patch: `Edit skill definitions (intents, tools, policy) — auto-pushes to \`${BRANCH_WORKFLOW.write_branch}\`. Promote when you want it in production.`,
-        "ateam_build_and_run()": "Redeploy — auto-pulls from GitHub if repo exists. No need to pass mcp_store or github flag.",
+        "ateam_build_and_run()": `Deploy \`${BRANCH_WORKFLOW.deploy_branch}\` (after a promote) — auto-pulls from GitHub if the repo exists. No need to pass mcp_store or github flag.`,
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
         ateam_github_promote: `SHIP ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} dry_run:true previews what would ship.`,
         ateam_github_rollback: BRANCH_WORKFLOW.rollback,
@@ -3667,11 +3728,16 @@ export const handlers = {
         "Explain Skill vs Solution vs Connector in plain words before building",
         "Use ateam_build_and_run for the full lifecycle (validates automatically)",
         "Use ateam_patch for skill/solution definition changes (updates + redeploys automatically)",
-        "Use ateam_github_patch + ateam_build_and_run(github:true) for connector code changes after first deploy",
+        // It said ateam_github_patch + ateam_build_and_run(github:true), four
+        // lines above the rule below. build_and_run deploys `main`, so it
+        // either refuses (MAIN_BEHIND_DEV) or deploys without the patch.
+        "Use ateam_github_patch + ateam_upload_connector(solution_id, connector_id, github:true) for connector code changes after first deploy; promote + ateam_build_and_run(solution_id) only to ship",
         "Study the connector example (ateam_get_examples type='connector') before writing connector code",
         "Ask discovery questions if goal unclear — one at a time, with choices",
         "Deliver the FULL ask, including any requested UI/widget; stage only with the user's agreement",
-        `After any write, say the change is not live yet and name the next step: ${BRANCH_WORKFLOW.one_line}.`,
+        // "After ANY write, say the change is not live" was false for ateam_patch,
+        // which redeploys in the same call.
+        `After a repo-only write (ateam_github_patch / ateam_github_write), say it is not deployed yet and name the next step: deploy it from \`${BRANCH_WORKFLOW.write_branch}\` to test (ateam_upload_connector / ateam_redeploy), or ship it: ${BRANCH_WORKFLOW.one_line}.`,
       ],
       never: [
         "Talk to a business user like a developer — no jargon, no walls of text",
@@ -3984,6 +4050,18 @@ export const handlers = {
     // Phase 0: Auto-detect GitHub repo — if no mcp_store passed and repo exists, pull bundle from GitHub
     let effectiveMcpStore = mcp_store;
     let effectiveSkills = skills;
+    // WHAT THE CALLER WROTE, captured before Phase 0 fills the gaps from the repo.
+    // `connectors` is reassigned below when it is synthesized from mcp_store keys,
+    // so it has to be read here.
+    const inline = {
+      solution: Boolean(solutionArg),
+      skills: Array.isArray(skills) && skills.length > 0,
+      connectors: Array.isArray(connectors) && connectors.length > 0,
+    };
+    // Set only when Phase 0 actually read the bundle. `github` alone does not say
+    // that: a caller may pass github:true together with mcp_store, and then
+    // nothing is pulled.
+    let pulledMcpStore = false;
     if (!mcp_store) {
       try {
         const ghStatus = await get(`/deploy/solutions/${solutionId}/github/status`, sid);
@@ -4000,9 +4078,18 @@ export const handlers = {
     }
     if (github && !mcp_store) {
       try {
+        // NAME THE BRANCH. build_and_run deploys the SHIPPED state — that is
+        // the whole dev → promote → main design, and why the Builder refuses
+        // this deploy with MAIN_BEHIND_DEV until you promote. This call used
+        // to send {} and lean on the Builder's default, which was `main` until
+        // Builder 873558e changed it to `dev`: from then on this deployed
+        // UNSHIPPED dev while every doc, the guard and deployed_from_branch
+        // all still said main. The Builder now refuses a branch-less read
+        // (BRANCH_REQUIRED), so the intent has to be stated here, from the
+        // one owner of the branch story.
         const pullResult = await post(
           `/deploy/solutions/${solutionId}/github/pull-bundle`,
-          {},
+          { branch: BRANCH_WORKFLOW.deploy_branch },
           sid,
           { timeoutMs: 60_000 },
         );
@@ -4016,6 +4103,7 @@ export const handlers = {
           };
         }
         effectiveMcpStore = pullResult.mcp_store || {};
+        pulledMcpStore = true;
         // Use solution from GitHub if not passed inline
         if (!solution && pullResult.solution) {
           solution = pullResult.solution;
@@ -4150,13 +4238,56 @@ export const handlers = {
     }
 
     // Phase 2: Deploy
+    //
+    // pulled_from_github NAMES THE PARTS THAT ARE THE REPO'S CONTENT, and it
+    // must be exact. The Builder (#50) saves those parts into its store as a
+    // MIRROR: FS-only, never written back; it records a sync baseline instead
+    // (which side changed is decided from that, not from updated_at). An
+    // inline solution or skills it writes to `dev`, where an inline edit
+    // belongs. (Inline connector CODE is a different, older story: on a repo
+    // that exists, no deploy writes it to GitHub at all. Use ateam_github_write
+    // for code.) And its MAIN_BEHIND_DEV guard checks only the files the named
+    // parts were read from.
+    //
+    //   solution   pulled, and the caller passed no connectors[] of its own:
+    //              the Builder import adds new connector ids to
+    //              solution.platform_connectors, so an inline connectors[] is
+    //              an edit to solution.json.
+    //   skills     pulled.
+    //   mcp_store  pulled (Phase 0 pulls exactly when no mcp_store was passed).
+    //
+    // A LIST, NOT A FLAG. A flag for "all of it" (github:true, the previous cut
+    // of this change) left build_and_run(solution) with two wrong answers:
+    // mirror everything and the inline solution never reaches GitHub, or mirror
+    // nothing and the pulled skills are written back to dev, so the next
+    // identical call is refused because of its own write. It is also a name
+    // the Builders running today do not know. github:true is one they do, and
+    // their async hop turns it into a completeness check that refuses any
+    // connector whose source lives only in the Builder store.
+    //
+    // Sent on EVERY deploy, [] when nothing was pulled, so a Builder can tell
+    // "pulled nothing" from "a client that does not say".
+    //
+    // skip_github_push is NOT that statement. It follows the `github` argument,
+    // which is also set together with an inline mcp_store, when nothing is
+    // pulled. It is sent exactly as before (99bba7e), for the Builders that
+    // read it.
+    const pulledFromGithub = pulledMcpStore
+      ? [
+          ...(!inline.solution && !inline.connectors ? ["solution"] : []),
+          ...(!inline.skills ? ["skills"] : []),
+          "mcp_store",
+        ]
+      : [];
+    const deployBody = {
+      solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
+      ...(github && { skip_github_push: true }),
+      pulled_from_github: pulledFromGithub,
+    };
     let deploy;
     try {
       // Try sync first (fast for small solutions)
-      deploy = await post("/deploy/solution", {
-        solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
-        ...(github && { skip_github_push: true }),
-      }, sid, { timeoutMs: 120_000 });
+      deploy = await post("/deploy/solution", deployBody, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
       const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(err.message);
@@ -4167,11 +4298,9 @@ export const handlers = {
       // Timeout → retry with async mode + polling
       phases.push({ phase: "deploy", status: "async_retry" });
       try {
-        const asyncResult = await post("/deploy/solution", {
-          solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
-          ...(github && { skip_github_push: true }),
-          async: true,
-        }, sid, { timeoutMs: 15_000 });
+        // The SAME body. The async door must not learn less about where the
+        // payload came from than the sync one did.
+        const asyncResult = await post("/deploy/solution", { ...deployBody, async: true }, sid, { timeoutMs: 15_000 });
 
         if (asyncResult.job_id) {
           // Poll for completion (up to 10 min)
@@ -4243,9 +4372,18 @@ export const handlers = {
           continue;
         }
         try {
+          // THE MERGE BASE IS THE BRANCH THESE FILES CAME FROM. The upload
+          // merges `files` over the connector's GitHub state at `ref` (default
+          // `dev`), laid over the files Core already runs. With the default,
+          // files that exist only on dev rode into a run that says it deploys
+          // main. ref:main keeps those out. It does NOT remove a file that is
+          // already running in Core (the deployed copy is the floor of the
+          // merge), e.g. one a dev iteration uploaded earlier. An inline
+          // mcp_store keeps the default: those files are the caller's
+          // iteration, and dev is where iteration lives.
           const uploadResult = await post(
             `/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
-            { files },
+            { files, ...(pulledMcpStore && { ref: BRANCH_WORKFLOW.deploy_branch }) },
             sid,
             { timeoutMs: 120_000 },
           );
@@ -4295,8 +4433,12 @@ export const handlers = {
     // Phase 5: GitHub push — only when NOT deployed from GitHub
     let github_result;
     if (github) {
-      github_result = { skipped: true, reason: 'Deployed from GitHub — push-back skipped.' };
-      phases.push({ phase: "github", status: "skipped", reason: "pulled_from_github" });
+      // "Deployed from GitHub" only when something WAS pulled: github:true with
+      // an inline mcp_store pulls nothing and skips the push all the same.
+      github_result = pulledMcpStore
+        ? { skipped: true, reason: 'Deployed from GitHub — push-back skipped.' }
+        : { skipped: true, reason: 'github:true was passed with inline code — nothing was pulled, and the push was skipped.' };
+      phases.push({ phase: "github", status: "skipped", reason: pulledMcpStore ? "pulled_from_github" : "github_flag_inline_payload" });
     } else {
       try {
         github_result = await post(
@@ -4348,7 +4490,9 @@ export const handlers = {
     // Is there a branch story to tell at all? A pull or a landed push proves a
     // repo; otherwise ask the one probe that knows, rather than guessing from a
     // failed or skipped push — mirroring ateam_patch's local split.
-    const pulledFromRepo = Boolean(github);
+    // Something was PULLED — not merely `github` set, which an inline mcp_store
+    // can carry while nothing is read from the repo.
+    const pulledFromRepo = pulledMcpStore;
     const githubConnected = (pulledFromRepo || github_result?.branch)
       ? true
       : await probeGithubConnected(solutionId, sid);
@@ -4754,7 +4898,15 @@ export const handlers = {
           message,
         }, sid, { timeoutMs: 30_000 });
         writeBranch = ghResp?.branch || writeBranch;
-        phases.push({ phase: "github_write", status: "done", branch: writeBranch });
+        // The Builder may have left its own copy of the file alone (it had a
+        // change the commit did not carry — a hotfix from main, a save that
+        // never reached GitHub), or now hold main content dev lacks. Its note
+        // says so and what to do; the redeploy below is refused and names it.
+        const fsMirror = ghResp?.fs_mirror;
+        phases.push({
+          phase: "github_write", status: "done", branch: writeBranch,
+          ...((fsMirror?.mirrored === false || fsMirror?.other_branch) && fsMirror.note && { builder_copy: fsMirror.note }),
+        });
       }
     } catch (err) {
       const store = isLocal ? "Builder store (local)" : "GitHub";
@@ -4819,12 +4971,21 @@ export const handlers = {
       // The SAME verdict ateam_redeploy reports. This was its own copy,
       // `ok === false ? "error" : "done"`, so a job that crashed (no ok at all)
       // read as a completed rebuild, and a degraded one as a clean one.
-      const rd = redeployVerdict(redeployResult);
+      // `single` for a skill target, as ateam_redeploy passes it: a prod
+      // Builder's single-skill job states its reason only in `message`, and
+      // without it this phase said nothing about why.
+      const rd = redeployVerdict(redeployResult, { single: target === "skill" && Boolean(skill_id) });
       phases.push({
         phase: "redeploy",
         status: rd.failed ? "error" : "done",
-        ...(rd.failed && redeployResult?.error && { error: redeployResult.error }),
-        ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome }),
+        ...(rd.failed && rd.reason && { error: rd.reason }),
+        // A REFUSAL carries its code and its way out (the Builder's pre-deploy
+        // check: DRIFT_DETECTED, naming the file changed on both sides and how
+        // to choose). Only the bare reason used to reach the caller — "Pre-
+        // deploy consistency check failed" — with the file and the hint dropped.
+        ...(rd.failed && redeployResult?.code && { code: redeployResult.code }),
+        ...(rd.failed && redeployResult?.hint && { hint: redeployResult.hint }),
+        ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome, ...(rd.reason && { reason: rd.reason }) }),
       });
     } catch (err) {
       // Partial success: patch is saved to GitHub, only redeploy failed.
@@ -4927,18 +5088,25 @@ export const handlers = {
     // and `patch_persisted` carries the "nothing was lost" fact as a field,
     // where a caller can act on it, instead of as a lie in the status.
     const lifecycleOk = redeployResult === undefined ? true : redeployOk;
+    // The redeploy was REFUSED (it carries a hint), not merely unfinished: a
+    // retry of ateam_redeploy is refused the same way until the caller acts.
+    const refused = phases.find((p) => p.phase === "redeploy" && p.status === "error" && p.hint);
 
     return {
       ok: lifecycleOk,
       ...(!lifecycleOk && {
         patch_persisted: true,
         phase: "redeploy",
-        error:
-          `The edit was saved to ${store} but the redeploy did not complete, so the skill's ` +
-          `connector-derived tools were NOT rebuilt. Nothing is lost and nothing needs re-patching — ` +
-          `the definition is stored. Finish it with ateam_redeploy(solution_id` +
-          (skill_id ? `, skill_id: "${skill_id}"` : "") + `). Until then Builder and Core disagree ` +
-          `about this skill's tools.`,
+        error: refused
+          ? `The edit was saved to ${store}, but the redeploy was REFUSED${refused.code ? ` (${refused.code})` : ""}: ` +
+            `${asSentence(refused.error || "the Builder refused it")} Nothing is lost — the definition is stored. ` +
+            `Core still runs the previous deploy. ${refused.hint}`
+          : `The edit was saved to ${store} but the redeploy did not complete, so the skill's ` +
+            `connector-derived tools were NOT rebuilt. Nothing is lost and nothing needs re-patching — ` +
+            `the definition is stored. Finish it with ateam_redeploy(solution_id` +
+            (skill_id ? `, skill_id: "${skill_id}"` : "") + `). Until then Builder and Core disagree ` +
+            `about this skill's tools.`,
+        ...(refused && { hint: refused.hint, ...(refused.code && { code: refused.code }) }),
       }),
       solution_id,
       source: isLocal ? "local" : "github",
@@ -4974,7 +5142,9 @@ export const handlers = {
         ? (widget_health && !widget_health.ok
             ? `${redeployedLine} ⚠️ ${widget_health.issues?.length || 0} widget(s) not rendering — see widget_health.`
             : redeployedLine)
-        : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
+        : refused
+          ? `⚠️ Patched on ${store} ✅ but the redeploy was REFUSED${refused.code ? ` (${refused.code})` : ''} — see error and hint.`
+          : `⚠️ Patched on ${store} ✅ but the redeploy did NOT complete, so connector-derived tools were not rebuilt — Builder and Core disagree until you run: ateam_redeploy(solution_id` + (skill_id ? `, skill_id: "${skill_id}"` : '') + ')') + validationStatus,
       _next: isLocal
         ? 'Local edit saved + redeployed. When the tenant connects a GitHub repo, the local state is pushed → GitHub (which then becomes master).'
         : 'Your changes are on `dev`. They are NOT in production until you promote: ateam_github_promote(solution_id) merges dev → main (dry_run:true to preview), then ateam_build_and_run to deploy.',
@@ -6054,16 +6224,20 @@ export const handlers = {
   ateam_github_push: async ({ solution_id, message }, sid) =>
     post(`/deploy/solutions/${solution_id}/github/push`, { push_to_github: true, message }, sid, { timeoutMs: 60_000 }),
 
-  ateam_github_pull: async ({ solution_id }, sid) => {
+  ateam_github_pull: async ({ solution_id, discard_builder_changes }, sid) => {
+    // Dropping a Builder change that never reached GitHub is the caller's
+    // decision, stated on every door (the async job and the sync fallback):
+    // without it the Builder refuses a pull that would drop one.
+    const discard = discard_builder_changes === true ? { discard_builder_changes: true } : {};
     // Async-first: github_pull is the #1 Cloudflare-524 culprit on large
     // solutions. Kick the job off, then poll. Falls back to sync if the
     // backend doesn't support async (older deployments).
     let kicked;
     try {
-      kicked = await post(`/deploy/solutions/${solution_id}/github/pull`, { async: true }, sid, { timeoutMs: 30_000 });
+      kicked = await post(`/deploy/solutions/${solution_id}/github/pull`, { async: true, ...discard }, sid, { timeoutMs: 30_000 });
     } catch (err) {
       // Sync fallback (older backend without async support)
-      return await post(`/deploy/solutions/${solution_id}/github/pull`, {}, sid, { timeoutMs: 300_000, retries: 2 });
+      return await post(`/deploy/solutions/${solution_id}/github/pull`, { ...discard }, sid, { timeoutMs: 300_000, retries: 2 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async — return as-is
     return await pollDeployJob(kicked.job_id, sid, { label: 'github-pull', maxMs: 15 * 60_000, intervalMs: 2000 });
@@ -6510,7 +6684,10 @@ export const handlers = {
         ok: false,
         error: lastErr.message,
         ...(notFound && {
-          hint: "Skill not found in Builder storage. Edit the skill on GitHub with ateam_github_patch(solution_id, path: 'skills/<skill-id>/skill.json', search: '...', replace: '...'), then use ateam_build_and_run(solution_id, github: true) or ask the platform operator to deploy the single skill.",
+          // It said "then use ateam_build_and_run(solution_id, github: true)",
+          // which deploys `main`: without a promote it is refused
+          // (MAIN_BEHIND_DEV) or ships main's copy without the edit.
+          hint: "Skill not found in Builder storage. Write it to the repo with ateam_github_write(solution_id, path: 'skills/<skill-id>/skill.json', content) (or ateam_github_patch for an edit), which also puts it in the Builder, then retry this ateam_redeploy. To ship it: ateam_github_promote, then ateam_build_and_run(solution_id).",
         }),
         ...(isTimeout && {
           hint: "Redeploy timed out even after async polling (15min). Use ateam_redeploy(solution_id, skill_id: '<specific-skill>') to redeploy one skill at a time.",
@@ -6518,7 +6695,7 @@ export const handlers = {
       };
     }
     if (!result) result = { ok: false, error: 'Redeploy returned no result' };
-    const verdict = redeployVerdict(result);
+    const verdict = redeployVerdict(result, { single: Boolean(skill_id) });
     // Pull through the underlying error/message instead of fabricating "0/0/0
     // success-shaped" output. Old wrapper hid backend errors (e.g. validator
     // failures from sentinel files in user repos) and reported `total: 0` with
@@ -6548,6 +6725,10 @@ export const handlers = {
       // Machine-readable, so a caller (the ateam-proxy connector) does not have
       // to parse the sentence below. Not isError: the Builder's ok:true stands.
       ...(verdict.degraded && { code: "DEPLOYED_WITH_ERRORS" }),
+      // What this redeploy could NOT write to `dev` (a file still held, or a
+      // push that failed). It is the way out an UNPUSHED_BUILDER_CHANGE
+      // refusal names, so the caller must see when it did not work.
+      ...(result.not_written_to_github?.length > 0 && { not_written_to_github: result.not_written_to_github }),
       // Surface the underlying error when the request failed — the most
       // common cause is a validator failure (e.g. broken connector source
       // in the GitHub repo), and hiding it makes diagnosis impossible.
@@ -6557,16 +6738,14 @@ export const handlers = {
       // Branches on the VERDICT, not on `ok` alone — `ok` is true for a deploy
       // that landed with errors, and this sentence is what an agent reads first.
       //
-      // `result.message` is quoted in ONE place: a degraded single skill. A
-      // degraded verdict needs ok === true, i.e. the runFn RETURNED, and every
-      // Builder's single-skill runFn result carries the deploy's own sentence
-      // (the normaliser always writes one; prod spreads deploySkillToADAS's,
-      // which always has one). Everywhere else the job entry's message can be
-      // the leftover PROGRESS text — a bulk runFn returns none, and a runFn
-      // that threw returned nothing — so it is never the verdict.
+      // The deploy's own words come from verdict.reason and nowhere else:
+      // redeployVerdict alone decides when a job's `message` is the deploy's
+      // sentence and when it is leftover progress text (see deploySentence).
       message: verdict.failed
         ? (result.error
             ? `Re-deploy failed: ${result.error}${result.hint ? ` — ${result.hint}` : ''}`
+            : verdict.reason
+              ? `Re-deploy of skill "${skill_id}" failed. Builder: ${asSentence(verdict.reason)}`
             // "Check skills array" was the advice given WHILE the skills array
             // was empty — the async branch never populated it. Say what is
             // actually known, and only mention the array when there is one.
@@ -6578,7 +6757,7 @@ export const handlers = {
         : verdict.degraded
         ? (skill_id
             ? `Re-deployed skill "${skill_id}" WITH ERRORS (status: ${verdict.outcome}) — it reached Core but did not come up clean.`
-              + (result.message ? ` Builder: ${result.message}` : "")
+              + (verdict.reason ? ` Builder: ${asSentence(verdict.reason)}` : "")
               + " See verification."
             : `Re-deployed ${deployedCount} of ${totalCount} skill(s) WITH ERRORS (${failedCount} failed`
               + `, status: ${verdict.outcome}) — see skills[] and verification.`)

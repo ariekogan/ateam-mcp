@@ -131,23 +131,49 @@ ${BRANCH_WORKFLOW.write_side}
 > \`${BRANCH_WORKFLOW.write_branch}\` may not exist yet in this repo. The platform creates it from
 > \`${BRANCH_WORKFLOW.deploy_branch}\` on the first write it makes (ensureDevBranch), so a repo that has
 > only ever been written to by hand will not have it until then — hence the
-> \`|| git checkout -b\` in step 1.
+> \`|| git checkout -b\` on the clone line under "Editing files by hand" below.
 
 ${BRANCH_WORKFLOW.deploy_side}
 
+### Iterate — deploy and TEST without promoting
+
+${BRANCH_WORKFLOW.iterate_note}
+
 \`\`\`
-1. git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch} 2>/dev/null || git checkout -b ${BRANCH_WORKFLOW.write_branch}
-2. edit code in your IDE / agent
-3. git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
-4. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}", dry_run: true)   — see exactly what would ship
-5. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}")                  — merges ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}, tags ${BRANCH_WORKFLOW.tag_format}
-6. ateam_build_and_run(solution_id: "${solId}", github: true)      — deploys \`${BRANCH_WORKFLOW.deploy_branch}\`
-7. ateam_test_skill / ateam_test_connector                         — verify
+${BRANCH_WORKFLOW.iterate_without_promote.map((l) => l.replace(/solution_id(?=[,)])/, `solution_id: "${solId}"`)).join("\n")}
+\`\`\`
+
+### Ship — when it is right
+
+\`\`\`
+1. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}", dry_run: true)   — see exactly what would ship
+2. ${BRANCH_WORKFLOW.promote_tool}(solution_id: "${solId}")                  — merges ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}, tags ${BRANCH_WORKFLOW.tag_format}
+3. ateam_build_and_run(solution_id: "${solId}")                   — deploys \`${BRANCH_WORKFLOW.deploy_branch}\`
+\`\`\`
+
+Editing files by hand instead of via the tools:
+
+\`\`\`
+git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch} 2>/dev/null || git checkout -b ${BRANCH_WORKFLOW.write_branch}
+# edit, then:
+git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
 \`\`\`
 
 **${BRANCH_WORKFLOW.the_silent_mistake}**
 
-Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same effect, same branch.
+Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same branch. Either way the
+next iterate deploy (\`ateam_redeploy\`, \`ateam_patch\`, \`ateam_upload_connector\`) picks the change
+up from \`${BRANCH_WORKFLOW.write_branch}\`: the tools also copy it into the Builder at once, and a hand push is
+pulled in by the pre-deploy check — unless the Builder's copy of that same file also changed since the two
+last agreed (a Builder save that never reached GitHub), or holds main content \`${BRANCH_WORKFLOW.write_branch}\` lacks (a hotfix
+or rollback a build_and_run deployed). Then the tools leave the Builder's copy alone, and \`ateam_redeploy\` and
+\`ateam_patch\` refuse to deploy the solution — any skill of it, not only that file's — and name the file instead of
+picking a side. (\`ateam_upload_connector\` reads \`${BRANCH_WORKFLOW.write_branch}\` directly and has no such check.)
+A Builder save that did not reach \`${BRANCH_WORKFLOW.write_branch}\` (held for that reason, or its push failed) stays in the
+Builder and its reply says so (NOT_WRITTEN_TO_GITHUB); until it is placed, \`ateam_build_and_run\` is refused
+(UNPUSHED_BUILDER_CHANGE) rather than overwrite it, and so is \`ateam_github_pull\`. \`ateam_redeploy(solution_id)\` writes
+it to \`${BRANCH_WORKFLOW.write_branch}\` (solution.json and every skill); \`ateam_github_pull(solution_id, discard_builder_changes: true)\`
+drops it for \`${BRANCH_WORKFLOW.write_branch}\`'s copy.
 
 **First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
 
@@ -157,7 +183,7 @@ Or edit remotely via \`ateam_github_patch\` / \`ateam_github_write\` — same ef
 
 ${tools}
 
-**Rule:** prefer \`ateam_patch\` over \`ateam_github_patch\` + \`ateam_build_and_run\` when changing skill definitions — it's one call and always redeploys.
+**Rule:** prefer \`ateam_patch\` over \`ateam_github_patch\` + a deploy when changing skill definitions — it's one call, and it redeploys what it patched. Read its \`redeploy\` phase: a redeploy that failed is reported there, and the edit is kept either way.
 
 ---
 
@@ -243,17 +269,22 @@ function buildToolTable() {
   return [
     "| Task | Tool |",
     "|------|------|",
-    "| Edit connector source code | `ateam_github_patch` / `ateam_github_write` → `ateam_build_and_run(github:true)` |",
+    // It said github_patch → build_and_run(github:true). build_and_run
+    // deploys `main`, so that sequence is refused (MAIN_BEHIND_DEV) or ships
+    // without the edit. Test from dev; ship with promote.
+    "| Edit connector source code | `ateam_github_patch` / `ateam_github_write`, then `ateam_upload_connector(solution_id, connector_id, github:true)` to test it from `dev` |",
     "| Edit skill definition (persona, tools, intents, guardrails) | `ateam_patch(target:\"skill\", skill_id, updates)` |",
     "| Edit solution definition | `ateam_patch(target:\"solution\", updates)` |",
-    "| First deploy / redeploy from GitHub | `ateam_build_and_run(github:true)` |",
+    "| First deploy (with `mcp_store`) / deploy `main` after a promote | `ateam_build_and_run(solution_id)` |",
     "| Run a skill end-to-end | `ateam_test_skill(solution_id, skill_id, message)` |",
     "| Call one connector tool in isolation | `ateam_test_connector(solution_id, connector_id, tool, args)` |",
     "| Inspect deployed state | `ateam_get_solution(solution_id, view: \"definition\"|\"skills\"|\"health\")` |",
     "| Read file from repo | `ateam_github_read(solution_id, path)` |",
-    "| Checkpoint | `ateam_github_promote(solution_id, label)` |",
-    "| Rollback | `ateam_github_rollback(solution_id, tag)` |",
-    "| List checkpoints | `ateam_github_list_versions(solution_id)` |",
+    // promote SHIPS (dev → main); calling it "Checkpoint" is the framing
+    // BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint retires.
+    "| Ship `dev` → `main` | `ateam_github_promote(solution_id)` (`dry_run:true` first shows what would ship) |",
+    "| Rollback `main` | `ateam_github_rollback(solution_id, target)`, then `ateam_github_sync_from_main(solution_id)` |",
+    "| List shipped versions | `ateam_github_list_versions(solution_id)` |",
   ].join("\n");
 }
 
@@ -261,7 +292,7 @@ function buildUniversalPitfalls() {
   return [
     "- **`ateam_test_connector` runs as `_system_service`.** Core strips user-provided `_adas_actor` when you call via the test harness. Use it for connector-level bugs; use `ateam_test_skill` / `ateam_conversation` for per-user-actor flows.",
     "- **`.ateam/export.json` is auto-generated.** Never hand-edit. Deploys read it, so stale copies silently break things.",
-    "- **Prefer `ateam_patch` over `github_patch` + `build_and_run`** for skill-definition edits. One call, guaranteed redeploy, no drift.",
+    "- **Prefer `ateam_patch` over `github_patch` + a deploy** for skill-definition edits. One call that writes `dev` and redeploys what it patched; check its `redeploy` phase, which reports a failed redeploy (the edit is kept).",
     "- **Always refetch dynamic ids.** Corpus ids, job ids, actor ids change. Call `docs.corpus.list` / `ateam_list_solutions` / etc. in the current job — don't reuse ids from memory or previous sessions.",
     "- **MCP tool param names are strict.** `top_k` (not `k`), `corpus_id` (not `corpus`). Passing wrong names silently fails zod validation.",
     "- **Don't count `{ok:false}` as success.** When calling one MCP from another, always check `result.ok` before incrementing a success counter.",
