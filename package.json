@@ -14,7 +14,8 @@
     "dev": "node --watch src/index.js",
     "dev:http": "node --watch src/index.js --http",
     "test": "node --test --test-concurrency=1 --test-reporter=spec test/*.test.mjs src/*.test.js",
-    "test:live": "node test/spec-topics.test.mjs --live"
+    "test:live": "node test/spec-topics.test.mjs --live",
+    "version": "node scripts/sync-server-version.mjs && git add server.json"
   },
   "keywords": [
     "mcp",
