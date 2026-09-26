@@ -62,3 +62,14 @@ test("AUTH_SIGNAL_RX is exported for reuse and is case-insensitive", () => {
   assert.ok(AUTH_SIGNAL_RX.test("AUTHENTICATION REQUIRED"));
   assert.ok(!AUTH_SIGNAL_RX.test("everything is fine"));
 });
+
+test("a VERDICT tool's ok:false is its answer; it failed only when it says so in error", () => {
+  // ateam_verify found gaps / the surface probe said "surface_failed": the probe worked.
+  assert.equal(isLogicalFailure({ ok: false, gaps: ["connector 'x' … per-actor calls 401"] }, { verdict: true }), false);
+  assert.equal(isLogicalFailure({ ok: false, verdict: "surface_failed", failures: ["…"] }, { verdict: true }), false);
+  // Its own refusal carries `error` — that IS a failed call.
+  assert.equal(isLogicalFailure({ ok: false, error: "plugin_id required" }, { verdict: true }), true);
+  // Not a verdict tool: every top-level ok:false still counts, as before.
+  assert.equal(isLogicalFailure({ ok: false, gaps: ["x"] }), true);
+  assert.equal(isLogicalFailure({ ok: true }, { verdict: true }), false);
+});

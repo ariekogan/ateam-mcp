@@ -6,36 +6,109 @@
  * hands back a skill whose declarations and generated tools disagree, labelled
  * done — and the caller stops, because it was told it succeeded.
  *
- * Source-level, deliberately: driving the whole handler needs GitHub, a
- * Builder and a Core. What must be pinned is the CONTRACT, and the contract is
- * one expression.
+ * WHY THIS FILE IS NOW BEHAVIOURAL. It used to pin one expression by regex:
+ * `lifecycleOk = redeployResult === undefined ? true : redeployOk`. That
+ * expression WAS the bug. `redeployResult` is undefined only when the redeploy
+ * THREW — a timeout, a 5xx, a dropped socket — because dry_run returns long
+ * before it (the "dry_run is unaffected" case it claimed to protect never
+ * reaches the line). So the one failure the fix (daf254a) was written for came
+ * back ok:true, and this test insisted it stay that way.
+ *
+ * Now it drives the real tool through handleToolCall with fetch stubbed:
+ * github/read → github/patch → redeploy, the redeploy answered each way.
+ *
+ * Run: node --test test/patch-no-false-green.test.mjs
  */
-import { test, describe } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
+import { setSessionCredentials } from "../src/api.js";
+import { handleToolCall } from "../src/tools.js";
 
-const src = fs.readFileSync(new URL("../src/tools.js", import.meta.url), "utf8");
-const body = src.slice(src.indexOf("ateam_patch: async"), src.indexOf("ateam_validate_skill:"));
+const SID = "sess-patch-no-false-green";
+setSessionCredentials(SID, {
+  apiKey: "adas_tenanta_00000000000000000000000000000000",
+  apiUrl: "http://builder.stub.invalid",
+  explicit: true,
+});
 
-describe("no false green between patch and rebuild", () => {
-  test("ok is the LIFECYCLE verdict, not the write verdict", () => {
-    assert.match(body, /const lifecycleOk = redeployResult === undefined \? true : redeployOk;/,
-      "ateam_patch no longer derives ok from whether the redeploy completed");
-    assert.match(body, /\n      ok: lifecycleOk,/,
-      "the return went back to a hardcoded ok: true");
-  });
+const json = (status, body) => ({
+  ok: status >= 200 && status < 300, status,
+  headers: { get: () => "application/json" },
+  json: async () => body, text: async () => JSON.stringify(body),
+});
 
-  test("a failed redeploy still says the edit was kept", () => {
-    // The original ok:true existed for a real reason — the patch is not lost.
-    // That fact must survive as a field rather than as a wrong verdict.
-    assert.match(body, /patch_persisted: true/,
-      "a failed rebuild no longer tells the caller the edit was preserved");
-    assert.match(body, /ateam_redeploy\(solution_id/,
-      "the failure does not name the command that finishes the job");
-  });
+/**
+ * @param {(url: string) => any} redeploy  answers the redeploy POST: a
+ *   response object, or throws to play a dropped connection
+ */
+async function patchWith(redeploy) {
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url) => {
+    const u = String(url);
+    seen.push(u);
+    if (u.includes("/github/read")) return json(200, { ok: true, content: JSON.stringify({ id: "walk-guide", name: "Walk Guide", description: "d" }) });
+    if (u.includes("/github/patch")) return json(200, { ok: true, branch: "dev" });
+    if (u.endsWith("/redeploy")) return redeploy(u);
+    return json(200, { ok: true });
+  };
+  try {
+    const r = await handleToolCall("ateam_patch",
+      { solution_id: "walkmate", target: "skill", skill_id: "walk-guide", updates: { description: "new" } }, SID);
+    return { r, out: JSON.parse(r.content[0].text), seen };
+  } finally { global.fetch = origFetch; }
+}
 
-  test("dry_run is unaffected — it attempts no redeploy", () => {
-    assert.match(body, /redeployResult === undefined \? true/,
-      "a path that never attempts a redeploy would now report failure");
-  });
+test("a redeploy that THREW (the Builder answered 500) is not a successful patch", async () => {
+  const { r, out, seen } = await patchWith(() => json(500, { error: "Core unreachable" }));
+  assert.ok(seen.some((u) => u.endsWith("/redeploy")), "the redeploy was never attempted — the test proves nothing");
+  assert.equal(out.ok, false, "a patch whose rebuild threw came back ok:true");
+  assert.equal(out.patch_persisted, true, "the failure no longer says the edit was kept");
+  assert.equal(out.phase, "redeploy");
+  assert.match(out.error, /redeploy did not complete[\s\S]*ateam_redeploy\(solution_id, skill_id: "walk-guide"\)/,
+    "the failure does not name the command that finishes the job");
+  assert.equal(out.phases.find((p) => p.phase === "redeploy")?.status, "timeout_or_error");
+  assert.equal(r.isError, true, "the dispatcher did not flag the failed lifecycle");
+  assert.doesNotMatch(out._status, /✅ Patched on GitHub \+ redeployed/);
+});
+
+test("a redeploy whose connection DROPPED (fetch threw) is not a successful patch", async () => {
+  const { r, out } = await patchWith(() => { throw new TypeError("fetch failed"); });
+  assert.equal(out.ok, false, "a patch whose rebuild never answered came back ok:true");
+  assert.equal(out.patch_persisted, true);
+  assert.equal(r.isError, true);
+});
+
+test("a redeploy that completed is a successful patch", async () => {
+  const { r, out } = await patchWith(() => json(200, { ok: true, deployed: 1 }));
+  assert.equal(out.ok, true);
+  assert.equal(out.patch_persisted, undefined, "a clean patch carries the failure-only field");
+  assert.equal(r.isError, undefined);
+  assert.match(out._status, /Patched on GitHub \+ redeployed/);
+});
+
+test("a redeploy that answered FAILED is not a successful patch", async () => {
+  const { out } = await patchWith(() => json(200, { ok: false, error: "Core unreachable" }));
+  assert.equal(out.ok, false);
+  assert.equal(out.patch_persisted, true);
+});
+
+test("dry_run attempts no redeploy and is not a failure", async () => {
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url) => {
+    const u = String(url);
+    seen.push(u);
+    if (u.includes("/github/read")) return json(200, { ok: true, content: JSON.stringify({ id: "walk-guide", name: "Walk Guide" }) });
+    return json(200, { ok: true });
+  };
+  try {
+    const r = await handleToolCall("ateam_patch",
+      { solution_id: "walkmate", target: "skill", skill_id: "walk-guide", updates: { description: "new" }, dry_run: true }, SID);
+    const out = JSON.parse(r.content[0].text);
+    assert.equal(out.ok, true);
+    assert.equal(out.dry_run, true);
+    assert.ok(!seen.some((u) => u.endsWith("/redeploy")), "dry_run redeployed");
+    assert.equal(r.isError, undefined);
+  } finally { global.fetch = origFetch; }
 });

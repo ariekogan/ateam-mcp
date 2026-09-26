@@ -45,9 +45,17 @@ export function deriveErrorCode(source, explicit) {
  * A top-level object result with ok:false is a logical failure. Nested *.ok
  * (widget_health.ok / validation.valid) are their own advisory signals and do
  * NOT flip the tool to error — only the tool's OWN primary `ok` does.
+ *
+ * Except for a VERDICT tool (tools.js VERDICT_TOOLS): there the primary `ok` is
+ * the answer of a probe that ran — "gaps found", "the surface did not render" —
+ * and a probe that finds something has not failed. Its call failed only when
+ * the result says so in `error`, which its verdicts never carry and its own
+ * refusals ("plugin_id required") always do.
  * @param {any} result
+ * @param {{ verdict?: boolean }} [opts]  verdict: the tool is a verdict tool
  * @returns {boolean}
  */
-export function isLogicalFailure(result) {
-  return Boolean(result) && typeof result === "object" && !Array.isArray(result) && result.ok === false;
+export function isLogicalFailure(result, { verdict = false } = {}) {
+  if (!result || typeof result !== "object" || Array.isArray(result) || result.ok !== false) return false;
+  return verdict ? result.error != null : true;
 }

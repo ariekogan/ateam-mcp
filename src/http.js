@@ -32,6 +32,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import { createServer } from "./server.js";
+import { MCP_VERSION } from "./tools.js";
 import {
   clearSession, setSessionCredentials, parseApiKey, whoami, baseUrlForKeyEnv, getCredentials,
   startSessionSweeper, getSessionStats, sweepStaleSessions,
@@ -41,20 +42,11 @@ import {
 import { mountOAuth } from "./oauth.js";
 import { connectGithubPage } from "./pages.js";
 
-// Read once at import: the version of the code in THIS process, and when it
-// started. See the /health handler for why both matter.
-const PKG_VERSION = await (async () => {
-  try {
-    const { readFileSync } = await import("node:fs");
-    const { fileURLToPath } = await import("node:url");
-    const { dirname, join } = await import("node:path");
-    const here = dirname(fileURLToPath(import.meta.url));
-    return JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")).version || "unknown";
-  } catch {
-    // Never let a liveness probe fail over its own labelling.
-    return "unknown";
-  }
-})();
+// When THIS process started. The version beside it on /health is MCP_VERSION —
+// the same value the MCP handshake and ateam_bootstrap report, read once from
+// the package.json next to the code (tools.js). This file used to read
+// package.json a second time for itself (9d6d10b), a second answer to "which
+// build is running?" that nothing kept equal to the first.
 const STARTED_AT = new Date().toISOString();
 
 // Active sessions
@@ -313,14 +305,14 @@ export function startHttpServer(port = 3100) {
   // that were already fixed. (2026-08-22: it returned a 401 from a code path
   // deleted in 2ff2a34, and a session went debugging a system that was correct.)
   //
-  // version comes from the package.json NEXT TO THIS FILE, read at import, so it
-  // describes the code actually loaded — not what npm has, and not what a
+  // version is MCP_VERSION: the package.json NEXT TO THE CODE, read at import,
+  // so it describes the code actually loaded — not what npm has, and not what a
   // container was built with.
   app.get("/health", (_req, res) => {
     res.json({
       ok: true,
       service: "ateam-mcp",
-      version: PKG_VERSION,
+      version: MCP_VERSION,
       startedAt: STARTED_AT,
       uptime_s: Math.round(process.uptime()),
       transport: "http",
