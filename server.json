@@ -6,12 +6,12 @@
     "url": "https://github.com/ariekogan/ateam-mcp",
     "source": "github"
   },
-  "version": "0.1.2",
+  "version": "0.4.105",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@ateam-ai/mcp",
-      "version": "0.1.2",
+      "version": "0.4.105",
       "transport": {
         "type": "stdio"
       }
