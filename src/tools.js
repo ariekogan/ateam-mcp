@@ -1133,7 +1133,7 @@ export const tools = [
       "- Change intent: updates: { \"intents.supported_update\": [{ id: \"i1\", description: \"new desc\" }] }\n" +
       "- CREATE a new skill: target='skill', skill_id='my-new-skill', updates: { \"problem.statement\": \"...\", \"role.persona\": \"...\" } — auto-scaffolded and added to solution topology.\n\n" +
       "PREVIEW BEFORE WRITING: pass dry_run:true to see the diff (arrays_merged, arrays_replaced, dropped_ids, added_ids) without applying. Use this before any destructive-looking edit.\n\n" +
-      "VERDICT (skill target): the response carries a NON-BLOCKING `validation` block { skill_id, valid, ready_to_export, error_count, incomplete_sections[], unresolved_refs } — the patch always saves even if the def is now invalid, so CHECK valid: false and fix incomplete_sections before relying on it (build_and_run will refuse to deploy an invalid skill). error_count can include auto-import connector-tool artifacts, so act on incomplete_sections first.",
+      "VERDICT (skill target): the response carries a NON-BLOCKING `validation` block { skill_id, valid, ready_to_export, error_count, incomplete_sections[], unresolved_refs } — the patch always saves (and redeploys) even if the def is now invalid, and build_and_run does not run this check (its gate is the solution validator, POST /validate/solution), so nothing refuses a skill for it: CHECK valid: false yourself and fix incomplete_sections before relying on the skill. error_count can include auto-import connector-tool artifacts, so act on incomplete_sections first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2711,17 +2711,24 @@ export const tools = [
 // ONE TABLE, read in one screen, rather than a field scattered through 70
 // definitions: the question is the same for every tool, and a reviewer should
 // be able to see every answer at once. test/tool-annotations.test.mjs fails if
-// a tool is missing from it, if it names a tool that does not exist, and if a
-// "read" tool issues a request that is not a read.
+// a tool is missing from it, if it names a tool that does not exist, and — by
+// driving every read and additive tool through the dispatcher — if one of them
+// issues a request its class does not allow. So a tool cannot leave
+// `destructive` without its behaviour being checked against the class it joins.
 //
 //   read        — changes nothing on the platform or in a repo. It may POST
 //                 when the question needs a body (validate, search, advisor).
-//   additive    — creates something new (a run, a conversation, a log entry, a
-//                 notification) or signs this session in; overwrites and
-//                 removes nothing that already exists.
+//   additive    — creates something new (a log entry, a notification, an
+//                 intent-and-planning run that executes no tool) or signs this
+//                 session in; overwrites and removes nothing that exists.
 //   destructive — may overwrite or remove what exists: definitions, deployed
-//                 code, repo files and branches, running jobs; or runs code
-//                 whose effects this server cannot see (a connector tool).
+//                 code, repo files and branches, running jobs. AND anything
+//                 that runs code this server cannot see, since that code may do
+//                 any of those: a connector tool called directly, a deployed
+//                 skill whose planner calls connector tools, a plugin whose own
+//                 JS calls them while it renders. Which tool that code picks
+//                 (a "read-shaped" name, a plugin's mount-time fetch) is not a
+//                 proof of what it does.
 // When unsure, the more cautious class: a hint that says "safe" wrongly lets a
 // client act without asking, and the opposite mistake only costs a prompt.
 export const TOOL_SAFETY = Object.freeze({
@@ -2733,18 +2740,19 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_get_progress", "ateam_get_lessons",
     "ateam_get_execution_logs", "ateam_test_status", "ateam_get_chain", "ateam_chain_status",
     "ateam_get_metrics", "ateam_connector_logs", "ateam_status_all",
-    "ateam_get_widget_catalog", "ateam_verify_surface",
+    "ateam_get_widget_catalog",
     "ateam_get_connector_source", "ateam_get_deployed_connector_source",
     "ateam_diff", "ateam_verify_consistency",
     "ateam_github_status", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
   ],
   additive: [
     "ateam_auth",
-    "ateam_test_skill", "ateam_conversation", "ateam_test_pipeline", "ateam_test_voice", "ateam_test_notification",
+    // Intent detection + planning only: Core plans the first step and executes
+    // none of the skill's tools (server.js /api/test-pipeline).
+    "ateam_test_pipeline",
+    // A new [TEST] notification to an existing actor's channels.
+    "ateam_test_notification",
     "ateam_log_progress", "ateam_log_lesson",
-    // Smoke-calls each connector's read-SHAPED tool — chosen by name, so not
-    // provably a read.
-    "ateam_verify",
   ],
   destructive: [
     "ateam_build_and_run", "ateam_patch", "ateam_update", "ateam_redeploy",
@@ -2758,9 +2766,19 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_github_push", "ateam_github_pull", "ateam_github_patch", "ateam_github_write",
     "ateam_github_promote", "ateam_github_reconcile", "ateam_github_sync_from_main", "ateam_github_rollback",
     "ateam_sync_all", "ateam_test_abort",
-    // Runs code this server cannot see: an arbitrary connector tool, and the
-    // Solution Bot, which edits the solution it is asked about.
-    "ateam_test_connector", "ateam_solution_chat",
+    // RUNS CODE THIS SERVER CANNOT SEE.
+    //   a connector tool, by name:            ateam_test_connector
+    //   one per connector, "read-shaped" name: ateam_verify (its smoke call)
+    //   a deployed skill, end to end — its
+    //   planner calls whatever tools it has:  ateam_test_skill, ateam_conversation,
+    //                                         ateam_test_voice
+    //   the Solution Bot, which edits the
+    //   solution it is asked about:           ateam_solution_chat
+    //   the plugin's own JS, in the real host,
+    //   with live tool calls:                 ateam_verify_surface
+    "ateam_test_connector", "ateam_verify",
+    "ateam_test_skill", "ateam_conversation", "ateam_test_voice",
+    "ateam_solution_chat", "ateam_verify_surface",
   ],
 });
 const SAFETY_HINTS = {
@@ -5122,8 +5140,14 @@ export const handlers = {
     // the bug": a patch that leaves the definition invalid used to return ok:true
     // with NO verdict, so an agent (or a persona routing here as the "cheapest
     // correct tool") never saw it went red, and an invalid def slipped toward
-    // Core (build_and_run refuses on errors, but the patch path reported nothing).
-    // Report the verdict keyed by skill_id; never block. error_count can be
+    // Core. Report the verdict keyed by skill_id; never block.
+    //
+    // NOTHING ELSE CHECKS IT EITHER, so say that and no more. f09301b told the
+    // caller "build_and_run will refuse to deploy while errors stand". It will
+    // not: build_and_run's only gate is POST /validate/solution, which runs the
+    // SOLUTION validator (cross-skill contracts, connectors, privileges) and has
+    // never run this per-skill check (2db689b onward). A red verdict here and a
+    // green deploy are both true at once. error_count can be
     // inflated by auto-imported connector tools (INVALID_TOOL_INPUTS /
     // MISSING_TOOL_OUTPUT fire on every solution because Core resolves their
     // contract at deploy, not the author) — so lead with the author-facing
@@ -5174,7 +5198,7 @@ export const handlers = {
           // What happened to the patch is stated as it happened: "redeployed"
           // only when the redeploy phase says so.
           ...(valid === false && {
-            _verdict: `Skill "${skill_id}" is INVALID — the patch was still saved${redeployOk ? " and redeployed" : " (its redeploy did not complete — see phases)"} (non-blocking), but build_and_run will REFUSE to deploy while errors stand. Fix the above, then re-check.`,
+            _verdict: `Skill "${skill_id}" is INVALID — the patch was still saved${redeployOk ? " and redeployed" : " (its redeploy did not complete — see phases)"} (non-blocking). build_and_run does not run this check (its gate is the solution validator), so it will not stop on it either: fix the above yourself, then re-check.`,
           }),
         };
         phases.push({ phase: "validation", status: "done" });
@@ -5191,7 +5215,7 @@ export const handlers = {
       }
     }
     const validationStatus = (validation && validation.valid === false)
-      ? ` ⚠️ Skill "${skill_id}" is INVALID (${validation.error_count ?? "?"} error(s)) — see validation (non-blocking; build_and_run will refuse until fixed).`
+      ? ` ⚠️ Skill "${skill_id}" is INVALID (${validation.error_count ?? "?"} error(s)) — see validation (advisory: neither this patch nor build_and_run blocks on it).`
       : "";
 
     // A PATCH THAT DID NOT REBUILD IS NOT A SUCCESSFUL PATCH.

@@ -17,8 +17,16 @@
 ### Tools
 
 - Every tool declares MCP safety hints (`readOnlyHint`, `destructiveHint`).
+  A tool that runs code this server cannot see is `destructiveHint: true`:
+  `ateam_test_connector`, `ateam_verify` (its connector smoke call),
+  `ateam_test_skill`, `ateam_conversation`, `ateam_test_voice`,
+  `ateam_solution_chat` and `ateam_verify_surface` (the plugin's own JS makes
+  live tool calls). A client may therefore ask before running them.
 - `ateam_patch`'s validation verdict reaches the caller. It had been read from
-  a route the API has never served, so it was always silently absent.
+  a route the API has never served, so it was always silently absent. The
+  verdict is advisory, and it no longer says `build_and_run` refuses an invalid
+  skill: `build_and_run`'s gate is the solution validator, which does not run
+  this per-skill check.
 
 ## 0.4.93 — 2026-09-11
 

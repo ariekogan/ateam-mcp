@@ -13,6 +13,11 @@
 //     added to a patch that was already saved and redeployed
 //   - a failure left no trace at all
 //   - _verdict said "saved + redeployed" when the redeploy had failed
+//   - _verdict, _status and the tool description all said build_and_run would
+//     refuse to deploy while the skill is invalid. build_and_run never asks
+//     for this verdict: its gate is POST /validate/solution, the solution
+//     validator, which does not run the per-skill check. Dormant while the
+//     404 hid the verdict; live the moment it was fixed.
 //
 // Behavioural: the real ateam_patch, through the real dispatcher, against a
 // local server playing the skill-validator. It serves only the routes the real
@@ -23,7 +28,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setSessionCredentials } from "../src/api.js";
-import { handleToolCall } from "../src/tools.js";
+import { handleToolCall, tools } from "../src/tools.js";
 
 const SID = "sess-patch-validation";
 const KEY = "adas_tenanta_00000000000000000000000000000000";
@@ -128,4 +133,55 @@ test("the advisory check is asked once — no retry budget on a finished patch",
   assert.equal(asked, 1, `the advisory verdict was requested ${asked} times`);
   assert.ok(Date.now() - t0 < 4000, `the patch result was held ${Date.now() - t0}ms by an advisory check`);
   assert.equal(out.phases.find((p) => p.phase === "validation")?.status, "unavailable");
+});
+
+// WHAT THE VERDICT SAYS ABOUT build_and_run MUST BE WHAT build_and_run DOES.
+//
+// First the fact, by behaviour: the real ateam_build_and_run, given a skill the
+// per-skill route calls INVALID, never asks that route. It asks the solution
+// validator, and when that has no errors it deploys. So "build_and_run will
+// refuse" is false for exactly the case the verdict is shown in.
+//
+// Then the words: no clause the caller is shown — the verdict, the status line,
+// the tool's own description — may say build_and_run refuses or blocks on this
+// verdict, unless it says it does NOT.
+const saysBuildAndRunRefuses = (text) =>
+  String(text || "")
+    .split(/[.;:()\n]|—/)
+    .filter((c) => /build_and_run/.test(c) && /refus|block|stop/i.test(c))
+    .filter((c) => !/\b(not|never|no|neither|nor)\b/i.test(c));
+
+test("build_and_run never asks for the per-skill verdict: its gate is the solution validator", async () => {
+  routes = {
+    "POST /validate/solution": { body: { ok: true, valid: true, errors: [], warnings: [] } },
+    "POST /deploy/solution": { body: { ok: true, deployed: true } },
+    [`GET ${VALIDATE}`]: { body: INVALID },
+  };
+  hits = [];
+  const r = await handleToolCall("ateam_build_and_run",
+    { solution_id: "walkmate", solution: { id: "walkmate" }, skills: [SKILL], mcp_store: {} }, SID);
+  const out = JSON.parse(r.content[0].text);
+  assert.ok(hits.includes("POST /validate/solution"), `build_and_run did not validate: ${hits.join(", ")}`);
+  assert.ok(!hits.some((h) => /\/skills\/[^/]+\/validat/.test(h)),
+    `build_and_run asked the per-skill verdict after all: ${hits.join(", ")}`);
+  assert.ok(hits.includes("POST /deploy/solution"),
+    `build_and_run refused a skill the per-skill verdict calls INVALID: ${JSON.stringify(out).slice(0, 300)}`);
+});
+
+test("so nothing ateam_patch says claims build_and_run will refuse on it", async () => {
+  const out = await patch(both({ body: INVALID }));
+  assert.equal(out.validation.valid, false, "the case under test is an INVALID verdict");
+  const description = tools.find((t) => t.name === "ateam_patch").description;
+  for (const [where, text] of [["_verdict", out.validation._verdict], ["_status", out._status], ["description", description]]) {
+    assert.deepEqual(saysBuildAndRunRefuses(text), [], `${where} promises a build_and_run gate that does not exist`);
+  }
+  // It still says the skill is invalid, and that nothing will stop on it.
+  assert.match(out.validation._verdict, /INVALID/);
+  assert.match(out._status, /INVALID/);
+});
+
+test("(control) the clause check catches the sentence it exists for", () => {
+  assert.equal(saysBuildAndRunRefuses("…(non-blocking), but build_and_run will REFUSE to deploy while errors stand.").length, 1);
+  assert.equal(saysBuildAndRunRefuses("see validation (non-blocking; build_and_run will refuse until fixed)").length, 1);
+  assert.equal(saysBuildAndRunRefuses("build_and_run does not run this check, so it will not stop on it").length, 0);
 });
