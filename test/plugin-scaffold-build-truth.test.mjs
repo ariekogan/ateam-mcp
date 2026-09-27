@@ -14,6 +14,13 @@
 // them to do exactly that with a build:rn script. Two answers, one question.
 // (Core PR #127 names this.)
 //
+// That recipe keeps esbuild in devDependencies, and Core #127 (54f38b74a) is
+// what makes it deploy: under the container's NODE_ENV=production a plain
+// `npm install` omitted devDependencies ("esbuild: not found", 422), so a
+// package with a build script is now installed with `--include=dev`. The
+// build:rn hint therefore says where esbuild goes; without that an agent
+// reaching for "dependencies" works around a defect that is fixed.
+//
 // The true statement is narrower and checkable against what the scaffold
 // ships: the phone loads the committed bundle, a deploy runs the build scripts
 // package.json declares, and THIS scaffold declares none.
@@ -76,6 +83,14 @@ const STALE = [
 const assertNoStaleClaim = (where, text) => {
   for (const [rx, claim] of STALE) assert.doesNotMatch(text, rx, `${where} still says: ${claim}`);
 };
+// The build:rn hint must match the ui-plugins recipe it points to: esbuild in
+// devDependencies, which a package with a build script is installed with.
+const assertBuildHintNamesDevDeps = (where, text) => {
+  assert.match(text, /build:rn[\s\S]{0,120}esbuild[\s\S]{0,20}devDependencies/,
+    `${where} names build:rn but not where esbuild goes (devDependencies)`);
+  assert.match(text, /installed\s+WITH\s+its[\s/]+devDependencies/i,
+    `${where} does not say a package with a build script is installed with its devDependencies`);
+};
 
 test("the scaffolded connector ships no build script — the fact the text now rests on", async () => {
   const { files } = await call("ateam_create_connector", { connector_id: "demo-mcp", ui_capable: true });
@@ -90,6 +105,7 @@ test("the connector README describes the deploy that exists", async () => {
   assert.ok(readme.includes("rn-bundle/"), "the README no longer explains the RN bundle at all");
   assertNoStaleClaim("README.md", readme);
   assert.match(readme, /build:rn/, "the README does not say a build:rn script is how a deploy builds the bundle");
+  assertBuildHintNamesDevDeps("README.md", readme);
 });
 
 for (const kind of ["rn", "adaptive"]) {
@@ -101,11 +117,13 @@ for (const kind of ["rn", "adaptive"]) {
     assertNoStaleClaim("the .tsx header", header);
     assert.match(header, /rn-bundle\/walk\.bundle\.js/, "the header no longer names the bundle the phone loads");
     assert.match(header, /build:rn/, "the header does not name the build script a deploy would run");
+    assertBuildHintNamesDevDeps("the .tsx header", header);
     assert.ok(files.some((f) => f.path === "rn-bundle/walk.bundle.js"), "the pre-built bundle the text relies on was not shipped");
 
     const step = (out.next_steps || []).find((s) => s.includes("rn-src/"));
     assert.ok(step, "next_steps no longer tell the caller what to do with the .tsx");
     assertNoStaleClaim("next_steps", step);
     assert.match(step, /build:rn/);
+    assertBuildHintNamesDevDeps("next_steps", step);
   });
 }

@@ -3210,7 +3210,9 @@ app downloads the bundle, never the .tsx. A deploy builds only what this
 package.json declares: it runs every \`build\` / \`build:*\` script it finds, and
 this scaffold declares none. So after editing the .tsx, rebuild the bundle with
 the esbuild command in its header and commit it, or declare a \`build:rn\`
-script and let the deploy build it (\`ateam_get_spec(topic: "ui-plugins")\`). This
+script with \`esbuild\` in \`devDependencies\` and let the deploy build it (a
+package with a build script is installed WITH its devDependencies;
+\`ateam_get_spec(topic: "ui-plugins")\`). This
 connector's \`ui.listPlugins\` / \`ui.getPlugin\` read the manifests at call time,
 so a new plugin renders with NO server.js edit.
 
@@ -3304,8 +3306,9 @@ function _scaffoldPluginFiles({ connectorId, pluginName, kind }) {
 //     A deploy builds only what the connector's package.json declares: it runs
 //     every "build" / "build:*" script there. This scaffold declares none, so
 //     nothing rebuilds the bundle for you. Either rebuild it yourself (below),
-//     or declare a "build:rn" script and let the deploy build it — see
-//     ateam_get_spec(topic: "ui-plugins").
+//     or declare a "build:rn" script with esbuild in devDependencies and let
+//     the deploy build it (a package with a build script is installed WITH its
+//     devDependencies) — see ateam_get_spec(topic: "ui-plugins").
 //
 // After editing this file, rebuild the bundle and commit it (target=es2015 is
 // REQUIRED — the mobile runtime evals the bundle with new Function(), which
@@ -6777,7 +6780,7 @@ export const handlers = {
       verified,
       next_steps: [
         k === "rn" || k === "adaptive"
-          ? `Edit rn-src/${plugin_name}.tsx — fill in the Component body, THEN rebuild + commit rn-bundle/${plugin_name}.bundle.js (esbuild command is in the .tsx header) — mobile loads that bundle, never the .tsx. A deploy runs only the build scripts package.json declares ("build", "build:*"), and this scaffold declares none; add a "build:rn" script if you want the deploy to build it (ateam_get_spec(topic:"ui-plugins")). A pre-built starter bundle ships with this scaffold, so it renders as-is until you edit it.`
+          ? `Edit rn-src/${plugin_name}.tsx — fill in the Component body, THEN rebuild + commit rn-bundle/${plugin_name}.bundle.js (esbuild command is in the .tsx header) — mobile loads that bundle, never the .tsx. A deploy runs only the build scripts package.json declares ("build", "build:*"), and this scaffold declares none; add a "build:rn" script, with esbuild in devDependencies, if you want the deploy to build it — a package with a build script is installed WITH its devDependencies (ateam_get_spec(topic:"ui-plugins")). A pre-built starter bundle ships with this scaffold, so it renders as-is until you edit it.`
           : null,
         k === "iframe" || k === "adaptive"
           ? `Edit ui-dist/${plugin_name}/index.html — replace the placeholder UI.`
