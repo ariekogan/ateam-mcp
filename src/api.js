@@ -1017,6 +1017,15 @@ export function formatError(method, path, status, body, baseUrl) {
       `calling from and the topic has not been deployed here yet. Retrying will not change either.`;
   }
 
+  // The body as TEXT — ONE normalization for every check below. request()
+  // passes the text it read; anything else (a direct caller) is serialized.
+  // This function had grown three copies of this line (the 5xx check, the
+  // github_not_connected + specific-hint checks, and `detail`), each spelled a
+  // little differently.
+  const bodyStr = typeof body === "string" ? body
+    : body == null ? ""
+    : (() => { try { return JSON.stringify(body); } catch { return ""; } })();
+
   // A 500 THAT NAMES A MISSING CONFIGURATION IS NOT "TRY AGAIN IN A MINUTE".
   //
   // /chat answered 500 {"message":"OPENAI_API_KEY is not set"} and this table
@@ -1026,12 +1035,7 @@ export function formatError(method, path, status, body, baseUrl) {
   // retries on a condition that cannot clear on its own. The body already said
   // so; only the hint disagreed. (2026-08-22, found by sweeping every tool.)
   if (status >= 500) {
-    // `body` is what this function receives; asText is derived further down, so
-    // read the body directly here rather than a variable that is not yet in scope.
-    const bodyText = typeof body === "string"
-      ? body
-      : (() => { try { return JSON.stringify(body || ""); } catch { return ""; } })();
-    const m = /\b([A-Z][A-Z0-9_]{3,})\s+is not set\b|\bmissing (?:env|environment) (?:var|variable)\s+([A-Z0-9_]+)/i.exec(bodyText);
+    const m = /\b([A-Z][A-Z0-9_]{3,})\s+is not set\b|\bmissing (?:env|environment) (?:var|variable)\s+([A-Z0-9_]+)/i.exec(bodyStr);
     if (m) {
       const name = m[1] || m[2];
       hints[status] =
@@ -1046,7 +1050,6 @@ export function formatError(method, path, status, body, baseUrl) {
   // "github_not_connected" code + a generic 409 hint tells them nothing — so
   // guide them explicitly to the one-time connect step and note the repo-less
   // escape hatch for definition edits.
-  const bodyStr = typeof body === "string" ? body : (body ? JSON.stringify(body) : "");
   if (/github_not_connected/i.test(bodyStr)) {
     return [
       `A-Team API error: ${method} ${path} — GitHub isn't connected for this tenant.`,
@@ -1074,21 +1077,11 @@ export function formatError(method, path, status, body, baseUrl) {
   // agent went hunting for a missing solution three times.
   const hasSpecificHint = /"code"\s*:/.test(bodyStr) && /"hint"\s*:/.test(bodyStr);
   const hint = hasSpecificHint ? "" : (hints[status] || "");
-  // A JSON error body used to be dropped entirely — only a string body became
-  // `detail`. So an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe
-  // returns 422 + the failures that explain why the surface is broken) reached
-  // the caller as a bare "returned 422", throwing away the very thing it was
-  // asked to produce. Serialize objects too, capped the same way.
-  let detail = "";
-  const asText = typeof body === "string"
-    ? body
-    : (body && typeof body === "object" ? (() => { try { return JSON.stringify(body); } catch { return ""; } })() : "");
-  if (asText.length > 0) {
-    // Previously a body of 2000+ chars was dropped ENTIRELY, so the richer the
-    // error the less the caller was told — a 422 carrying the full diagnosis
-    // arrived as a bare status code. Truncate instead of discarding.
-    detail = asText.length < 2000 ? asText : asText.slice(0, 2000) + "… (truncated)";
-  }
+  // Truncated, never dropped. Before 4b36c4d a body of 2000+ chars was dropped
+  // ENTIRELY, so the richer the error the less the caller was told — a 422
+  // carrying the full diagnosis (ui.surfaceProbe's failures) arrived as a bare
+  // status code.
+  const detail = bodyStr.length < 2000 ? bodyStr : bodyStr.slice(0, 2000) + "… (truncated)";
 
   // Always show the FULL URL actually hit — ateam-mcp is a PUBLIC MCP with a
   // configurable base (prod default, dev/self-host overrides), so a bare
@@ -1100,6 +1093,27 @@ export function formatError(method, path, status, body, baseUrl) {
   if (hint) msg += `\nHint: ${hint}`;
 
   return msg;
+}
+
+/**
+ * ONE answer to "did this request fail by TIMING OUT — at a gateway, or here?"
+ * (the failure an async retry can outrun, or a longer wait explain).
+ *
+ * Read from what request() attached to the error — the HTTP status, its own
+ * timeout mark, the socket's errno — never from the message. The message
+ * carries up to 2000 chars of the response body (formatError), so the regex
+ * both callers used, /524|502|503|timeout|ETIMEDOUT/ over err.message, read a
+ * deterministic 400 whose body merely said "timeout" as a timeout:
+ * ateam_build_and_run then re-POSTed the whole deploy in async mode instead of
+ * returning the real error. And it could never see ETIMEDOUT, which lives in
+ * err.cause.code, not in "fetch failed".
+ * @param {any} err  an error thrown by get/post/patch/del
+ * @returns {boolean}
+ */
+export function isTimeoutError(err) {
+  return err?.timedOut === true
+    || [502, 503, 504, 524].includes(err?.status)
+    || err?.cause?.code === "ETIMEDOUT";
 }
 
 /**
@@ -1188,10 +1202,12 @@ async function request(method, path, body, sessionId, opts = {}) {
           await new Promise(r => setTimeout(r, wait));
           continue;
         }
-        throw new Error(
+        const t = new Error(
           `A-Team API timeout: ${method} ${path} did not respond within ${timeoutMs / 1000}s.\n` +
           `Hint: The A-Team API at ${baseUrl} may be down. Check ${baseUrl}/health`
         );
+        t.timedOut = true; // read by isTimeoutError — never the message
+        throw t;
       }
       if (err.cause?.code === "ECONNREFUSED") {
         if (attempt < maxRetries) {

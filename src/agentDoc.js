@@ -154,7 +154,7 @@ ${BRANCH_WORKFLOW.iterate_without_promote.map((l) => l.replace(/solution_id(?=[,
 Editing files by hand instead of via the tools:
 
 \`\`\`
-git clone <this repo> && git checkout ${BRANCH_WORKFLOW.write_branch} 2>/dev/null || git checkout -b ${BRANCH_WORKFLOW.write_branch}
+${cloneStep(solId)}
 # edit, then:
 git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
 \`\`\`
@@ -238,6 +238,23 @@ export function mergeAgentDoc(freshHeader, existing) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * The hand-editing clone line: clone, ENTER the clone, then take `dev` — or
+ * create it from `main` when the repo has none yet (ensureDevBranch makes it on
+ * the platform's first write, so a hand-only repo lacks it).
+ *
+ * It was `git clone <repo> && git checkout dev 2>/dev/null || git checkout -b
+ * dev` (acbd2eb, on bd923d7). `git clone` does not cd, so the checkout ran in
+ * whatever directory the reader was in; and `a && b || c` runs `c` when `a`
+ * fails, so a failed clone went on to create `dev` in that unrelated repo. The
+ * fallback is now scoped to the checkout, inside the clone, after a clone and a
+ * cd that both succeeded.
+ */
+function cloneStep(solId) {
+  const b = BRANCH_WORKFLOW.write_branch;
+  return `git clone <this repo> ${solId} && cd ${solId} && { git checkout ${b} 2>/dev/null || git checkout -b ${b}; }`;
+}
 
 function oneLine(s) {
   return String(s || "").replace(/\s+/g, " ").trim().slice(0, 200);

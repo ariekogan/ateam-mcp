@@ -39,9 +39,34 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_test_skill", "ateam_test_pipeline", "ateam_test_connector", "ateam_test_notification",
   "ateam_verify_surface",
 ]);
+
+// Tools whose top-level `ok` is the ANSWER of a probe that ran, not whether the
+// call worked. Their owners say so: ateam_verify sets ok = "no gaps found";
+// ateam_verify_surface hands the probe's negative verdict back as a result on
+// purpose (its handler); Core's connector.logs answers ok:false for a connector
+// with no stdio process and says "Not a fault". handleToolCall flagged every
+// top-level ok:false as isError, so each of these read as a BROKEN CALL when it
+// had worked and found something. A verdict tool's call failed only when it says
+// so in `error` (mcpFailure.isLogicalFailure).
+//
+// THAT IS AN OBLIGATION ON EACH HANDLER, not a property of the payloads: a probe
+// that could not run must set `error`, or it reads as an answer. ateam_verify
+// sets it when any check could not run (a refused or failed Builder read);
+// ateam_verify_surface sets it for every verdict but "surface_failed"; Core's
+// connector.logs already puts its refusal in `error`. A tool added here without
+// that turns a failed call — a rotated key, a Builder 5xx — into a verdict.
+//
+// Not ateam_verify_consistency: its answer is `consistent`, and `ok` is true on
+// every probe that ran (Builder routes/deploy.js /verify, since 9e51bef).
+const VERDICT_TOOLS = new Set([
+  "ateam_verify",
+  "ateam_verify_surface",
+  "ateam_connector_logs",
+]);
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
+import { isTimeoutError } from "./api.js";
 
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
 // three different things here (the mac1 container, npm, and each developer's local
@@ -1936,7 +1961,12 @@ export const tools = [
           description: "Alias for chain_id — any job in the chain resolves to the chain aggregate. The handler has always accepted it; without this declaration MCP stripped it before the handler could see it.",
         },
       },
-      required: ["chain_id"],
+      // Neither is required ON ITS OWN: pass chain_id OR job_id. `required:
+      // ["chain_id"]` outlived the alias (852b373 declared job_id and left it),
+      // so a schema-following caller could never send the one shape the alias
+      // exists for. Same contract as ateam_get_chain. The handler refuses when
+      // both are missing.
+      required: [],
     },
   },
   {
@@ -2150,7 +2180,7 @@ export const tools = [
     // for a run in flight poll ateam_chain_status and call this once at the end.
     monitoring: { safe: false, cost: "heavy", output: "bounded", use_instead: "ateam_chain_status" },
     description:
-      "ONE call that returns the REAL runtime end-state of a solution — connectors connected + tools discovered, every declared widget actually rendering, skills deployed — with the EXACT failing gaps. Use this instead of guess-and-check after a deploy/patch: it tells you the truth (what's actually live) and names precisely what's broken, not a generic warning. Reliable from any connection (routes through the Builder, not a direct Core call).",
+      "ONE call that returns the REAL runtime end-state of a solution — connectors connected + tools discovered, every declared widget actually rendering, skills deployed — with the EXACT failing gaps. Use this instead of guess-and-check after a deploy/patch: it tells you the truth (what's actually live) and names precisely what's broken, not a generic warning. ok:false with gaps is the answer; a result that also carries `error` means a check could not run (key refused, Builder down) — that is a failed call, not a verdict. Reliable from any connection (routes through the Builder, not a direct Core call).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2175,19 +2205,6 @@ export const tools = [
           type: "string",
           description: "Optional: diff a single skill instead of the whole solution",
         },
-      },
-      required: ["solution_id"],
-    },
-  },
-  {
-    name: "ateam_verify_consistency",
-    core: false,
-    description:
-      "Read-only: do Builder FS and the GitHub repo agree for this solution? Returns { consistent: bool, drifts: [{path, kind}] } where kind ∈ fs_missing | content_differs | gh_missing | gh_read_error | repo_unreachable. Comparison strips ephemeral fields (timestamps, runtime/deploy-state, resolved-on-load flags) so only REAL content drift surfaces. Use this any time you're unsure whether a recent change landed on GitHub or whether your local view of the solution matches what's deployed — much faster than scrolling ateam_github_log manually. No deploy is triggered.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: { type: "string", description: "The solution ID" },
       },
       required: ["solution_id"],
     },
@@ -2441,11 +2458,17 @@ export const tools = [
   {
     name: "ateam_verify_consistency",
     core: true,
+    // ONE definition. It was declared twice (32d2f24, then again as "NEW" in
+    // 7a75479, with a second handler key), and the copy tools/list shows stated
+    // a contract the route has never returned: drift as ok:false. The route
+    // (Builder routes/deploy.js /verify, since 9e51bef) answers ok:true on every
+    // probe that ran and puts the verdict in `consistent`.
     description:
       "Check that the Builder filesystem state and GitHub state are in sync for a solution. Read-only probe — does NOT trigger a deploy.\n\n" +
-      "Returns:\n" +
-      "  • ok: true + drifts: [] if everything matches\n" +
-      "  • ok: false + drifts: [{path, kind}] listing files that differ (kinds: fs_missing, gh_missing, content_differs)\n\n" +
+      "Returns { ok: true, consistent, drifts: [{path, kind}] }:\n" +
+      "  • consistent: true + drifts: [] if everything matches\n" +
+      "  • consistent: false + drifts listing files that differ — kind ∈ fs_missing | content_differs | gh_missing | gh_read_error | repo_unreachable\n" +
+      "`ok` says the probe RAN; `consistent` is the answer. Drift is consistent:false, not a failed call. The comparison strips ephemeral fields (timestamps, runtime/deploy-state, resolved-on-load flags), so only REAL content drift surfaces.\n\n" +
       "Drift can creep in when GitHub writes happen but Builder FS doesn't get the mirror update (network blip, container restart mid-write). Boot sync heals most of it on next backend restart; this tool surfaces drift earlier.\n\n" +
       "Run after a series of ateam_github_patch calls to confirm the Builder backend is consistent with GitHub before you ateam_build_and_run.",
     inputSchema: {
@@ -4290,8 +4313,7 @@ export const handlers = {
       deploy = await post("/deploy/solution", deployBody, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
-      const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(err.message);
-      if (!isTimeout) {
+      if (!isTimeoutError(err)) {
         return { ok: false, phase: "deployment", phases, error: err.message, validation_warnings: validation.warnings || [] };
       }
 
@@ -4951,10 +4973,10 @@ export const handlers = {
       }
     }
 
-    // Phase 4: Redeploy from GitHub (extended timeout — deploys can take 60-120s)
-    // IMPORTANT: if redeploy times out or fails, we return ok:true with a warning
-    // because the patch IS saved to GitHub — it's not lost. The agent can retry
-    // the redeploy with ateam_redeploy(solution_id, skill_id).
+    // Phase 4: Redeploy from GitHub (extended timeout — deploys can take 60-120s).
+    // Every path that reaches here attempts it (dry_run returned above). If it
+    // fails or times out, ok is false and `patch_persisted` says the edit is
+    // kept — see "A PATCH THAT DID NOT REBUILD" below.
     let redeployResult;
     try {
       const rdEndpoint = (target === "skill" && skill_id)
@@ -4988,8 +5010,8 @@ export const handlers = {
         ...(rd.degraded && { code: "DEPLOYED_WITH_ERRORS", outcome: rd.outcome, ...(rd.reason && { reason: rd.reason }) }),
       });
     } catch (err) {
-      // Partial success: patch is saved to GitHub, only redeploy failed.
-      // Return ok:true so the agent doesn't think the patch was lost.
+      // The edit is saved; the rebuild never answered. Not a success — the
+      // verdict below says so, with patch_persisted for "nothing was lost".
       phases.push({ phase: "redeploy", status: "timeout_or_error", error: err.message });
       console.warn(`[ateam_patch] Redeploy failed after successful patch: ${err.message}`);
     }
@@ -5087,7 +5109,14 @@ export const handlers = {
     // ok now reflects the LIFECYCLE — update, rebuild, validate, redeploy —
     // and `patch_persisted` carries the "nothing was lost" fact as a field,
     // where a caller can act on it, instead of as a lie in the status.
-    const lifecycleOk = redeployResult === undefined ? true : redeployOk;
+    //
+    // It is redeployOk and nothing else. It was `redeployResult === undefined ?
+    // true : redeployOk` (daf254a), on the idea that undefined meant "no
+    // redeploy attempted" (dry_run). But dry_run returns long before this line,
+    // so undefined only ever meant the redeploy THREW — a timeout, a 5xx, a
+    // dropped socket — and exactly the failure this block exists to report came
+    // back ok:true.
+    const lifecycleOk = redeployOk;
     // The redeploy was REFUSED (it carries a hint), not merely unfinished: a
     // retry of ateam_redeploy is refused the same way until the caller acts.
     const refused = phases.find((p) => p.phase === "redeploy" && p.status === "error" && p.hint);
@@ -5371,11 +5400,15 @@ export const handlers = {
     if (expect) body.expect = expect;
     if (actor_id) body.actor_id = actor_id;
     // Forwards to the skill-validator, which runs Core's ui.surfaceProbe via /mcp.
-    // 60s: navigate + settle + warm-retry inside Core, plus the hop.
+    // 60s: navigate + settle + warm-retry inside Core, plus the hop — ONE
+    // attempt. The warm-retry already happens inside Core. request()'s default
+    // retries:2 made it up to three probes and ~195s (60+5+60+10+60): every
+    // retry of a timeout or a 502/504 starts another headless-browser run, and
+    // aborting our fetch does not stop the one already running in Core.
     try {
       return await post(
         `/deploy/solutions/${solution_id}/plugins/${encodeURIComponent(plugin_id)}/verify-surface`,
-        body, sid, { timeoutMs: 60000 }
+        body, sid, { timeoutMs: 60000, retries: 0 }
       );
     } catch (err) {
       // A FAILING surface is this tool's whole job, not a transport error. The
@@ -5383,11 +5416,24 @@ export const handlers = {
       // generic error path turned into "returned 422" — hiding the failures that
       // say WHY the screen is broken, and leaving the caller as blind as before
       // it ran the probe. Hand the verdict back as a result instead of throwing.
+      //
+      // Only "surface_failed" is that answer: the probe rendered the surface and
+      // found it broken. Core's other negative verdicts (ui.surfaceProbe) say the
+      // probe never got that far — "inconclusive" (browser-mcp unavailable; fail-
+      // closed, it cannot certify), "no_probe" (the harness never installed),
+      // "misconfigured" (no probe ticket), "bad_input" / "forbidden" (Core refused
+      // the call). Those are failed calls, and a verdict tool says so in `error`
+      // (mcpFailure.isLogicalFailure) — none of them carries one.
       if (typeof err?.body === "string" && err.body) {
-        try {
-          const parsed = JSON.parse(err.body);
-          if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) return parsed;
-        } catch { /* not the probe's body — fall through */ }
+        let parsed = null;
+        try { parsed = JSON.parse(err.body); } catch { /* not the probe's body — fall through */ }
+        if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) {
+          if (parsed.verdict !== "surface_failed" && parsed.error == null) {
+            const why = Array.isArray(parsed.failures) && parsed.failures.length ? `: ${parsed.failures.join("; ")}` : "";
+            parsed.error = `the surface probe did not run (verdict ${parsed.verdict || "none"})${why}`;
+          }
+          return parsed;
+        }
       }
       throw err;
     }
@@ -5691,7 +5737,7 @@ export const handlers = {
   // the CHAIN is done. Cheap enough for periodic polling (no full tree).
   ateam_chain_status: async ({ chain_id, job_id }, sid) => {
     const id = chain_id || job_id;
-    if (!id) throw new Error("chain_id required");
+    if (!id) throw new Error("chain_id required (job_id accepted as an alias)");
     // Routed through the BUILDER proxy (/deploy/jobs/:id/status), not
     // ADAS_CORE_URL directly. Core is the only holder of job state, but its
     // hostname is docker-internal — every laptop MCP session got a bare "fetch
@@ -6074,9 +6120,6 @@ export const handlers = {
     return get(`/deploy/solutions/${solution_id}/metrics${qsStr}`, sid);
   },
 
-  ateam_verify_consistency: async ({ solution_id }, sid) =>
-    get(`/deploy/solutions/${solution_id}/verify`, sid),
-
   // OPEN-7: one call that returns the REAL runtime end-state — connectors
   // connected + tools discovered, declared widgets actually rendering, skills
   // deployed — with the exact failing gaps, so you never guess-and-check.
@@ -6085,6 +6128,15 @@ export const handlers = {
     if (!solution_id) throw new Error("solution_id required");
     const gaps = [];
     const out = { ok: true, solution_id };
+    // A CHECK THAT COULD NOT RUN IS NOT A GAP IT FOUND. Each is still listed in
+    // `gaps` (callers read them there), and ALSO named in `error` below: that is
+    // what tells handleToolCall this verdict tool's CALL failed
+    // (mcpFailure.isLogicalFailure). Without it a verify whose every Builder
+    // read was refused — a rotated or expired key — came back as a successful
+    // call that "found" two gaps, and the UNAUTHENTICATED that sends
+    // ateam-proxy-mcp to sign the tenant in again was never given.
+    const unavailable = [];
+    const couldNotRun = (msg) => { unavailable.push(msg); gaps.push(msg); };
 
     // 1. Connectors — connected + tools discovered.
     try {
@@ -6107,17 +6159,22 @@ export const handlers = {
       }
     } catch (e) {
       out.connectors = { error: e.message };
-      gaps.push(`connectors health unavailable: ${e.message}`);
+      couldNotRun(`connectors health unavailable: ${e.message}`);
     }
 
     // 2. Widgets — every declared ui_plugin actually renders (reliable proxy).
     try {
       const wh = await verifyWidgetHealth(solution_id, sid);
       out.widgets = wh || { checked: 0, note: "no widgets declared" };
-      if (wh && !wh.ok) for (const i of (wh.issues || [])) gaps.push(`widget: ${i}`);
+      // verifyWidgetHealth answers an unreadable definition or plugin catalog
+      // with { ok:false, error } and no `issues` (b3205aa). Reading only
+      // `issues` (95492b6) dropped that on the floor: a verify that could not
+      // look at a single widget said nothing about widgets, and passed.
+      if (wh?.error) couldNotRun(`widget health unavailable: ${wh.error}`);
+      else if (wh && !wh.ok) for (const i of (wh.issues || [])) gaps.push(`widget: ${i}`);
     } catch (e) {
       out.widgets = { error: e.message };
-      gaps.push(`widget health unavailable: ${e.message}`);
+      couldNotRun(`widget health unavailable: ${e.message}`);
     }
 
     // 3. Skills — deployed + registered (from the solution health check).
@@ -6135,7 +6192,7 @@ export const handlers = {
       }
     } catch (e) {
       out.skills = { error: e.message };
-      gaps.push(`solution health unavailable: ${e.message}`);
+      couldNotRun(`solution health unavailable: ${e.message}`);
     }
 
     // 4. SMOKE CALL — actually invoke a tool the SOLUTION depends on.
@@ -6157,7 +6214,13 @@ export const handlers = {
       const wanted = new Map();   // toolName -> connectorId (first skill that declares it)
       for (const sk of Array.isArray(out.skills) ? out.skills : []) {
         if (!sk?.id) continue;
-        const def = await get(`/deploy/solutions/${solution_id}/skills/${sk.id}`, sid).catch(() => null);
+        // An unreadable skill is a check that could not run, not a skill that
+        // declares nothing: swallowing it (.catch(() => null)) produced "no
+        // read-shaped tool declared by any skill" about a skill never read.
+        const def = await get(`/deploy/solutions/${solution_id}/skills/${sk.id}`, sid).catch((e) => {
+          couldNotRun(`skill '${sk.id}' definition unavailable for the smoke check: ${e.message}`);
+          return null;
+        });
         for (const t of (def?.skill?.tools || def?.tools || [])) {
           const name = typeof t === "string" ? t : t?.name;
           if (!name || wanted.has(name)) continue;
@@ -6203,14 +6266,19 @@ export const handlers = {
       }
     } catch (e) {
       out.smoke = { error: e.message };
-      gaps.push(`smoke check could not run: ${e.message}`);
+      couldNotRun(`smoke check could not run: ${e.message}`);
     }
 
     out.gaps = gaps;
     out.ok = gaps.length === 0;
+    if (unavailable.length) {
+      out.error = `${unavailable.length} check(s) could not run, so this is not a verdict: ${unavailable.join("; ")}`;
+    }
     out._status = out.ok
       ? "✅ Verified live — connectors connected AND answering real calls, widgets render, skills deployed."
-      : `⚠️ ${gaps.length} gap(s): ${gaps.slice(0, 5).join("; ")}${gaps.length > 5 ? " …" : ""}`;
+      : out.error
+        ? `❌ Could not verify — ${out.error}`
+        : `⚠️ ${gaps.length} gap(s): ${gaps.slice(0, 5).join("; ")}${gaps.length > 5 ? " …" : ""}`;
     return out;
   },
 
@@ -6679,7 +6747,7 @@ export const handlers = {
 
     if (!result && lastErr) {
       const notFound = /not found|404|ENOENT/i.test(lastErr.message);
-      const isTimeout = /524|502|503|timeout|ETIMEDOUT/i.test(lastErr.message);
+      const isTimeout = isTimeoutError(lastErr);
       return {
         ok: false,
         error: lastErr.message,
@@ -7234,12 +7302,18 @@ export async function handleToolCall(name, args, sessionId) {
     }
 
     const text = formatResult(result, name);
-    if (isLogicalFailure(result)) {
+    if (isLogicalFailure(result, { verdict: VERDICT_TOOLS.has(name) })) {
       // Logical failure RETURNED (not thrown) — e.g. { ok:false, message:"…
       // Authentication required" } or an upstream 200-with-auth-text. Flag it
       // so a caller detects it from isError/code, not by reading the prose.
       // The sentence stays in content[].text for the reasoning loop.
-      const code = deriveErrorCode(result.message || result.error || text, result.code);
+      //
+      // The code is read from the fields that CARRY the failure, never from
+      // the whole payload. With neither message nor error this fell back to
+      // `text` — every byte of the result — so a path, a quoted log line or any
+      // number 401 in the data came back UNAUTHENTICATED, the one code that
+      // sends ateam-proxy-mcp to sign the tenant in again.
+      const code = deriveErrorCode(result.message || result.error || "", result.code);
       return {
         content: [{ type: "text", text }],
         isError: true,
