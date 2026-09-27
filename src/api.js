@@ -302,6 +302,27 @@ export function envForBaseUrl(url) {
 }
 
 /**
+ * WHICH ENVIRONMENT ANSWERS THIS SESSION — the `served_by` on every docs result
+ * (ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search)
+ * and on ateam_bootstrap.
+ *
+ * MGAP-A15: an agent that never signed in read the PROD docs, compared them
+ * with DEV's, and reported the difference as a contradiction in the docs. No
+ * result said which environment had answered.
+ *
+ * Derived, never configured: the base this session's requests go to
+ * (getBaseUrl, the resolution request() makes), named by the one map of
+ * environments (envForBaseUrl). A base that is neither environment (localhost,
+ * a self-hosted deployment) is named by itself: calling it "prod" would be the
+ * guess this file refuses everywhere else.
+ * @returns {string} "prod" | "dev" | the base URL itself
+ */
+export function servedBy(sessionId) {
+  const base = getBaseUrl(sessionId);
+  return envForBaseUrl(base) || base;
+}
+
+/**
  * Set credentials for a session.
  * If tenant is not provided, it's auto-extracted from the key.
  * Set explicit=true when called from ateam_auth (not from seedCredentials).

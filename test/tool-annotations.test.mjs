@@ -166,7 +166,7 @@ test("the ones that run code this server cannot see say so", () => {
 const READ_BY_POST = [
   [/^\/validate\/(skill|solution)$/, "validation of the definition in the body; stores nothing"],
   [/^\/spec\/advisor$/, "an LLM answer over the capability catalog"],
-  [/^\/deploy\/solutions\/[^/]+\/connectors\/sysSpecSearch-mcp\/call$/, "the spec search index's own search tool"],
+  [/^\/spec\/search$/, "a semantic search over the public spec docs"],
 ];
 const isRead = ({ method, path, outside }) =>
   !outside && (method === "GET" || (method === "POST" && READ_BY_POST.some(([rx]) => rx.test(path))));
