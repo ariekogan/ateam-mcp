@@ -267,8 +267,10 @@ test("R5: a socket that died after the request went out is NO_ANSWER — once", 
     const lost = () => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code } }));
     const log = await drive(t, () => handleToolCall("ateam_delete_solution", FORCE(), SID), lost, { advanceMs: 30_000 });
     assert.equal(log.sent, 1, `${code}: the forced DELETE was sent ${log.sent} times`);
-    const out = toolOut(log);
-    assert.equal(out.code, "NO_ANSWER", `${code}: ${JSON.stringify(out)}`);
+    const text = log.value.content[0].text;
+    let out = {};
+    try { out = JSON.parse(text); } catch { /* asserted below */ }
+    assert.equal(out.code, "NO_ANSWER", `${code}: not NO_ANSWER, the call failed as: ${text}`);
     assert.match(out.error, new RegExp(`lost after the request was sent \\(${code}\\)`));
   }
 });
