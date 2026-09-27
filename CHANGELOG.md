@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Security
+
+- `ateam_delete_solution` no longer lets `solution_id` carry `?force=true`.
+  The id was pasted into the URL raw, so `solution_id:"walkmate?force=true"`
+  in PREVIEW mode sent a forced delete that no `confirm` had approved, and
+  `"../x"` left the route. The id is now checked against the Builder's own rule
+  (`/^[a-z0-9][a-z0-9_-]{0,127}$/i`) and refused with no request sent, and
+  both the preview and the forced call encode it.
+- A forced `ateam_delete_solution` is sent once, with a 95s timeout (under
+  Cloudflare's ~100s). A JSON answer comes back whole, with `http_status` and
+  a `_next` chosen from its `code`. No answer (a timeout, or a 504, 524 or 502
+  page without JSON) returns `NO_ANSWER`: the delete may have run, so check
+  with the preview or `ateam_list_solutions`.
+
+### Retries
+
+- A response that carries a JSON body is never re-sent, whatever its status:
+  the server answered. Only a transport failure (this call's timeout, a
+  refused connection, a gateway's 502/504 page without JSON) is re-sent, and
+  only for a read: a GET, or a POST declared `idempotent` (the validators,
+  `ateam_design_advisor`, `ateam_spec_search`). No write is re-sent. Before
+  this, every call re-sent on 502, 504 and its own timeout, writes included,
+  without reading the body. `api.js` `mayAutoRetry` decides this for every
+  request.
+
+### Tools
+
+- `ateam_delete_solution` says that it wipes conversations and history,
+  memory facts and stored actor data, clears voice config, and keeps the tenant
+  account, members and settings. Recovery: code and config can be recovered
+  from git history, and rolling main back to a prod tag restores the files.
+  Conversations, memory and stored data cannot be recovered. It no longer
+  names `ateam_github_pull` as the recovery.
+- `ateam_delete_skill` and `ateam_delete_connector` no longer say the GitHub
+  source is preserved. Both delete it from the repo on dev and main.
+
 ## 0.4.106 — 2026-09-27
 
 ### HTTP mode
