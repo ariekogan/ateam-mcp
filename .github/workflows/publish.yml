@@ -27,6 +27,14 @@ jobs:
       - name: Install deps
         run: npm ci --ignore-scripts
 
+      # A red main does not publish. From 324eb47 this workflow never ran a
+      # test: it shipped whatever main held. Same job, before the publish
+      # step, no continue-on-error: a failing test ends the release here.
+      # ci.yml runs the same suite on every PR; this is the last gate.
+      # test/release-metadata.test.mjs keeps the order.
+      - name: Test
+        run: npm test
+
       - name: Publish to npm
         run: npm publish --access public
         env:

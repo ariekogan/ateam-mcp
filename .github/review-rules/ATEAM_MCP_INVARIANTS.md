@@ -128,3 +128,10 @@
 + npm validity, `package.json.mcpName` must equal `server.json.name`, and the npm id
 must equal `package.json.name`. A release PR that leaves `package.json` /`server.json`
 /`src/server.js` hardcoded version / `CHANGELOG` out of lockstep should be flagged.
+
+## A red main does not publish (BLOCKING)
+
+`publish.yml` runs `npm test` between `npm ci` and `npm publish` in the publishing job,
+and `ci.yml` runs `npm ci` + `npm test` on every pull request and every push to main.
+Flag any change that removes, reorders, conditions (`if:`), softens (`continue-on-error`,
+`|| true`) or path-filters either; `test/release-metadata.test.mjs` pins both.
