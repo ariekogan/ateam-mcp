@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidTokenError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { parseApiKey } from "./api.js";
 
 // ─── TTLs ─────────────────────────────────────────────────────────
@@ -20,15 +20,76 @@ const PENDING_TTL = 10 * 60 * 1000;    // 10 minutes
 
 // ─── Clients Store ────────────────────────────────────────────────
 
-// Known redirect URIs for MCP clients.
-// The real security gate is the API key — redirect_uri validation is just spec compliance.
-const KNOWN_REDIRECT_URIS = [
-  "https://claude.ai/api/mcp/auth_callback",
-  "https://claude.com/api/mcp/auth_callback",
-  "https://chatgpt.com/connector_platform_oauth_redirect",
-  "http://localhost",
-  "http://127.0.0.1",
+// ─── Redirect allowlist ───────────────────────────────────────────
+//
+// A code goes wherever redirect_uri says, so redirect_uri decides who receives
+// the key a person types on the consent page. Until BUILDER-SEC-SIGNIN-P0 this
+// server trusted it: registerClient merged in whatever URIs a caller sent,
+// getClient accepted any client_id, and the consent page named the client by
+// the client_name the caller chose. Anyone could register "Claude" with their
+// own callback, send a person the /authorize link, and receive that person's
+// tenant key (Core Docs/handoff/2026-09-27-agent-signin, §6).
+//
+// Now a redirect is accepted only if it is one of these, at registration AND at
+// /authorize. Adding a client is a code change here.
+//   - the exact https callbacks below;
+//   - ChatGPT's per-connection callback, https://chatgpt.com/connector/oauth/
+//     followed by exactly ONE segment of unreserved characters (OpenAI's
+//     connector registration, used when the server lacks RFC 9207). Matched on
+//     the raw string, so no other host, port, userinfo, "/", "..", query or
+//     fragment gets through;
+//   - loopback, http://localhost or http://127.0.0.1 on any port and path, for
+//     native clients (Claude Code, VS Code's 127.0.0.1:33418) — RFC 8252 §7.3;
+//     a code sent there stays on the person's own machine;
+//   - Cursor's app scheme (RFC 8252 §7.1), on Cursor's own hosts only.
+// The consent page names the requester from THIS table, by the redirect's host,
+// never by client_name.
+const HTTPS_REDIRECTS = new Map([
+  ["https://claude.ai/api/mcp/auth_callback", "Claude"],
+  ["https://claude.com/api/mcp/auth_callback", "Claude"],
+  ["https://chatgpt.com/connector_platform_oauth_redirect", "ChatGPT"],
+  // Cursor desktop registers this with cursor://anysphere.cursor-mcp/oauth/callback
+  // and authorizes with this one.
+  ["https://www.cursor.com/agents/mcp/oauth/callback", "Cursor"],
+  ["https://vscode.dev/redirect", "VS Code"],
+  ["https://insiders.vscode.dev/redirect", "VS Code Insiders"],
+]);
+const HTTPS_PREFIX_REDIRECTS = [
+  { prefix: "https://chatgpt.com/connector/oauth/", name: "ChatGPT", host: "chatgpt.com" },
 ];
+// One path segment of RFC 3986 unreserved characters, and not "." or "..".
+const ONE_SEGMENT = /^(?!\.+$)[A-Za-z0-9._~-]+$/;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
+const APP_SCHEME_HOSTS = new Map([
+  ["cursor:", { hosts: new Set(["anysphere.cursor-mcp", "anysphere.cursor-retrieval"]), name: "Cursor" }],
+]);
+
+/**
+ * Who a redirect_uri delivers the code to, or null when it is not allowlisted.
+ * @returns {{ name: string, host: string } | null}
+ */
+export function redirectRequester(uri) {
+  if (typeof uri !== "string") return null;
+  let url;
+  try { url = new URL(uri); } catch { return null; }
+  if (url.username || url.password || url.hash) return null;
+  if (HTTPS_REDIRECTS.has(uri)) return { name: HTTPS_REDIRECTS.get(uri), host: url.host };
+  for (const { prefix, name, host } of HTTPS_PREFIX_REDIRECTS) {
+    if (uri.startsWith(prefix) && ONE_SEGMENT.test(uri.slice(prefix.length))) return { name, host };
+  }
+  if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) {
+    return { name: "an app on this computer", host: url.host };
+  }
+  const app = APP_SCHEME_HOSTS.get(url.protocol);
+  if (app && app.hosts.has(url.hostname)) return { name: app.name, host: url.host };
+  return null;
+}
+
+// The redirects of a client this server does not know: the pre-registered
+// public client, and any client_id after a restart wiped the in-memory
+// registrations (fafb812). Every entry is on the allowlist, so the fallback can
+// no longer hand out a caller's redirect.
+const KNOWN_REDIRECT_URIS = [...HTTPS_REDIRECTS.keys(), "http://localhost", "http://127.0.0.1"];
 
 class ATeamClientsStore {
   constructor() {
@@ -48,9 +109,8 @@ class ATeamClientsStore {
     const known = this.clients.get(clientId);
     if (known) return known;
 
-    // Auto-accept unknown clients (e.g. after container restart wiped in-memory state).
-    // The real auth is the API key, not the client credentials.
-    // Include all known redirect URIs so OAuth flows work even after restart.
+    // Unknown client_id (e.g. after a container restart wiped in-memory
+    // registrations): accept it, with the allowlisted redirects only.
     return {
       client_id: clientId,
       client_name: clientId,
@@ -62,11 +122,15 @@ class ATeamClientsStore {
   }
 
   async registerClient(clientMetadata) {
+    const uris = clientMetadata.redirect_uris || [];
+    const refused = uris.filter((u) => !redirectRequester(u));
+    if (uris.length === 0 || refused.length > 0) {
+      throw new InvalidClientMetadataError(uris.length === 0
+        ? "redirect_uris is required"
+        : `redirect_uri not allowed: ${refused.join(", ")}. This server issues codes only to Claude, ChatGPT, Cursor, VS Code, and loopback (http://localhost or http://127.0.0.1) redirects.`);
+    }
     const clientId = clientMetadata.client_id || randomUUID();
-    // Merge client's redirect_uris with known ones to ensure OAuth works
-    const clientUris = clientMetadata.redirect_uris || [];
-    const mergedUris = [...new Set([...clientUris, ...KNOWN_REDIRECT_URIS])];
-    const record = { ...clientMetadata, client_id: clientId, redirect_uris: mergedUris };
+    const record = { ...clientMetadata, client_id: clientId, redirect_uris: uris };
     this.clients.set(clientId, record);
     return record;
   }
@@ -90,6 +154,15 @@ class ATeamOAuthProvider {
    * Serves an HTML page where the user enters their API key.
    */
   async authorize(client, params, res) {
+    // The SDK has already matched redirect_uri against the client's record, and
+    // every record holds allowlisted redirects only. This check does not rely on
+    // that: a redirect off the list gets no page, and no redirect either (an
+    // error thrown here would be sent TO the redirect).
+    const requester = redirectRequester(params.redirectUri);
+    if (!requester) {
+      res.status(400).json({ error: "invalid_request", error_description: "redirect_uri is not an allowed client redirect" });
+      return;
+    }
     const pendingId = randomUUID();
     this.pending.set(pendingId, {
       client,
@@ -97,7 +170,7 @@ class ATeamOAuthProvider {
       expiresAt: Date.now() + PENDING_TTL,
     });
     res.setHeader("Content-Type", "text/html");
-    res.send(generateAuthPage(pendingId, client.client_name || client.client_id));
+    res.send(generateAuthPage(pendingId, requester));
   }
 
   async challengeForAuthorizationCode(_client, authorizationCode) {
@@ -121,6 +194,10 @@ class ATeamOAuthProvider {
     // One-time use
     this.codes.delete(authorizationCode);
 
+    // PHASE-1: the access token is the RAW tenant key the person typed, and the
+    // refresh token is rt_<that key>. Phase 1 of the agent sign-in design
+    // (Core Docs/handoff/2026-09-27-agent-signin) replaces both with a
+    // Core-minted grant. Unchanged here on purpose; see ATEAM_MCP_INVARIANTS §1.
     return {
       access_token: entry.apiKey,
       refresh_token: `rt_${entry.apiKey}`,
@@ -131,6 +208,9 @@ class ATeamOAuthProvider {
   }
 
   async exchangeRefreshToken(_client, refreshToken) {
+    // PHASE-1: the refresh token is rt_<raw tenant key>, so "refreshing" is
+    // handing the key back. Phase 1 replaces it with Core's rotating refresh
+    // (revocable, idle and absolute limits). Unchanged here on purpose.
     // Refresh token is rt_<apiKey> — extract the API key
     const apiKey = refreshToken.startsWith("rt_") ? refreshToken.slice(3) : refreshToken;
     const parsed = parseApiKey(apiKey);
@@ -164,7 +244,9 @@ class ATeamOAuthProvider {
 
 // ─── Auth Page HTML ───────────────────────────────────────────────
 
-function generateAuthPage(pendingId, clientName, error) {
+// `requester` is redirectRequester(redirect_uri): who the code goes to, by the
+// redirect's host. Never the client_name, which the caller chooses.
+function generateAuthPage(pendingId, requester, error) {
   const errorHtml = error
     ? `<div style="background:#3a1c1c;border:1px solid #7f1d1d;color:#fca5a5;padding:12px;border-radius:8px;margin-bottom:16px;font-size:14px">${escapeHtml(error)}</div>`
     : "";
@@ -191,6 +273,7 @@ function generateAuthPage(pendingId, clientName, error) {
     .logo { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
     .subtitle { color: #a3a3a3; font-size: 14px; margin-bottom: 24px; }
     .client-name { color: #60a5fa; font-weight: 500; }
+    .client-host { color: #a3a3a3; font-family: monospace; }
     label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; }
     input[type="text"] {
       width: 100%; padding: 10px 12px; font-size: 14px;
@@ -234,7 +317,9 @@ function generateAuthPage(pendingId, clientName, error) {
   <div class="card">
     <div class="logo">A-Team</div>
     <div class="subtitle">
-      <span class="client-name">${escapeHtml(clientName)}</span> wants to connect to your A-Team account
+      ${requester
+        ? `<span class="client-name">${escapeHtml(requester.name)}</span> (<span class="client-host">${escapeHtml(requester.host)}</span>) wants to connect to your A-Team account`
+        : "Connect to your A-Team account"}
     </div>
     ${errorHtml}
     <form id="authForm" method="POST" action="/authorize-submit">
@@ -261,7 +346,7 @@ function generateAuthPage(pendingId, clientName, error) {
       btn.innerHTML = '<span class="spinner"></span>Authorizing\u2026';
       status.className = 'status success';
       status.style.display = 'block';
-      status.textContent = 'Redirecting you back to Claude\u2026';
+      status.textContent = 'Redirecting you back\u2026';
     });
   </script>
 </body>
@@ -331,7 +416,7 @@ export function mountOAuth(app, baseUrl) {
     const entry = provider.pending.get(pending_id);
     if (!entry || entry.expiresAt < Date.now()) {
       provider.pending.delete(pending_id);
-      res.status(400).send(generateAuthPage("expired", "A-Team",
+      res.status(400).send(generateAuthPage("expired", null,
         "Authorization request expired. Please close this page and try connecting again."));
       return;
     }
@@ -339,7 +424,7 @@ export function mountOAuth(app, baseUrl) {
     const parsed = parseApiKey(api_key);
     if (!parsed.isValid) {
       // Re-render the page with an error
-      res.status(400).send(generateAuthPage(pending_id, entry.client.client_name || entry.client.client_id,
+      res.status(400).send(generateAuthPage(pending_id, redirectRequester(entry.params.redirectUri),
         "Invalid API key format. Keys look like: adas_tenant_abc123..."));
       return;
     }

@@ -16,17 +16,33 @@
   validation without updating **every** call site (`src/oauth.js` ×3, `src/api.js`
   ×3, `src/tools.js`) + the `/authorize` hint text ⇒ BLOCKING (breaks every OAuth'd
   Claude.ai session + refresh).
+- Because the code is exchanged for that raw key, `redirect_uri` decides who gets
+  it. A redirect is accepted only if `redirectRequester` (`src/oauth.js`) allows
+  it, at `/register` AND at `/authorize`: the exact Claude / ChatGPT / Cursor /
+  VS Code https callbacks, ChatGPT's per-connection
+  `https://chatgpt.com/connector/oauth/<one segment>`, loopback http
+  (`localhost`, `127.0.0.1`, any port), Cursor's app scheme on Cursor's hosts. The consent page names the requester from that
+  table by the redirect's host, NEVER by `client_name`. Accepting or merging a
+  caller's redirect, or showing `client_name` ⇒ BLOCKING
+  (`test/oauth-redirect-allowlist.test.mjs`).
 
-## 2. Session reuse = owner-ownership; token injection = IP-scoped short-TTL (BLOCKING)
+## 2. Session reuse = owner-ownership; NO token injection (BLOCKING)
 
 - `mcp-session-id` is client-supplied and non-secret (logged/echoed). A bound
   session may be reused (POST/GET/DELETE) ONLY by the same owner — the same
   validated bearer, or the platform principal for a platform session (§3):
   `denySessionReuse`/`sessionOwnershipOk` MUST run on **every** MCP verb. Any new
   route/method under `MCP_PATHS` must call it.
-- The OAuth→MCP token auto-injection cache must stay **IP-scoped with a short TTL**
-  (`recentTokensByIp`, `TOKEN_TTL`) — NEVER a process-global "newest token"
-  (`getNewestToken()` was the CRITICAL cross-user auth bypass, finding #28).
+- The server NEVER supplies a token to a request: no cache of `/token` responses,
+  no injection into a request that arrived without `Authorization`, keyed by
+  anything. A process-global "newest token" (`getNewestToken()`) was the CRITICAL
+  cross-user bypass of finding #28; its IP-scoped successor (`recentTokensByIp` +
+  `autoInjectToken`) was the same bypass behind a shared egress IP (Claude.ai and
+  ChatGPT share them), and ran before the strict gate. Both were deleted
+  (BUILDER-SEC-SIGNIN-P0). The injection was a workaround for Claude.ai dropping
+  its token (anthropics/claude-ai-mcp#35); prod logs now show Claude.ai sending
+  its own bearer, which is why removing it is safe. Bringing any injection
+  back ⇒ BLOCKING.
 - This is layer 2, and it is not redundant with the bearer gate (§3):
   `verifyAccessToken` is structural-only (§1), so ANY well-formed key passes the
   gate, including a made-up key naming the victim's own tenant. Only the ownership
@@ -42,8 +58,8 @@
   one shared platform credential holding one would carry a tenant into every proxy
   session. Every override lookup goes through `bearerOf`, which answers null for it.
 - Extend `test/session-isolation.test.mjs` when touching this path. It tests each
-  layer on its own, on every verb, plus the idle sweep and the injection cache's IP
-  scope and TTL. Regressing any of them ⇒ BLOCKING (cross-tenant auth bypass on the
+  layer on its own, on every verb, plus the idle sweep, and that a `/token`
+  exchange does not authenticate a bearer-less request from the same IP. Regressing any of them ⇒ BLOCKING (cross-tenant auth bypass on the
   public surface).
 
 ## 3. Dual mount contract: BOTH `/` and `/mcp` strict (BLOCKING)
@@ -59,7 +75,7 @@
   shared server. `test/session-isolation.test.mjs` covers both mounts.
 - The ONE other way in is platform sign-in (`platformGate`, for ai-dev-assistant's
   ateam-proxy-mcp, which has no bearer for its tenant-less handshake). It runs
-  BEFORE auto-injection and the bearer gate, and must stay:
+  BEFORE the bearer gate, and must stay:
   - constant-time against `CORE_MCP_SECRET`, byte lengths compared first
     (`presentsPlatformSecret`), and FAIL CLOSED when that is unset or empty;
   - decided alone: a presented `x-adas-token` that fails is a 401, never a fall-through

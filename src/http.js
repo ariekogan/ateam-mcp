@@ -17,14 +17,12 @@
  *
  * Platform sign-in (`x-adas-token`):
  *   The one other way in, for the platform's own proxy (ai-dev-assistant's
- *   ateam-proxy-mcp). Checked BEFORE the bearer gate and before auto-injection;
- *   see platformGate. Off unless CORE_MCP_SECRET is set.
+ *   ateam-proxy-mcp). Checked BEFORE the bearer gate; see platformGate. Off
+ *   unless CORE_MCP_SECRET is set.
  *
- * Token Auto-Injection:
- *   Claude.ai's OAuth client and MCP client don't share Bearer tokens.
- *   After a successful token exchange, we cache the token server-side and
- *   inject it into subsequent unauthenticated MCP requests. This is a
- *   simple cache lookup — no request holding, no polling, no flags.
+ * No token is ever supplied by the server: a request carries its own bearer or
+ * gets the 401 challenge. (There was a per-IP token auto-injection until
+ * BUILDER-SEC-SIGNIN-P0; see the note above mcpAuthFor.)
  */
 
 import { randomUUID } from "node:crypto";
@@ -54,20 +52,6 @@ const transports = {};
 
 // MCP paths — Claude.ai uses "/" (connector URL), others may use "/mcp"
 const MCP_PATHS = ["/", "/mcp"];
-
-// Recently exchanged OAuth tokens — for auto-injection into MCP requests that
-// follow the /token exchange within the same user's OAuth→MCP handshake window.
-//
-// ⚠️ SECURITY: This cache is scoped by CLIENT IP. A previous version keyed by
-// token value and used `getNewestToken()` for injection — in multi-user HTTP
-// mode (e.g., mcp.ateam-ai.com), that caused cross-user auth bypass: if User A
-// completed OAuth and then User B sent an unauth'd MCP request, User B was
-// injected with User A's token. IP-scoping prevents that: injection only
-// happens for the same client IP that completed the token exchange.
-//
-// Key: client IP string, Value: { token, createdAt }
-const recentTokensByIp = new Map();
-const TOKEN_TTL = 5 * 60 * 1000; // 5 minutes — OAuth→MCP handshake window only
 
 export function startHttpServer(port = 3100) {
   const app = express();
@@ -124,33 +108,6 @@ export function startHttpServer(port = 3100) {
 
   let bearerMiddlewareFor = null;
   if (!oauthDisabled) {
-    // ─── Token capture middleware — MUST be BEFORE mcpAuthRouter ───
-    // Intercepts POST /token responses to cache access_tokens for
-    // auto-injection. Placed before mountOAuth so it can monkey-patch
-    // res.json() before the SDK's token handler sends the response.
-    app.use("/token", (req, res, next) => {
-      if (req.method !== "POST") return next();
-      const origJson = res.json.bind(res);
-      res.json = (data) => {
-        if (data && data.access_token && res.statusCode >= 200 && res.statusCode < 300) {
-          // IP-scoped cache: only the same client IP can consume this token
-          // via auto-injection. Prevents cross-user token leakage in shared HTTP mode.
-          const ip = req.ip || "unknown";
-          recentTokensByIp.set(ip, {
-            token: data.access_token,
-            createdAt: Date.now(),
-          });
-          console.log(`[Auth] Cached OAuth token for ip=${ip} (${recentTokensByIp.size} active IPs)`);
-          // Prune expired
-          for (const [k, v] of recentTokensByIp) {
-            if (Date.now() - v.createdAt > TOKEN_TTL) recentTokensByIp.delete(k);
-          }
-        }
-        return origJson(data);
-      };
-      next();
-    });
-
     const oauth = mountOAuth(app, baseUrl);
     bearerMiddlewareFor = oauth.bearerMiddlewareFor;
 
@@ -158,32 +115,6 @@ export function startHttpServer(port = 3100) {
   } else {
     console.log("  OAuth: disabled (ATEAM_OAUTH_DISABLED=1)");
   }
-
-  // ─── Token auto-injection middleware ────────────────────────────
-  // If a request has no Authorization header, check if THIS CLIENT IP recently
-  // completed /token exchange. If so, inject that IP's cached token. Prevents
-  // cross-user token leakage (fix for mcp-audit finding #1, round 009).
-  // test/session-isolation.test.mjs checks the IP scope and the TTL.
-  const autoInjectToken = (req, _res, next) => {
-    if (req.headers.authorization) return next();
-    const ip = req.ip || "unknown";
-    const entry = recentTokensByIp.get(ip);
-    if (!entry) return next();
-    if (Date.now() - entry.createdAt > TOKEN_TTL) {
-      recentTokensByIp.delete(ip);
-      return next();
-    }
-    const token = entry.token;
-    req.headers.authorization = `Bearer ${token}`;
-    const idx = req.rawHeaders.findIndex((h) => h.toLowerCase() === "authorization");
-    if (idx !== -1) {
-      req.rawHeaders[idx + 1] = `Bearer ${token}`;
-    } else {
-      req.rawHeaders.push("Authorization", `Bearer ${token}`);
-    }
-    console.log(`[Auth] Auto-injected IP-scoped token for ip=${ip} into ${req.method} ${req.originalUrl || req.url}`);
-    next();
-  };
 
   // Bearer auth middleware for MCP routes — STRICT ON BOTH PATHS.
   //
@@ -225,11 +156,10 @@ export function startHttpServer(port = 3100) {
   // logged "MCP server error: 401 Unauthorized" for "A-Team Builder (proxy)".
   // It sends `x-adas-token`, the platform secret it already presents to Core.
   //
-  // platformGate runs FIRST, before auto-injection: an internal call must never
-  // pick up an OAuth token cached for its IP. A request that presents
-  // x-adas-token is decided by it alone:
+  // platformGate runs FIRST. A request that presents x-adas-token is decided by
+  // it alone:
   //   - it matches CORE_MCP_SECRET (constant time; see presentsPlatformSecret)
-  //     → the PLATFORM principal. The bearer gate and injection are skipped, and
+  //     → the PLATFORM principal. The bearer gate is skipped, and
   //     any Authorization it also sent is ignored: it is never bound or seeded.
   //   - it does not, or CORE_MCP_SECRET is unset → 401. A credential that was
   //     presented and failed is a failure, not "no credential": it does not fall
@@ -259,9 +189,24 @@ export function startHttpServer(port = 3100) {
   const unlessPlatform = (mw) => (req, res, next) => (req.platformPrincipal ? next() : mw(req, res, next));
   // ONE rule on both mounts. Only the challenge differs: each names the
   // protected-resource metadata for the URL the client called (see mountOAuth).
+  //
+  // NO TOKEN INJECTION. Until BUILDER-SEC-SIGNIN-P0 a middleware ran here,
+  // BEFORE the bearer gate: it cached every /token response by client IP
+  // (recentTokensByIp, 5 min) and put that token into any request from the same
+  // IP that arrived without Authorization (autoInjectToken, e23bd3e, IP-scoped
+  // in d61465b). Claude.ai and ChatGPT reach this server from SHARED provider
+  // egress IPs (prod logged the cache filling from 160.79.106.x), so one
+  // person's tenant key could be handed to another person's bearer-less
+  // request, and the injection defeated the strict gate below. It was a
+  // workaround for Claude.ai dropping the token its OAuth client had just
+  // obtained (anthropics/claude-ai-mcp#35; e23bd3e: "the MCP client sends POST
+  // /mcp without auth"). Prod logs now show Claude.ai sending its own bearer
+  // (POST / answered 200 with the client's bearer, and no "Auto-injected" line),
+  // which is why removing it is safe. A request without a bearer gets the 401.
+  // test/session-isolation.test.mjs §6 fails if any injection comes back.
   const mcpAuthFor = (path) => [
     platformGate,
-    ...(bearerMiddlewareFor ? [autoInjectToken, bearerMiddlewareFor(path)].map(unlessPlatform) : []),
+    ...(bearerMiddlewareFor ? [unlessPlatform(bearerMiddlewareFor(path))] : []),
   ];
 
   // ─── CORS — required for browser-based MCP clients ──────────────
@@ -552,11 +497,6 @@ export function startHttpServer(port = 3100) {
     process.exit(0);
   });
 }
-
-// getNewestToken() removed — replaced by IP-scoped lookup in autoInjectToken.
-// Global "newest token" injection caused cross-user auth bypass in multi-user
-// HTTP deployments. IP scoping restores the intended semantics (same browser
-// that completed OAuth gets its token injected on the follow-up MCP request).
 
 /**
  * Seed session credentials from the OAuth bearer token.
