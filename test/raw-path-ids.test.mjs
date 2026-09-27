@@ -29,9 +29,12 @@ let server;
 before(async () => {
   server = createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
-    req.resume();
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
     req.on("end", () => {
-      const reply = routes[`${req.method} ${req.url.split("?")[0]}`] || { status: 200, body: { ok: true, chain: { chainJobs: [] } } };
+      const route = routes[`${req.method} ${req.url.split("?")[0]}`];
+      const reply = (typeof route === "function" ? route(raw ? JSON.parse(raw) : null) : route)
+        || { status: 200, body: { ok: true, chain: { chainJobs: [] } } };
       res.writeHead(reply.status || 200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(reply.body));
     });
@@ -127,8 +130,11 @@ test("a job id apiPath refuses is refused at once — not polled for the whole b
   // build_and_run's own async poll, after a sync 524.
   const bar = await withinMs(1500, call("ateam_build_and_run", { solution: { id: "sol", name: "Sol" }, skills: [{ id: "s1" }], mcp_store: {} }, {
     "POST /validate/solution": { body: { ok: true, errors: [], warnings: [] } },
-    "POST /deploy/solution": { status: 524, body: "A timeout occurred" },
+    "POST /deploy/solution": (body) => (body?.async
+      ? { body: { ok: true, async: true, job_id: "../x" } }
+      : { status: 524, body: "A timeout occurred" }),
   }));
+  assert.equal(hits.filter((h) => h === "POST /deploy/solution").length, 2, `the async door was not reached: ${hits.join(", ")}`);
   assert.notEqual(bar, "STILL RUNNING", "build_and_run kept polling a job id it can never send");
   assert.deepEqual(hits.filter((h) => h.startsWith("GET /deploy/jobs")), [], `polled: ${hits.join(", ")}`);
 });
