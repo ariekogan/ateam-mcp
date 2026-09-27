@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Security
+
+- No tool puts a caller's id into a URL path raw. Over a hundred API paths in
+  `tools.js` pasted ids in as they came. Because fetch normalizes `..`,
+  `ateam_test_abort(skill_id:"..", job_id:"..?force=true")` sent
+  `DELETE /deploy/solutions/<id>?force=true`, a forced tenant wipe with no
+  confirm. `ateam_delete_skill` and `ateam_delete_connector` did the same with
+  `"..?force=true"`, `"%2e%2e?force=true"` or `"walkmate?force=true#"`.
+  Every API path is now built by one tag, `apiPath` in `src/pathParam.js`. It
+  refuses a value that cannot be an id (`.`, `..`, `?`, `#`, `%`, `\`,
+  whitespace, or empty) before any request, and percent-encodes every other
+  value. A test fails on any API path built another way.
+
 ## 0.4.106 — 2026-09-27
 
 ### HTTP mode

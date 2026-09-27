@@ -68,6 +68,7 @@ import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { isTimeoutError } from "./api.js";
+import { apiPath, rawQuery } from "./pathParam.js";
 
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
 // three different things here (the mac1 container, npm, and each developer's local
@@ -97,17 +98,16 @@ export const MCP_VERSION = (() => {
 async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000, intervalMs = 2000 } = {}) {
   const start = Date.now();
   let lastStatus = null;
-  // URL-encode jobId — older skill-validators returned composite job IDs
+  // apiPath encodes jobId — older skill-validators returned composite job IDs
   // with literal `/` (e.g. `redeploy-skill-personal-adas/pa-orchestrator-...`)
   // which broke the Express route /deploy/jobs/:jobId. Polling silently
   // 404'd every iteration until the MCP host's stdio idle timeout fired
   // (~30s) and dropped the connection. Encoding here is defense-in-depth
   // even after the server-side fix that replaced `/` with `--`.
-  const encodedJobId = encodeURIComponent(jobId);
   while (Date.now() - start < maxMs) {
     await new Promise(r => setTimeout(r, intervalMs));
     try {
-      const job = await get(`/deploy/jobs/${encodedJobId}`, sid);
+      const job = await get(apiPath`/deploy/jobs/${jobId}`, sid);
       lastStatus = job?.status;
       if (job?.status === 'done' || job?.status === 'failed') {
         return job; // job entry has the full result merged in
@@ -236,7 +236,7 @@ function asSentence(text) {
  */
 async function probeGithubConnected(solution_id, sid) {
   try {
-    const probe = await get(`/deploy/solutions/${solution_id}/github/connected`, sid);
+    const probe = await get(apiPath`/deploy/solutions/${solution_id}/github/connected`, sid);
     return probe?.connected !== false && probe?.enabled !== false;
   } catch {
     return null;
@@ -529,7 +529,7 @@ async function verifyWidgetHealth(solution_id, sid) {
   // 1. Declared plugins — solution.ui_plugins[]
   let declared = [];
   try {
-    const def = await get(`/deploy/solutions/${solution_id}/definition`, sid);
+    const def = await get(apiPath`/deploy/solutions/${solution_id}/definition`, sid);
     const sol = def?.solution || def?.definition || def || {};
     declared = Array.isArray(sol.ui_plugins) ? sol.ui_plugins : [];
   } catch (e) {
@@ -544,7 +544,7 @@ async function verifyWidgetHealth(solution_id, sid) {
   // ADAS_CORE_URL directly (unreachable from remote/desktop MCP).
   let live = [];
   try {
-    const data = await get(`/deploy/solutions/${solution_id}/ui-plugins`, sid);
+    const data = await get(apiPath`/deploy/solutions/${solution_id}/ui-plugins`, sid);
     live = Array.isArray(data?.plugins) ? data.plugins : [];
   } catch (e) {
     return { ok: false, error: `widget health: could not read live plugin catalog — ${e.message}` };
@@ -605,7 +605,7 @@ async function verifyWidgetHealth(solution_id, sid) {
     if (!connectorId) continue;
     if (!connectorsSeen.has(connectorId)) {
       try {
-        const src = await get(`/deploy/solutions/${solution_id}/connectors/${connectorId}/source`, sid);
+        const src = await get(apiPath`/deploy/solutions/${solution_id}/connectors/${connectorId}/source`, sid);
         connectorsSeen.set(connectorId, Array.isArray(src?.files) ? src.files : []);
       } catch {
         connectorsSeen.set(connectorId, []);   // unreadable source is not a verdict
@@ -4134,7 +4134,7 @@ export const handlers = {
     if (!query || typeof query !== "string") throw new Error("query required (a string question)");
     const sol = solution_id || "_";
     const r = await post(
-      `/deploy/solutions/${encodeURIComponent(sol)}/connectors/sysSpecSearch-mcp/call`,
+      apiPath`/deploy/solutions/${sol}/connectors/sysSpecSearch-mcp/call`,
       { tool: "sysSpecSearch.search", args: { query, ...(top_k ? { top_k } : {}) } },
       sid,
       { timeoutMs: 30_000, retries: 1 },
@@ -4195,7 +4195,7 @@ export const handlers = {
     let pulledMcpStore = false;
     if (!mcp_store) {
       try {
-        const ghStatus = await get(`/deploy/solutions/${solutionId}/github/status`, sid);
+        const ghStatus = await get(apiPath`/deploy/solutions/${solutionId}/github/status`, sid);
         // repo_url only says a REPO EXISTS. It has never said the repo carries
         // this solution's connector source, and treating the two as the same
         // claim is how a connector with nothing in the repo used to slip
@@ -4219,7 +4219,7 @@ export const handlers = {
         // (BRANCH_REQUIRED), so the intent has to be stated here, from the
         // one owner of the branch story.
         const pullResult = await post(
-          `/deploy/solutions/${solutionId}/github/pull-bundle`,
+          apiPath`/deploy/solutions/${solutionId}/github/pull-bundle`,
           { branch: BRANCH_WORKFLOW.deploy_branch },
           sid,
           { timeoutMs: 60_000 },
@@ -4441,7 +4441,7 @@ export const handlers = {
           while (Date.now() - start < maxWait) {
             await new Promise(r => setTimeout(r, pollInterval));
             try {
-              const job = await get(`/deploy/jobs/${jobId}`, sid);
+              const job = await get(apiPath`/deploy/jobs/${jobId}`, sid);
               if (job.status === 'done' || job.status === 'failed') {
                 deploy = job;
                 phases.push({ phase: "deploy", status: job.status });
@@ -4512,7 +4512,7 @@ export const handlers = {
           // mcp_store keeps the default: those files are the caller's
           // iteration, and dev is where iteration lives.
           const uploadResult = await post(
-            `/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
+            apiPath`/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
             { files, ...(pulledMcpStore && { ref: BRANCH_WORKFLOW.deploy_branch }) },
             sid,
             { timeoutMs: 120_000 },
@@ -4533,7 +4533,7 @@ export const handlers = {
     let health;
     try {
       await sleep(2000);
-      health = await get(`/deploy/solutions/${solutionId}/health`, sid);
+      health = await get(apiPath`/deploy/solutions/${solutionId}/health`, sid);
       phases.push({ phase: "health", status: "done" });
     } catch (err) {
       health = { error: err.message };
@@ -4547,7 +4547,7 @@ export const handlers = {
       if (skillId) {
         try {
           test_result = await post(
-            `/deploy/solutions/${solutionId}/skills/${skillId}/test`,
+            apiPath`/deploy/solutions/${solutionId}/skills/${skillId}/test`,
             { message: test_message },
             sid,
             { timeoutMs: 90_000 },
@@ -4572,7 +4572,7 @@ export const handlers = {
     } else {
       try {
         github_result = await post(
-          `/deploy/solutions/${solutionId}/github/push`,
+          apiPath`/deploy/solutions/${solutionId}/github/push`,
           { push_to_github: true, message: `Deploy: ${solution.name || solutionId}` },
           sid,
           { timeoutMs: 60_000 },
@@ -4699,12 +4699,12 @@ export const handlers = {
       if (isLocal) {
         // Read the raw definition from the Builder store — no GitHub repo needed.
         if (target === "skill" && skill_id) {
-          const r = await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, sid);
+          const r = await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
           current = r.skill || r.definition || r;
         } else {
           // ?raw=1 → the agent-api returns the UNSTRIPPED solution (keeps
           // linked_skills/conversation) so _delete/_push operate on the real arrays.
-          const r = await get(`/deploy/solutions/${solution_id}/definition?raw=1`, sid);
+          const r = await get(apiPath`/deploy/solutions/${solution_id}/definition?raw=1`, sid);
           current = r.solution || r;
         }
         if (!current || typeof current !== "object") {
@@ -4712,7 +4712,7 @@ export const handlers = {
         }
       } else {
         try {
-          const readResult = await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid);
+          const readResult = await get(apiPath`/deploy/solutions/${solution_id}/github/read?path=${filePath}`, sid);
           current = JSON.parse(readResult.content);
         } catch (ghErr) {
           // Auto-degrade a DEFAULT-source patch to the Builder FS when the tenant
@@ -4730,8 +4730,8 @@ export const handlers = {
             isLocal = true;
             degradedToLocal = true;
             const r = target === "skill" && skill_id
-              ? await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, sid)
-              : await get(`/deploy/solutions/${solution_id}/definition?raw=1`, sid);
+              ? await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid)
+              : await get(apiPath`/deploy/solutions/${solution_id}/definition?raw=1`, sid);
             current = target === "skill" && skill_id
               ? (r.skill || r.definition || r)
               : (r.solution || r);
@@ -4766,8 +4766,8 @@ export const handlers = {
         let otherDef = null;
         try {
           const other = isLocal
-            ? JSON.parse((await get(`/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent(filePath)}`, sid)).content)
-            : await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, sid);
+            ? JSON.parse((await get(apiPath`/deploy/solutions/${solution_id}/github/read?path=${filePath}`, sid)).content)
+            : await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
           otherDef = other?.skill || other?.definition || other;
         } catch { otherDef = null; /* absent in the other source too → truly new */ }
         const otherIsReal = otherDef && typeof otherDef === "object" && (
@@ -4956,11 +4956,11 @@ export const handlers = {
     if (dry_run) {
       const would_write = isLocal
         ? (target === "skill" && skill_id && isNewSkill
-            ? { method: "POST", endpoint: `/deploy/solutions/${solution_id}/skills`, body_key: "skill", creates: true }
+            ? { method: "POST", endpoint: apiPath`/deploy/solutions/${solution_id}/skills`, body_key: "skill", creates: true }
             : target === "skill" && skill_id
-              ? { method: "PATCH", endpoint: `/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, body_key: "updates" }
-              : { method: "PATCH", endpoint: `/deploy/solutions/${solution_id}`, body_key: "state_update" })
-        : { method: "POST", endpoint: `/deploy/solutions/${solution_id}/github/patch`, body_key: "content" };
+              ? { method: "PATCH", endpoint: apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, body_key: "updates" }
+              : { method: "PATCH", endpoint: apiPath`/deploy/solutions/${solution_id}`, body_key: "state_update" })
+        : { method: "POST", endpoint: apiPath`/deploy/solutions/${solution_id}/github/patch`, body_key: "content" };
       return {
         ok: true,
         dry_run: true,
@@ -5008,13 +5008,13 @@ export const handlers = {
         //   • EXISTING skill → PATCH …/skills/:skillId           { updates }
         //   • Solution       → PATCH /deploy/solutions/:id       { state_update }
         if (target === "skill" && skill_id && isNewSkill) {
-          await post(`/deploy/solutions/${solution_id}/skills`, { skill: patched }, sid, { timeoutMs: 30_000 });
+          await post(apiPath`/deploy/solutions/${solution_id}/skills`, { skill: patched }, sid, { timeoutMs: 30_000 });
           phases.push({ phase: "local_write", status: "done", created: true });
         } else if (target === "skill" && skill_id) {
-          await patch(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}`, { updates: patched }, sid, { timeoutMs: 30_000 });
+          await patch(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates: patched }, sid, { timeoutMs: 30_000 });
           phases.push({ phase: "local_write", status: "done" });
         } else {
-          await patch(`/deploy/solutions/${solution_id}`, { state_update: patched }, sid, { timeoutMs: 30_000 });
+          await patch(apiPath`/deploy/solutions/${solution_id}`, { state_update: patched }, sid, { timeoutMs: 30_000 });
           phases.push({ phase: "local_write", status: "done" });
         }
       } else {
@@ -5022,7 +5022,7 @@ export const handlers = {
         // directly). Capture the ACTUAL branch it committed to — do NOT assume
         // 'main'; mislabeling it strands the change off `main` until an explicit
         // ateam_github_promote (was: the result hardcoded branch:"main").
-        const ghResp = await post(`/deploy/solutions/${solution_id}/github/patch`, {
+        const ghResp = await post(apiPath`/deploy/solutions/${solution_id}/github/patch`, {
           path: filePath,
           content: JSON.stringify(patched, null, 2),
           message,
@@ -5050,12 +5050,12 @@ export const handlers = {
         if (isLocal) {
           // Local: _push the entries via the Builder store (dedup handled by the
           // store's _push — it updates in place if the id already exists).
-          await patch(`/deploy/solutions/${solution_id}`, {
+          await patch(apiPath`/deploy/solutions/${solution_id}`, {
             state_update: { skills_push: [skillEntry], linked_skills_push: [skill_id] },
           }, sid, { timeoutMs: 30_000 });
           phases.push({ phase: "solution_topology", status: "done", added: skill_id });
         } else {
-          const solRead = await get(`/deploy/solutions/${solution_id}/github/read?path=solution.json`, sid);
+          const solRead = await get(apiPath`/deploy/solutions/${solution_id}/github/read?path=solution.json`, sid);
           const sol = JSON.parse(solRead.content);
           // Add to skills[] if not already present
           if (!sol.skills) sol.skills = [];
@@ -5067,7 +5067,7 @@ export const handlers = {
           if (!sol.linked_skills.includes(skill_id)) {
             sol.linked_skills.push(skill_id);
           }
-          await post(`/deploy/solutions/${solution_id}/github/patch`, {
+          await post(apiPath`/deploy/solutions/${solution_id}/github/patch`, {
             path: "solution.json",
             content: JSON.stringify(sol, null, 2),
             message: `Add skill "${skill_id}" to solution topology`,
@@ -5088,8 +5088,8 @@ export const handlers = {
     let redeployResult;
     try {
       const rdEndpoint = (target === "skill" && skill_id)
-        ? `/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
-        : `/deploy/solutions/${solution_id}/redeploy`;
+        ? apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
+        : apiPath`/deploy/solutions/${solution_id}/redeploy`;
       // Async-first, same as ateam_redeploy: a bulk (solution) redeploy of a
       // many-skill solution takes >100s and 524s on the sync path — the patch
       // then LOOKED like it failed / never reached Core. Kick async + poll;
@@ -5130,7 +5130,7 @@ export const handlers = {
       try {
         await sleep(1000);
         test_result = await post(
-          `/deploy/solutions/${solution_id}/skills/${skill_id}/test`,
+          apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test`,
           { message: test_message },
           sid,
           { timeoutMs: 90_000 },
@@ -5195,7 +5195,7 @@ export const handlers = {
     if (target === "skill" && skill_id) {
       try {
         const vr = await get(
-          `/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}/validate`,
+          apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/validate`,
           sid,
           { timeoutMs: 20_000, retries: 0 },
         );
@@ -5341,7 +5341,7 @@ export const handlers = {
     post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid),
 
   ateam_deploy_skill: async ({ solution_id, skill }, sid) =>
-    post(`/deploy/solutions/${solution_id}/skills`, { skill }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/skills`, { skill }, sid),
 
   ateam_deploy_connector: async ({ connector }, sid) =>
     post("/deploy/connector", { connector }, sid),
@@ -5377,7 +5377,7 @@ export const handlers = {
       }
       resolved.push({ path: file.path, content });
     }
-    return post(`/deploy/mcp-store/${connector_id}`, { files: resolved }, sid);
+    return post(apiPath`/deploy/mcp-store/${connector_id}`, { files: resolved }, sid);
   },
 
   ateam_list_solutions: async (_args, sid) => {
@@ -5389,7 +5389,7 @@ export const handlers = {
     const enriched = await Promise.all(solutions.map(async (s) => {
       const out = { ...s };
       try {
-        const gh = await get(`/deploy/solutions/${s.id}/github/status`, sid);
+        const gh = await get(apiPath`/deploy/solutions/${s.id}/github/status`, sid);
         if (gh?.exists && gh.repo_url) {
           out.repo_url = gh.repo_url;
           out.github_full_name = gh.full_name || null;
@@ -5397,7 +5397,7 @@ export const handlers = {
           out.latest_commit_sha = gh.latest_commit?.sha || null;
           // Probe for agent-onboarding doc; swallow 404 etc.
           try {
-            const probe = await get(`/deploy/solutions/${s.id}/github/read?path=CLAUDE.md`, sid);
+            const probe = await get(apiPath`/deploy/solutions/${s.id}/github/read?path=CLAUDE.md`, sid);
             out.has_claude_md = Boolean(probe?.content);
           } catch { out.has_claude_md = false; }
           out.local_dev_quickstart = {
@@ -5415,7 +5415,7 @@ export const handlers = {
   },
 
   ateam_get_solution: async ({ solution_id, view, skill_id, section, offset, limit }, sid) => {
-    const base = `/deploy/solutions/${solution_id}`;
+    const base = apiPath`/deploy/solutions/${solution_id}`;
     const paged = (offset != null || limit != null);
     if (skill_id) {
       const r = await get(`${base}/skills/${skill_id}`, sid);
@@ -5437,7 +5437,7 @@ export const handlers = {
       definition: `${base}/definition`,
       skills: `${base}/skills`,
       health: `${base}/health`,
-      status: `/deploy/status/${solution_id}`,
+      status: apiPath`/deploy/status/${solution_id}`,
       export: `${base}/export`,
       validate: `${base}/validate`,
       connectors_health: `${base}/connectors/health`,
@@ -5448,17 +5448,17 @@ export const handlers = {
 
   ateam_update: async ({ solution_id, target, skill_id, updates }, sid) => {
     if (target === "skill") {
-      return patch(`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates }, sid);
+      return patch(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, { updates }, sid);
     }
-    return patch(`/deploy/solutions/${solution_id}`, { state_update: updates }, sid);
+    return patch(apiPath`/deploy/solutions/${solution_id}`, { state_update: updates }, sid);
   },
 
 
   ateam_solution_chat: async ({ solution_id, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/chat`, { message }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/chat`, { message }, sid),
 
   ateam_test_connector: async ({ solution_id, connector_id, tool, args }, sid) =>
-    post(`/deploy/solutions/${solution_id}/connectors/${connector_id}/call`, { tool, args }, sid, { timeoutMs: 30_000 }),
+    post(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/call`, { tool, args }, sid, { timeoutMs: 30_000 }),
 
   // ─── Developer Tools ────────────────────────────────────────────
 
@@ -5477,7 +5477,7 @@ export const handlers = {
     // So a chain id goes to the CHAIN endpoint, which returns every job and every
     // step across the whole tree — the actual "what ran". (2026-08-22.)
     if (!job_id && chain_id) {
-      const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
+      const chain = await get(apiPath`/deploy/jobs/${chain_id}/chain`, sid);
       const { jobs, steps } = chainTreeOf(chain);
       return {
         ok: true,
@@ -5500,7 +5500,7 @@ export const handlers = {
     // private path was how the other five ended up with none at all.
     if (limit) qs.set("limit", String(limit));
     const qsStr = qs.toString() ? `?${qs}` : "";
-    return get(`/deploy/solutions/${solution_id}/logs${qsStr}`, sid);
+    return get(apiPath`/deploy/solutions/${solution_id}/logs${rawQuery(qsStr)}`, sid);
   },
 
   ateam_conversation: async ({ solution_id, message, actor_id, wait, timeout_ms }, sid) => {
@@ -5510,7 +5510,7 @@ export const handlers = {
     // immediately, and the caller polls a SLIM status. `wait`/`timeout_ms` are
     // accepted for back-compat but no longer hold the HTTP request open.
     const body = { message, async: true, ...(actor_id ? { actor_id } : {}) };
-    const kickoff = await post(`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs: 15_000 });
+    const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs: 15_000 });
     // The CHAIN id — not a single job id — is the conversation's identity and
     // what you poll. The Builder returns it as chain_id (falls back to the
     // root job id only if an older Builder didn't send one).
@@ -5538,7 +5538,7 @@ export const handlers = {
     if (errors_only === true) qs.set("errors_only", "true");
     const qsStr = qs.toString() ? `?${qs}` : "";
     return get(
-      `/deploy/solutions/${solution_id}/connectors/${encodeURIComponent(connector_id)}/logs${qsStr}`,
+      apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/logs${rawQuery(qsStr)}`,
       sid
     );
   },
@@ -5557,7 +5557,7 @@ export const handlers = {
     // aborting our fetch does not stop the one already running in Core.
     try {
       return await post(
-        `/deploy/solutions/${solution_id}/plugins/${encodeURIComponent(plugin_id)}/verify-surface`,
+        apiPath`/deploy/solutions/${solution_id}/plugins/${plugin_id}/verify-surface`,
         body, sid, { timeoutMs: 60000, retries: 0 }
       );
     } catch (err) {
@@ -5607,7 +5607,7 @@ export const handlers = {
     const isWireAsync = resolvedWait !== "root";
     const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}) };
     const kickoffTimeoutMs = isWireAsync ? 15_000 : 90_000;
-    const kickoff = await post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs: kickoffTimeoutMs });
+    const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs: kickoffTimeoutMs });
 
     if (resolvedWait === "never" || resolvedWait === "root") {
       // Back-compat path: kickoff response is the same shape callers see today.
@@ -5639,7 +5639,7 @@ export const handlers = {
       const qs = new URLSearchParams();
       qs.set("skillSlug", skill_id);
       // Builder proxy, not ADAS_CORE_URL (docker-internal; see ateam_chain_status).
-      const data = await get(`/deploy/jobs/${encodeURIComponent(rootJobId)}/chain?${qs}`, sid)
+      const data = await get(apiPath`/deploy/jobs/${rootJobId}/chain?${rawQuery(qs)}`, sid)
         .catch(err => ({ ok: false, error: err.message }));
       lastChain = data;
       const jobs = Array.isArray(data?.chainJobsList) ? data.chainJobsList : Array.isArray(data?.chainJobs) ? data.chainJobs : null;
@@ -5782,7 +5782,7 @@ export const handlers = {
       );
     }
     if (!message) throw new Error("ateam_test_pipeline needs message — the utterance to run through the pipeline.");
-    return post(`/deploy/solutions/${solution_id}/skills/${skill_id}/test-pipeline`, { message }, sid, { timeoutMs: 30_000 });
+    return post(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test-pipeline`, { message }, sid, { timeoutMs: 30_000 });
   },
 
   ateam_test_voice: async ({ solution_id, messages, phone_number, skill_slug, timeout_ms }, sid) => {
@@ -5815,7 +5815,7 @@ export const handlers = {
     // were the run's, and a root can be "completed" while a handoff is still
     // going. Whole-chain status is what "is it done?" actually means.
     if (chain_id && !job_id) {
-      const data = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/status`, sid);
+      const data = await get(apiPath`/deploy/jobs/${chain_id}/status`, sid);
       return { ok: true, scope: "chain", chain_id, ...data };
     }
 
@@ -5834,7 +5834,7 @@ export const handlers = {
       // skill at all. `scope` says which question was answered, because "this
       // job" and "the whole run" genuinely differ: a root job can read completed
       // while a handoff is still running.
-      const data = await get(`/deploy/jobs/${encodeURIComponent(job_id)}/status`, sid);
+      const data = await get(apiPath`/deploy/jobs/${job_id}/status`, sid);
       return {
         ok: true,
         scope: "job",
@@ -5844,7 +5844,7 @@ export const handlers = {
       };
     }
     // Existing single-job snapshot via Builder (unchanged shape for back-compat).
-    const single = await get(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
+    const single = await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
     if (!include_chain) return single;
 
     // Caller asked for the chain tree too. Fetch via Core's /api/job/:id/chain
@@ -5855,7 +5855,7 @@ export const handlers = {
     const qs = new URLSearchParams();
     if (skill_id) qs.set("skillSlug", skill_id);
     // Builder proxy, not ADAS_CORE_URL (docker-internal; see ateam_chain_status).
-    const chain = await get(`/deploy/jobs/${encodeURIComponent(job_id)}/chain?${qs}`, sid)
+    const chain = await get(apiPath`/deploy/jobs/${job_id}/chain?${rawQuery(qs)}`, sid)
       .catch(err => ({ ok: false, error: err.message }));
     return { ...single, chain };
   },
@@ -5876,7 +5876,7 @@ export const handlers = {
     const qs = new URLSearchParams();
     if (skill_slug) qs.set("skillSlug", skill_slug);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return await get(`/deploy/jobs/${encodeURIComponent(id)}/chain${suffix}`, sid);
+    return await get(apiPath`/deploy/jobs/${id}/chain${rawQuery(suffix)}`, sid);
   },
 
   // SLIM chain status — the chip-quick poll. Hits Core /api/job/:id/status
@@ -5894,7 +5894,7 @@ export const handlers = {
     // failed" that read as "job not found" (2026-08-15: a full day spent reading
     // Mongo by hand to answer "is this run alive?"). Same reason ateam_verify
     // proxies. `get()` also carries the session's auth/tenant headers.
-    const data = await get(`/deploy/jobs/${encodeURIComponent(id)}/status`, sid);
+    const data = await get(apiPath`/deploy/jobs/${id}/status`, sid);
     // LAST ACTIVITY — the running-vs-corpse discriminator. `status:"running"` is
     // true for a healthy build AND a dead one; the only way to tell them apart
     // was querying llm_traces for the newest timestamp. Core bumps job.lastUpdate
@@ -5942,7 +5942,7 @@ export const handlers = {
       else if (sols.length === 0) throw new Error("solution_id omitted and this tenant has no solutions yet.");
       else throw new Error(`solution_id omitted and this tenant has multiple solutions (${sols.map((s) => s?.id || s).join(", ")}) — pass solution_id explicitly.`);
     }
-    const data = await get(`/deploy/solutions/${sol}/ui-plugins`, sid);
+    const data = await get(apiPath`/deploy/solutions/${sol}/ui-plugins`, sid);
     if (data?.ok === false) {
       throw new Error(`widget catalog unavailable: ${data.error || "unknown"}`);
     }
@@ -6011,7 +6011,7 @@ export const handlers = {
     // test was aborted. So a chain id aborts every job in the chain and REPORTS
     // each one, rather than quietly doing a fraction of what it claims.
     if (chain_id && !job_id) {
-      const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
+      const chain = await get(apiPath`/deploy/jobs/${chain_id}/chain`, sid);
       const { jobs } = chainTreeOf(chain);
       if (!jobs.length) {
         return { ok: false, scope: "chain", chain_id, error: `No jobs found for chain "${chain_id}".`,
@@ -6021,7 +6021,7 @@ export const handlers = {
       for (const j of jobs) {
         const slug = j.skill || skill_id;
         try {
-          await del(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(slug)}/test/${encodeURIComponent(j.jobId)}`, sid);
+          await del(apiPath`/deploy/solutions/${solution_id}/skills/${slug}/test/${j.jobId}`, sid);
           aborted.push({ job_id: j.jobId, skill: slug, relation: j.relation, aborted: true });
         } catch (err) {
           // A job that was ALREADY finished cannot be aborted — that is not a
@@ -6041,13 +6041,13 @@ export const handlers = {
     if (!job_id || !skill_id) {
       throw new Error("Pass chain_id to abort the whole run, or job_id + skill_id to abort one job.");
     }
-    return del(`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
+    return del(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
   },
 
   ateam_get_connector_source: async ({ solution_id, connector_id, path }, sid) => {
     let data;
     try {
-      data = await get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
+      data = await get(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
     } catch (err) {
       // AUTHORED_SOURCE_MISSING is a real, actionable answer — not a lookup
       // failure. Returning the raw 404 would send a caller hunting for a wrong
@@ -6108,7 +6108,7 @@ export const handlers = {
   },
 
   ateam_get_deployed_connector_source: async ({ solution_id, connector_id, path }, sid) => {
-    const data = await get(`/deploy/solutions/${solution_id}/connectors/${connector_id}/deployed-source`, sid);
+    const data = await get(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/deployed-source`, sid);
     const files = Array.isArray(data?.files) ? data.files : [];
     // The label rides on EVERY response shape, including the error one. A
     // caller that reads one file out of here must not be able to forget which
@@ -6139,7 +6139,7 @@ export const handlers = {
   ateam_recover_connector_source: async ({ solution_id, connector_id, force = false }, sid) => {
     try {
       const data = await post(
-        `/deploy/solutions/${solution_id}/connectors/${connector_id}/recover-from-core`,
+        apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/recover-from-core`,
         { force: force === true },
         sid,
       );
@@ -6176,11 +6176,11 @@ export const handlers = {
     if (!solution_id) throw new Error("solution_id required");
     // Gather source material: the deployed solution definition + skills list.
     // These come straight from Core, so the doc always reflects what's running.
-    const def = await get(`/deploy/solutions/${solution_id}/definition`, sid);
+    const def = await get(apiPath`/deploy/solutions/${solution_id}/definition`, sid);
     const solution = def?.solution || def;
     let skills = [];
     try {
-      const skillsRes = await get(`/deploy/solutions/${solution_id}/skills`, sid);
+      const skillsRes = await get(apiPath`/deploy/solutions/${solution_id}/skills`, sid);
       skills = Array.isArray(skillsRes?.skills) ? skillsRes.skills : Array.isArray(skillsRes) ? skillsRes : [];
     } catch { /* no skills yet — render anyway */ }
     const connectors = Array.isArray(solution?.connectors) ? solution.connectors : [];
@@ -6189,7 +6189,7 @@ export const handlers = {
     let existing = null;
     try {
       const r = await get(
-        `/deploy/solutions/${solution_id}/github/read?path=${encodeURIComponent("CLAUDE.md")}`,
+        apiPath`/deploy/solutions/${solution_id}/github/read?path=CLAUDE.md`,
         sid,
       );
       existing = r?.content || null;
@@ -6211,7 +6211,7 @@ export const handlers = {
     }
 
     const res = await post(
-      `/deploy/solutions/${solution_id}/github/patch`,
+      apiPath`/deploy/solutions/${solution_id}/github/patch`,
       {
         path: "CLAUDE.md",
         content: merged,
@@ -6236,14 +6236,14 @@ export const handlers = {
     // insight is per-job, so a chain is measured by measuring EVERY job in it —
     // never by silently reporting the root and calling that the chain.
     if (!job_id && chain_id) {
-      const chain = await get(`/deploy/jobs/${encodeURIComponent(chain_id)}/chain`, sid);
+      const chain = await get(apiPath`/deploy/jobs/${chain_id}/chain`, sid);
       const { jobs } = chainTreeOf(chain);
       const CAP = 10;
       const measured = jobs.slice(0, CAP);
       const per_job = [];
       for (const j of measured) {
         try {
-          const m = await get(`/deploy/solutions/${solution_id}/metrics?job_id=${encodeURIComponent(j.jobId)}`, sid);
+          const m = await get(apiPath`/deploy/solutions/${solution_id}/metrics?job_id=${j.jobId}`, sid);
           per_job.push({ job_id: j.jobId, skill: j.skill, relation: j.relation, depth: j.depth, metrics: m });
         } catch (err) {
           // One unreadable job must not hide the rest — say which failed and why.
@@ -6267,7 +6267,7 @@ export const handlers = {
     if (job_id) qs.set("job_id", job_id);
     if (skill_id) qs.set("skill_id", skill_id);
     const qsStr = qs.toString() ? `?${qs}` : "";
-    return get(`/deploy/solutions/${solution_id}/metrics${qsStr}`, sid);
+    return get(apiPath`/deploy/solutions/${solution_id}/metrics${rawQuery(qsStr)}`, sid);
   },
 
   // OPEN-7: one call that returns the REAL runtime end-state — connectors
@@ -6290,7 +6290,7 @@ export const handlers = {
 
     // 1. Connectors — connected + tools discovered.
     try {
-      const ch = await get(`/deploy/solutions/${solution_id}/connectors/health`, sid);
+      const ch = await get(apiPath`/deploy/solutions/${solution_id}/connectors/health`, sid);
       const raw = ch?.connectors || ch?.results || (Array.isArray(ch) ? ch : []);
       out.connectors = (raw || []).map((c) => {
         const id = c.id || c.connector_id || c.name;
@@ -6329,7 +6329,7 @@ export const handlers = {
 
     // 3. Skills — deployed + registered (from the solution health check).
     try {
-      const h = await get(`/deploy/solutions/${solution_id}/health`, sid);
+      const h = await get(apiPath`/deploy/solutions/${solution_id}/health`, sid);
       const skills = h?.skills || h?.verification?.skills || [];
       out.skills = (Array.isArray(skills) ? skills : []).map((s) => ({
         id: s.skill_id || s.id || s.skillSlug,
@@ -6367,7 +6367,7 @@ export const handlers = {
         // An unreadable skill is a check that could not run, not a skill that
         // declares nothing: swallowing it (.catch(() => null)) produced "no
         // read-shaped tool declared by any skill" about a skill never read.
-        const def = await get(`/deploy/solutions/${solution_id}/skills/${sk.id}`, sid).catch((e) => {
+        const def = await get(apiPath`/deploy/solutions/${solution_id}/skills/${sk.id}`, sid).catch((e) => {
           couldNotRun(`skill '${sk.id}' definition unavailable for the smoke check: ${e.message}`);
           return null;
         });
@@ -6403,7 +6403,7 @@ export const handlers = {
           continue;
         }
         try {
-          const r = await post(`/deploy/solutions/${solution_id}/connectors/${c.id}/call`, { tool: pick, args: {} }, sid);
+          const r = await post(apiPath`/deploy/solutions/${solution_id}/connectors/${c.id}/call`, { tool: pick, args: {} }, sid);
           const failed = r?.ok === false;
           out.smoke.push({ connector: c.id, called: pick, ok: !failed, ...(failed && { error: String(r?.error || "").slice(0, 200) }) });
           if (failed) {
@@ -6434,13 +6434,13 @@ export const handlers = {
 
   ateam_diff: async ({ solution_id, skill_id }, sid) => {
     const qs = skill_id ? `?skill_id=${encodeURIComponent(skill_id)}` : "";
-    return get(`/deploy/solutions/${solution_id}/diff${qs}`, sid);
+    return get(apiPath`/deploy/solutions/${solution_id}/diff${rawQuery(qs)}`, sid);
   },
 
   // ─── GitHub tools ──────────────────────────────────────────────────
 
   ateam_github_push: async ({ solution_id, message }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/push`, { push_to_github: true, message }, sid, { timeoutMs: 60_000 }),
+    post(apiPath`/deploy/solutions/${solution_id}/github/push`, { push_to_github: true, message }, sid, { timeoutMs: 60_000 }),
 
   ateam_github_pull: async ({ solution_id, discard_builder_changes }, sid) => {
     // Dropping a Builder change that never reached GitHub is the caller's
@@ -6452,17 +6452,17 @@ export const handlers = {
     // backend doesn't support async (older deployments).
     let kicked;
     try {
-      kicked = await post(`/deploy/solutions/${solution_id}/github/pull`, { async: true, ...discard }, sid, { timeoutMs: 30_000 });
+      kicked = await post(apiPath`/deploy/solutions/${solution_id}/github/pull`, { async: true, ...discard }, sid, { timeoutMs: 30_000 });
     } catch (err) {
       // Sync fallback (older backend without async support)
-      return await post(`/deploy/solutions/${solution_id}/github/pull`, { ...discard }, sid, { timeoutMs: 300_000, retries: 2 });
+      return await post(apiPath`/deploy/solutions/${solution_id}/github/pull`, { ...discard }, sid, { timeoutMs: 300_000, retries: 2 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async — return as-is
     return await pollDeployJob(kicked.job_id, sid, { label: 'github-pull', maxMs: 15 * 60_000, intervalMs: 2000 });
   },
 
   ateam_github_status: async ({ solution_id }, sid) =>
-    get(`/deploy/solutions/${solution_id}/github/status`, sid),
+    get(apiPath`/deploy/solutions/${solution_id}/github/status`, sid),
 
   ateam_github_read: async ({ solution_id, path: filePath, ref, branch }, sid) => {
     // `branch` is an ALIAS for `ref`. The underlying API param is literally
@@ -6474,7 +6474,7 @@ export const handlers = {
     const wanted = ref || branch;
     const qs = new URLSearchParams({ path: filePath });
     if (wanted) qs.set('branch', wanted);
-    const result = await get(`/deploy/solutions/${solution_id}/github/read?${qs.toString()}`, sid);
+    const result = await get(apiPath`/deploy/solutions/${solution_id}/github/read?${rawQuery(qs.toString())}`, sid);
     // Additive only — never reshape `result`, callers depend on the raw payload.
     const rep = _representationFor(filePath, result?.content, solution_id);
     return rep && result && typeof result === "object"
@@ -6484,17 +6484,17 @@ export const handlers = {
 
   ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref, branch }, sid) =>
     // `branch` is an alias for `ref` — see ateam_github_read.
-    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch }, sid),
 
   ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) =>
-    post(`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid),
 
   ateam_github_log: async ({ solution_id, limit, ref }, sid) => {
     const qs = new URLSearchParams();
     if (limit) qs.set('limit', String(limit));
     if (ref) qs.set('branch', ref);
     const q = qs.toString();
-    return get(`/deploy/solutions/${solution_id}/github/log${q ? '?' + q : ''}`, sid);
+    return get(apiPath`/deploy/solutions/${solution_id}/github/log${rawQuery(q ? '?' + q : '')}`, sid);
   },
 
   ateam_github_diff: async ({ solution_id, base, head }, sid) => {
@@ -6502,29 +6502,29 @@ export const handlers = {
     if (base) qs.set('base', base);
     if (head) qs.set('head', head);
     const q = qs.toString();
-    return get(`/deploy/solutions/${solution_id}/github/diff${q ? '?' + q : ''}`, sid);
+    return get(apiPath`/deploy/solutions/${solution_id}/github/diff${rawQuery(q ? '?' + q : '')}`, sid);
   },
 
   ateam_verify_consistency: async ({ solution_id }, sid) =>
-    get(`/deploy/solutions/${solution_id}/verify`, sid),
+    get(apiPath`/deploy/solutions/${solution_id}/verify`, sid),
 
   ateam_github_promote: async ({ solution_id, label, dry_run, skip_tag }, sid) =>
-    post(`/deploy/solutions/${solution_id}/promote`, { label, dry_run, skip_tag }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/promote`, { label, dry_run, skip_tag }, sid),
 
   ateam_github_reconcile: async ({ solution_id, dry_run }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
-    return await post(`/deploy/solutions/${solution_id}/reconcile`, { dry_run: dry_run === true }, sid);
+    return await post(apiPath`/deploy/solutions/${solution_id}/reconcile`, { dry_run: dry_run === true }, sid);
   },
 
   ateam_github_sync_from_main: async ({ solution_id, dry_run }, sid) =>
-    post(`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid),
 
   ateam_github_rollback: async ({ solution_id, target, tag }, sid) =>
     // Accept both `target` (new spec) and `tag` (legacy callers)
-    post(`/deploy/solutions/${solution_id}/rollback`, { target: target || tag }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/rollback`, { target: target || tag }, sid),
 
   ateam_github_list_versions: async ({ solution_id }, sid) =>
-    get(`/deploy/solutions/${solution_id}/versions/dev`, sid),
+    get(apiPath`/deploy/solutions/${solution_id}/versions/dev`, sid),
 
   // SHOW BEFORE YOU DESTROY.
   //
@@ -6552,7 +6552,7 @@ export const handlers = {
 
     // Preview: no confirm needed to LOOK, and looking is the default.
     if (force !== true) {
-      const preview = await del(`/deploy/solutions/${solution_id}`, sid);
+      const preview = await del(apiPath`/deploy/solutions/${solution_id}`, sid);
       return {
         ...preview,
         _next:
@@ -6580,7 +6580,7 @@ export const handlers = {
         received: confirm_solution_id,
       };
     }
-    return del(`/deploy/solutions/${solution_id}?force=true`, sid);
+    return del(apiPath`/deploy/solutions/${solution_id}?force=true`, sid);
   },
 
   ateam_delete_skill: async ({ solution_id, skill_id, confirm }, sid) => {
@@ -6591,7 +6591,7 @@ export const handlers = {
         recovery: "ateam_github_pull(solution_id, ref:'main') — no per-skill restore path",
       };
     }
-    return del(`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
+    return del(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
   },
 
   ateam_delete_connector: async ({ solution_id, connector_id, confirm }, sid) => {
@@ -6602,7 +6602,7 @@ export const handlers = {
         recovery: "ateam_build_and_run(solution_id, github:true) can resurrect from GitHub",
       };
     }
-    return del(`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
+    return del(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
   },
 
   ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace, force }, sid) => {
@@ -6644,7 +6644,7 @@ export const handlers = {
       ...(replace === true ? { replace: true } : {}),
       ...(force === true ? { force: true } : {}),
     };
-    const url = `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
+    const url = apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
     let kicked;
     try {
       kicked = await post(url, { ...body, async: true }, sid, { timeoutMs: 30_000 });
@@ -6659,7 +6659,7 @@ export const handlers = {
   ateam_show_skill_minimal: async ({ solution_id, skill_id }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
     if (!skill_id) throw new Error("skill_id required");
-    const full = await get(`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
+    const full = await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
     const skill = full?.skill || full;
     if (!skill) return { ok: false, error: "skill not found" };
     return {
@@ -6686,7 +6686,7 @@ export const handlers = {
     if (!tool) throw new Error("tool required — the tool that misled you");
     if (!error) throw new Error("error required — quote it VERBATIM, do not paraphrase");
     return await post(
-      `/deploy/solutions/${solution_id}/lessons`,
+      apiPath`/deploy/solutions/${solution_id}/lessons`,
       { tool, error, workaround, worked, kind },
       sid,
     );
@@ -6697,7 +6697,7 @@ export const handlers = {
     if (!step) throw new Error("step required — a STABLE slug a later run can match on, e.g. \"connector:clinic-data-mcp\"");
     if (!status) throw new Error("status required — built | deployed | verified");
     return await post(
-      `/deploy/solutions/${solution_id}/progress`,
+      apiPath`/deploy/solutions/${solution_id}/progress`,
       { step, status, detail, verified_by },
       sid,
     );
@@ -6706,18 +6706,18 @@ export const handlers = {
   ateam_get_progress: async ({ solution_id, limit }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
     const qs = Number.isFinite(limit) ? `?limit=${limit}` : "";
-    return await get(`/deploy/solutions/${solution_id}/progress${qs}`, sid);
+    return await get(apiPath`/deploy/solutions/${solution_id}/progress${rawQuery(qs)}`, sid);
   },
 
   ateam_get_lessons: async ({ solution_id, limit }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
     const qs = Number.isFinite(limit) ? `?limit=${limit}` : "";
-    return await get(`/deploy/solutions/${solution_id}/lessons${qs}`, sid);
+    return await get(apiPath`/deploy/solutions/${solution_id}/lessons${rawQuery(qs)}`, sid);
   },
 
   ateam_show_solution_minimal: async ({ solution_id }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
-    const full = await get(`/deploy/solutions/${solution_id}/definition`, sid);
+    const full = await get(apiPath`/deploy/solutions/${solution_id}/definition`, sid);
     const sol = full?.solution || full;
     if (!sol) return { ok: false, error: "solution not found" };
     return {
@@ -6763,7 +6763,7 @@ export const handlers = {
     // brand-new connector on a repo-less tenant ("no existing base to merge").
     // Partial uploads (ateam_create_plugin) still merge; a full create replaces.
     const result = await post(
-      `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
+      apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
       { files, replace: true },
       sid,
       { timeoutMs: 120_000, retries: 1 },
@@ -6802,7 +6802,7 @@ export const handlers = {
     });
     // Async-first upload — npm install+build can exceed Cloudflare's 100s → 524.
     // Kick async → poll /deploy/jobs; fall back to sync for older backends.
-    const _uploadUrl = `/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
+    const _uploadUrl = apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
     let result;
     try {
       const kicked = await post(_uploadUrl, { files, async: true }, sid, { timeoutMs: 30_000 });
@@ -6824,7 +6824,7 @@ export const handlers = {
       for (let attempt = 0; attempt < 4; attempt++) {
         await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 2500));
         // Reliable catalog via the Builder proxy (not direct ADAS_CORE_URL).
-        const data = await get(`/deploy/solutions/${solution_id}/ui-plugins`, sid).catch(() => null);
+        const data = await get(apiPath`/deploy/solutions/${solution_id}/ui-plugins`, sid).catch(() => null);
         if (!data || data.ok === false) continue;
         const found = (data?.plugins || []).find((p) => p?.id === pluginId);
         if (found) {
@@ -6863,8 +6863,8 @@ export const handlers = {
 
   ateam_redeploy: async ({ solution_id, skill_id }, sid) => {
     const endpoint = skill_id
-      ? `/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
-      : `/deploy/solutions/${solution_id}/redeploy`;
+      ? apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
+      : apiPath`/deploy/solutions/${solution_id}/redeploy`;
 
     // Async-first: bulk redeploys used to 524 on >5-skill solutions because
     // the upstream Cloudflare timeout is ~100s. Kick the job and poll. If
@@ -7013,7 +7013,7 @@ export const handlers = {
         for (const sol of (solutions || [])) {
           let ghStatus = null;
           try {
-            ghStatus = await get(`/deploy/solutions/${sol.id}/github/status`, sid);
+            ghStatus = await get(apiPath`/deploy/solutions/${sol.id}/github/status`, sid);
           } catch { /* no github config */ }
           results.push({
             tenant: t.id,
@@ -7049,7 +7049,7 @@ export const handlers = {
           // Push: Builder FS → GitHub
           if (!pull_only) {
             try {
-              const pushResult = await post(`/deploy/solutions/${sol.id}/github/push`, { push_to_github: true }, sid);
+              const pushResult = await post(apiPath`/deploy/solutions/${sol.id}/github/push`, { push_to_github: true }, sid);
               entry.push = { ok: true, commit: pushResult.commitSha?.slice(0, 8), files: pushResult.filesCommitted };
             } catch (err) {
               entry.push = { ok: false, error: err.message.slice(0, 100) };
@@ -7058,7 +7058,7 @@ export const handlers = {
           // Pull: GitHub → Core MongoDB
           if (!push_only) {
             try {
-              const pullResult = await post(`/deploy/solutions/${sol.id}/github/pull`, {}, sid);
+              const pullResult = await post(apiPath`/deploy/solutions/${sol.id}/github/pull`, {}, sid);
               entry.pull = { ok: true, skills: pullResult.skills?.length, connectors: pullResult.connectors?.length };
             } catch (err) {
               entry.pull = { ok: false, error: err.message.slice(0, 100) };
