@@ -11,9 +11,13 @@
 //      on request()'s own 120s timeout. The Builder's 502 was a JSON verdict
 //      naming the Core step that failed; the caller saw the answer to the last
 //      pass instead, which found Core already empty (B7, core_skills: []).
-//      CORE ruling 11 makes this general: a response carrying a JSON verdict is
-//      never re-sent, and only an idempotent read is re-sent after a transport
-//      failure. api.js mayAutoRetry is the one place that decides.
+//      CORE ruling 11 makes this general: a response carrying a verdict (a JSON
+//      body with a `code`) is never re-sent; a write is re-sent only when it
+//      provably never reached the server (a refused connection); a read is also
+//      re-sent after a transport failure. api.js mayAutoRetry is the one place
+//      that decides. Four async-kick handlers and build_and_run re-sent a write
+//      on their own after ANY failure; kickFallsBackToSync now decides that.
+//      CORE's probes (pr26-vj-probe.mjs, retry-repro*.mjs) are ported below.
 //
 //   3. The words. The description never said the delete wipes conversations,
 //      memory and stored data, or that it keeps the account; its recovery line
@@ -42,14 +46,15 @@ let hits = [];
 let server;
 
 // A reply is { status, body } (sent as JSON) or { status, html } (sent as-is,
-// the way a gateway's error page arrives).
+// the way a gateway's error page arrives), or a function returning one per request.
 before(async () => {
   server = createServer((req, res) => {
     const pathname = req.url.split("?")[0];
     hits.push(`${req.method} ${req.url}`);
     req.resume();
     req.on("end", () => {
-      const reply = routes[`${req.method} ${pathname}`];
+      const route = routes[`${req.method} ${pathname}`];
+      const reply = typeof route === "function" ? route() : route;
       if (!reply) {
         res.writeHead(404, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: "no route" }));
@@ -95,7 +100,7 @@ async function drive(t, start, answers, { advanceMs }) {
   const log = { sent: 0, abortedAtMs: null, clockMs: 0, settled: false, value: undefined, error: undefined };
   globalThis.fetch = async (_url, opts) => {
     log.sent += 1;
-    const a = answers(log.sent, opts);
+    const a = answers(log.sent, opts, _url);
     if (a !== "hang") return a;
     return new Promise((_, reject) => {
       opts.signal.addEventListener("abort", () => {
@@ -192,12 +197,17 @@ test("T19: a 502 carrying a JSON verdict reaches the caller whole, from ONE DELE
   assert.equal(res.structuredContent.code, "SOLUTION_DELETE_STOPPED");
 });
 
-test("T19: today's Builder refusal (502, no code) is returned too, not re-sent", async () => {
-  const body = { ok: false, retryable: true, error: "Refused to delete \"walkmate\": 1 ADAS Core cleanup step(s) failed (skills)", failures: [{ step: "skills", status: 409 }] };
-  const { out } = await call("ateam_delete_solution", FORCE(), { [DEL_ROUTE]: { status: 502, body } });
-  assert.equal(sent(FORCE_URL), 1, `the forced DELETE was sent ${sent(FORCE_URL)} times for one call`);
-  assert.deepEqual(out.failures, body.failures);
-  assert.match(out._next, /run the preview/);
+test("R4: a 5xx without a `code` is NO_ANSWER, not a verdict — the proxy's own {ok:false,error}, and today's Builder refusal", async () => {
+  // pr26-vj-probe D: the skill-validator's 15s proxy abort (deploy.js DELETE /solutions/:id catch).
+  const proxyAbort = { ok: false, error: "The operation was aborted due to timeout" };
+  const refusal = { ok: false, retryable: true, error: "Refused to delete \"walkmate\": 1 ADAS Core cleanup step(s) failed (skills)", failures: [{ step: "skills", status: 409 }] };
+  for (const [status, body] of [[502, proxyAbort], [502, refusal], [500, { ok: false, error: "fetch failed" }]]) {
+    const { out } = await call("ateam_delete_solution", FORCE(), { [DEL_ROUTE]: { status, body } });
+    assert.equal(sent(FORCE_URL), 1, `the forced DELETE was sent ${sent(FORCE_URL)} times for one call`);
+    assert.equal(out.code, "NO_ANSWER", `a ${status} ${JSON.stringify(body)} was read as a verdict: ${JSON.stringify(out)}`);
+    assert.deepEqual(out.upstream, body, "the body that came with it was dropped");
+    assert.match(out._next, NO_ANSWER_NEXT);
+  }
 });
 
 test("T19: _next follows the verdict's code — re-run where it finishes the delete, never where it cannot help", async () => {
@@ -223,10 +233,10 @@ test("T19: _next follows the verdict's code — re-run where it finishes the del
 
 // ─── T20: no answer is said, once ───────────────────────────────────────────
 
-const NO_ANSWER_NEXT = /The delete may have run\. Check with the preview .* or ateam_list_solutions\. Re-issuing the forced delete joins or finishes it\./;
+const NO_ANSWER_NEXT = /^The delete may have run\. Call the preview first \(.*without force\), then re-issue the forced delete only if it still shows the solution\.$/;
 
-test("T20: a gateway 504/524/502 with no JSON body → ONE DELETE, and NO_ANSWER guidance", async () => {
-  for (const status of [504, 524, 502]) {
+test("T20: a gateway 504/524/502/520 with no JSON body → ONE DELETE, and NO_ANSWER guidance", async () => {
+  for (const status of [504, 524, 502, 520]) {
     const { res, out } = await call("ateam_delete_solution", FORCE(),
       { [DEL_ROUTE]: { status, html: `<html><body>${status} Gateway error</body></html>` } });
     assert.equal(sent(FORCE_URL), 1, `a ${status} made the forced DELETE go out ${sent(FORCE_URL)} times`);
@@ -251,6 +261,24 @@ test("T20: the force call gives up after CORE's 90s budget and before Cloudflare
   assert.match(out._next, NO_ANSWER_NEXT);
 });
 
+test("R5: a socket that died after the request went out is NO_ANSWER — once", async (t) => {
+  for (const code of ["ECONNRESET", "UND_ERR_SOCKET"]) {
+    t.mock.timers.reset();
+    const lost = () => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code } }));
+    const log = await drive(t, () => handleToolCall("ateam_delete_solution", FORCE(), SID), lost, { advanceMs: 30_000 });
+    assert.equal(log.sent, 1, `${code}: the forced DELETE was sent ${log.sent} times`);
+    const out = toolOut(log);
+    assert.equal(out.code, "NO_ANSWER", `${code}: ${JSON.stringify(out)}`);
+    assert.match(out.error, new RegExp(`lost after the request was sent \\(${code}\\)`));
+  }
+});
+
+test("R5: until the Builder joins an in-flight delete, NO_ANSWER never says re-issuing joins it", async () => {
+  const { out } = await call("ateam_delete_solution", FORCE(), { [DEL_ROUTE]: { status: 504, html: "<html>504</html>" } });
+  assert.doesNotMatch(out._next, /joins|finishes it/, out._next);
+  assert.match(out._next, /Call the preview first/);
+});
+
 test("(control) T20: a refused connection sent nothing, so it is reported as that, not as 'may have run'", async (t) => {
   const log = await drive(t, () => handleToolCall("ateam_delete_solution", FORCE(), SID), refused, { advanceMs: 30_000 });
   assert.equal(log.sent, 1, `a refused forced DELETE was attempted ${log.sent} times`);
@@ -273,11 +301,16 @@ test("mayAutoRetry: a JSON verdict never; a transport failure only for an idempo
     ["GET", { status: 504, body: verdict }, false],
     ["GET", { status: 500, body: "<html>500</html>" }, false],
     ["GET", { status: 503, body: "" }, false],
+    ["GET", { status: 502, body: JSON.stringify({ ok: false, error: "fetch failed" }) }, true],
     ["POST", { status: 502, body: "<html>502</html>" }, false],
+    ["POST", { status: 502, body: JSON.stringify({ ok: false, error: "fetch failed" }) }, false],
     ["POST", { noAnswer: true }, false],
     ["DELETE", { status: 504, body: "" }, false],
     ["DELETE", { noAnswer: true }, false],
     ["PATCH", { noAnswer: true }, false],
+    ["POST", { neverSent: true }, true],
+    ["DELETE", { neverSent: true }, true],
+    ["PATCH", { neverSent: true }, true],
     ["POST", { idempotent: true, status: 502, body: "" }, true],
     ["POST", { idempotent: true, noAnswer: true }, true],
     ["POST", { idempotent: true, status: 502, body: verdict }, false],
@@ -288,12 +321,14 @@ test("mayAutoRetry: a JSON verdict never; a transport failure only for an idempo
   }
 });
 
-test("jsonVerdictOf: an object body is a verdict; a page, a string, an array or nothing is not", () => {
-  const { jsonVerdictOf } = API;
+test("jsonVerdictOf: only a body with a `code` is a verdict; a bare {ok:false,error}, a page or nothing is not", () => {
+  const { jsonVerdictOf, jsonBodyOf } = API;
   assert.deepEqual(jsonVerdictOf('{"ok":false,"code":"X"}'), { ok: false, code: "X" });
-  for (const b of ["<html>502</html>", "", "   ", '"A timeout occurred"', "[1,2]", "null", "42", undefined, null, { ok: false }]) {
+  for (const b of ['{"ok":false,"error":"fetch failed"}', '{"ok":false,"code":""}', "<html>502</html>", "", "   ", '"A timeout occurred"', "[1,2]", "null", "42", undefined, null, { ok: false, code: "X" }]) {
     assert.equal(jsonVerdictOf(b), null, `${JSON.stringify(b)} read as a verdict`);
   }
+  assert.deepEqual(jsonBodyOf('{"ok":false,"error":"fetch failed"}'), { ok: false, error: "fetch failed" });
+  assert.equal(jsonBodyOf("<html>502</html>"), null);
 });
 
 test("a JSON-verdict 502/504 is not re-sent on ANY tool — a GET read, a POST write, a raw get()", async () => {
@@ -304,7 +339,7 @@ test("a JSON-verdict 502/504 is not re-sent on ANY tool — a GET read, a POST w
   assert.equal(gh.res.isError, true);
 
   await call("ateam_github_push", { solution_id: "sol" },
-    { "POST /deploy/solutions/sol/github/push": { status: 504, body: { ok: false, error: "push timed out upstream" } } });
+    { "POST /deploy/solutions/sol/github/push": { status: 504, body: { ok: false, code: "PUSH_FAILED", error: "push failed upstream" } } });
   assert.equal(sent("POST /deploy/solutions/sol/github/push"), 1,
     `a POST whose 504 carried a JSON verdict was sent ${sent("POST /deploy/solutions/sol/github/push")} times`);
 
@@ -329,16 +364,29 @@ test("(control) a gateway 502 page on a read IS re-sent", async (t) => {
   assert.deepEqual(log.value, { ok: true });
 });
 
-test("a transport ECONNREFUSED or timeout on a write is NOT re-sent, whatever `retries` says", async (t) => {
+test("R2: a write whose connection was refused (nothing sent) IS re-sent", async (t) => {
   for (const [name, start] of [
-    ["post", () => API.post("/write", { a: 1 }, SID, { retries: 2 })],
-    ["patch", () => API.patch("/write", { a: 1 }, SID, { retries: 2 })],
-    ["del", () => API.del("/write", SID, { retries: 2 })],
+    ["post", () => API.post("/write", { a: 1 }, SID)],
+    ["patch", () => API.patch("/write", { a: 1 }, SID)],
+    ["del", () => API.del("/write", SID)],
   ]) {
     t.mock.timers.reset();
-    const log = await drive(t, start, refused, { advanceMs: 30_000 });
-    assert.equal(log.sent, 1, `${name}(): a refused write was sent ${log.sent} times`);
-    assert.match(log.error?.message || "", /Cannot connect/);
+    const log = await drive(t, start, (n) => (n === 1 ? refused() : json(200, { ok: true, n })), { advanceMs: 20_000 });
+    assert.equal(log.sent, 2, `${name}(): a write refused before it was sent went out ${log.sent} times (expected one re-send)`);
+    assert.deepEqual(log.value, { ok: true, n: 2 });
+  }
+});
+
+test("R2: a write that may have reached the server is NOT re-sent — a gateway page, a bare JSON 502, a timeout", async (t) => {
+  for (const [what, answer] of [
+    ["an HTML 502", () => new Response("<html>502 Bad Gateway</html>", { status: 502 })],
+    ["an HTML 504", () => new Response("", { status: 504 })],
+    ["a bare {ok:false,error} 502", () => json(502, { ok: false, error: "fetch failed" })],
+  ]) {
+    t.mock.timers.reset();
+    const log = await drive(t, () => API.post("/write", { a: 1 }, SID, { retries: 2 }), answer, { advanceMs: 30_000 });
+    assert.equal(log.sent, 1, `a write that got ${what} was sent ${log.sent} times`);
+    assert.doesNotMatch(log.error?.message || "", /Try again in a minute/, `${what}: the hint tells the caller to re-send a write`);
   }
   t.mock.timers.reset();
   const log = await drive(t, () => API.post("/write", { a: 1 }, SID, { retries: 2, timeoutMs: 1000 }), () => "hang", { advanceMs: 40_000 });
@@ -364,6 +412,127 @@ test("every `retries` a tool passes can act: on a get(), or on a call declared i
     }
   }
   assert.deepEqual(dead, [], `a write passes retries that cannot re-send it:\n${dead.join("\n")}`);
+});
+
+// ─── R3: an async kick that failed is not re-sent the sync way ────────────
+//
+// Ported from CORE's retry-repro.mjs: the first send of each write gets a JSON
+// verdict 502, every later send would succeed. One write must go out, and the
+// caller must see the verdict, not the answer to a later send.
+
+const VERDICT = { status: 502, body: { ok: false, code: "CORE_DEPLOY_FAILED", error: "Core rejected step 3 after writing skill s1" } };
+const firstVerdictThenOk = () => {
+  let n = 0;
+  return () => (++n === 1 ? VERDICT : { status: 200, body: { ok: true, pass: n, note: "answer to a LATER send" } });
+};
+const writes = () => hits.filter((h) => !h.startsWith("GET "));
+
+const KICKS = [
+  ["ateam_redeploy", { solution_id: "sol", skill_id: "s1" }, "POST /deploy/solutions/sol/skills/s1/redeploy"],
+  ["ateam_github_pull", { solution_id: "sol" }, "POST /deploy/solutions/sol/github/pull"],
+  ["ateam_upload_connector", { solution_id: "sol", connector_id: "c1", github: true }, "POST /deploy/solutions/sol/connectors/c1/upload"],
+  ["ateam_create_plugin", { solution_id: "sol", connector_id: "c1", plugin_name: "p1" }, "POST /deploy/solutions/sol/connectors/c1/upload"],
+];
+
+test("R3: redeploy, github_pull, upload_connector and create_plugin do NOT re-send after a JSON 502", async () => {
+  for (const [tool, args, route] of KICKS) {
+    const next = firstVerdictThenOk();
+    const { res } = await call(tool, args, { [route]: next });
+    assert.equal(writes().length, 1, `${tool}: the write went out ${writes().length} times after a JSON 502: ${writes().join(", ")}`);
+    assert.match(res.content[0].text, /CORE_DEPLOY_FAILED/, `${tool}: the caller did not see the verdict`);
+    assert.doesNotMatch(res.content[0].text, /answer to a LATER send/, `${tool}: the caller saw a later send's answer`);
+  }
+});
+
+test("R3: build_and_run does NOT re-POST the deploy after a JSON 502", async () => {
+  const next = firstVerdictThenOk();
+  const { res, out } = await call("ateam_build_and_run",
+    { solution: { id: "sol", name: "Sol" }, skills: [{ id: "s1", name: "S1" }], mcp_store: {} }, {
+      "POST /validate/solution": { body: { ok: true, errors: [], warnings: [] } },
+      "POST /deploy/solution": next,
+    });
+  assert.equal(sent("POST /deploy/solution"), 1, `the deploy was POSTed ${sent("POST /deploy/solution")} times after a JSON 502`);
+  assert.match(out.error || res.content[0].text, /CORE_DEPLOY_FAILED/);
+});
+
+test("R3: an async kick that got no answer in 30s is not re-sent either (upload_connector)", async (t) => {
+  const log = await drive(t,
+    () => handleToolCall("ateam_upload_connector", { solution_id: "sol", connector_id: "c1", github: true }, SID),
+    () => "hang", { advanceMs: 60_000 });
+  assert.equal(log.sent, 1, `a kick that timed out was sent ${log.sent} times`);
+  assert.ok(log.settled, "the call never returned");
+});
+
+test("(control) R3: the sync door is still used when the kick never reached the server or the server has no async door", async (t) => {
+  const { out } = await call("ateam_github_pull", { solution_id: "sol" }, {
+    "POST /deploy/solutions/sol/github/pull": (() => { let n = 0; return () => (++n === 1 ? { status: 404, body: { error: "Cannot POST" } } : { status: 200, body: { ok: true, sync: true } }); })(),
+  });
+  assert.equal(sent("POST /deploy/solutions/sol/github/pull"), 2, "a 404 kick (no async door) did not fall back to sync");
+  assert.equal(out.sync, true);
+
+  const log = await drive(t,
+    () => handleToolCall("ateam_github_pull", { solution_id: "sol" }, SID),
+    (n) => (n <= 3 ? refused() : json(200, { ok: true, sync: true })), { advanceMs: 60_000 });
+  assert.equal(log.sent, 4, `a kick refused 3 times (never sent) should fall back to sync once; sent ${log.sent}`);
+  assert.equal(toolOut(log).sync, true);
+});
+
+// ─── CORE's pr26-vj-probe: reads re-sent after a hop lost the answer ─────────
+
+test("vj-probe B/H: a GET read behind the proxy's own {ok:false,error} 502, or an HTML 502, IS re-sent", async (t) => {
+  for (const first of [
+    () => json(502, { ok: false, error: "fetch failed" }),
+    () => new Response("<html>502 Bad Gateway</html>", { status: 502 }),
+  ]) {
+    t.mock.timers.reset();
+    const log = await drive(t, () => handleToolCall("ateam_github_status", { solution_id: "walkmate" }, SID),
+      (n) => (n === 1 ? first() : json(200, { ok: true, exists: true })), { advanceMs: 20_000 });
+    assert.equal(log.sent, 2, `the read was sent ${log.sent} times`);
+    assert.equal(toolOut(log).exists, true);
+  }
+});
+
+test("vj-probe C + R5: the pure reads over POST/DELETE are re-sent after a lost answer", async (t) => {
+  const NOT_A_VERDICT = { ok: false, error: "Could not resolve authored state for validation: fetch failed", hint: "This is NOT a verdict about the solution — nothing was validated." };
+  const cases = [
+    ["ateam_validate_solution", { solution: { id: "walkmate" }, skills: [] }, "/validate/solution", true],
+    ["ateam_delete_solution (preview)", { solution_id: "walkmate" }, "/deploy/solutions/walkmate", true],
+    ["ateam_github_reconcile dry_run", { solution_id: "walkmate", dry_run: true }, "/reconcile", true],
+    ["ateam_github_sync_from_main dry_run", { solution_id: "walkmate", dry_run: true }, "/sync-from-main", true],
+    ["ateam_github_reconcile (not a dry run)", { solution_id: "walkmate" }, "/reconcile", false],
+  ];
+  for (const [label, args, path, read] of cases) {
+    t.mock.timers.reset();
+    const tool = label.split(" ")[0];
+    let onPath = 0;
+    const log = await drive(t, () => handleToolCall(tool, args, SID),
+      (_n, _o, url) => (String(url).split("?")[0].endsWith(path) && ++onPath === 1 ? json(502, NOT_A_VERDICT) : json(200, { ok: true, valid: true, errors: [], warnings: [] })),
+      { advanceMs: 20_000 });
+    assert.equal(onPath, read ? 2 : 1, `${label}: sent ${onPath} times`);
+  }
+
+  // build_and_run's validate phase is the same read.
+  t.mock.timers.reset();
+  let validates = 0;
+  await drive(t, () => handleToolCall("ateam_build_and_run", { solution: { id: "sol", name: "Sol" }, skills: [{ id: "s1" }], mcp_store: {} }, SID),
+    (_n, _o, url) => {
+      const u = String(url);
+      if (u.endsWith("/validate/solution")) return ++validates === 1 ? json(502, NOT_A_VERDICT) : json(200, { ok: true, errors: [], warnings: [] });
+      if (u.endsWith("/deploy/solution")) return json(VERDICT.status, VERDICT.body);
+      return json(404, { error: "no route" });
+    }, { advanceMs: 20_000 });
+  assert.equal(validates, 2, `build_and_run's validate phase was sent ${validates} times`);
+});
+
+test("R5: formatError tells a read to try again, never a write", () => {
+  const { formatError } = API;
+  for (const status of [500, 502, 503]) {
+    assert.match(formatError("GET", "/r", status, "<html></html>", ""), /Try again in a minute/, `GET ${status}`);
+    const w = formatError("POST", "/w", status, "<html></html>", "");
+    assert.doesNotMatch(w, /Try again/, `POST ${status}: ${w}`);
+    assert.match(w, /was not re-sent: check whether it took effect/);
+    assert.match(formatError("POST", "/r", status, "", "", { read: true }), /Try again in a minute/, `idempotent POST ${status}`);
+  }
 });
 
 // ─── T22: the words ─────────────────────────────────────────────────────────

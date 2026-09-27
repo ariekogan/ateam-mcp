@@ -67,7 +67,7 @@ import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agent
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
-import { isTimeoutError, jsonVerdictOf } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf } from "./api.js";
 
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
 // three different things here (the mac1 container, npm, and each developer's local
@@ -780,9 +780,14 @@ const DELETE_RERUN_SAFE = new Set([
 // The server answered, but only to say that what it waited on did not.
 const DELETE_NO_ANSWER_CODES = new Set(["BUILDER_NO_ANSWER", "CORE_NO_ANSWER"]);
 
+// Until the Builder joins a delete already in flight (its PR-1), re-issuing
+// starts a second run, so the preview comes first.
 const deleteNoAnswerNext = (id) =>
-  `The delete may have run. Check with the preview (ateam_delete_solution(solution_id:"${id}") without force) ` +
-  "or ateam_list_solutions. Re-issuing the forced delete joins or finishes it.";
+  `The delete may have run. Call the preview first (ateam_delete_solution(solution_id:"${id}") without force), ` +
+  "then re-issue the forced delete only if it still shows the solution.";
+
+// The socket died after the request went out: it may have run.
+const SOCKET_LOST = new Set(["ECONNRESET", "UND_ERR_SOCKET", "EPIPE"]);
 
 function forceDeleteNext(code, status, id) {
   if (status === 504 || status === 524 || DELETE_NO_ANSWER_CODES.has(code)) return deleteNoAnswerNext(id);
@@ -803,33 +808,56 @@ function forceDeleteNext(code, status, id) {
 
 /**
  * What a forced delete that did not succeed hands back. It is sent ONCE
- * (retries:0, and api.js never re-sends a write), so this is the only answer
- * the caller gets.
- *   - The server answered with a JSON verdict: that verdict whole, plus
- *     http_status and a _next chosen from its code.
- *   - Nothing answered (this call's timeout, or a gateway's 5xx page with no
- *     JSON body): NO_ANSWER. The delete may have run.
- *   - Anything else (a refused connection, so nothing was sent) is thrown as is.
+ * (retries:0), so this is the only answer the caller gets.
+ *   - Nothing was sent (a refused connection): thrown as is.
+ *   - The server answered: a verdict with a `code` (jsonVerdictOf), or any
+ *     JSON 4xx. That body whole, plus http_status and a _next from its code.
+ *   - Anything else: NO_ANSWER, and the delete may have run. That covers this
+ *     call's timeout, a 5xx without a code (a gateway page, a Cloudflare 520,
+ *     or the skill-validator's own {ok:false,error} for a hop it lost), and a
+ *     socket that died after the request went out. A body that came with it
+ *     is kept under `upstream`.
  */
 function forceDeleteFailure(err, id) {
-  const verdict = jsonVerdictOf(err?.body);
-  if (verdict) {
-    return { ...verdict, ok: false, http_status: err.status, _next: forceDeleteNext(verdict.code, err.status, id) };
+  if (err?.neverSent) throw err;
+  const status = err?.status;
+  const body = jsonBodyOf(err?.body);
+  const answer = jsonVerdictOf(err?.body) || (status >= 400 && status < 500 ? body : null);
+  if (answer) {
+    return { ...answer, ok: false, http_status: status, _next: forceDeleteNext(answer.code, status, id) };
   }
-  if (isTimeoutError(err)) {
+  if (status >= 400 && status < 500) throw err;
+  if (isTimeoutError(err) || status >= 500 || SOCKET_LOST.has(err?.cause?.code)) {
+    const what = err.timedOut ? `no answer within ${FORCE_DELETE_TIMEOUT_MS / 1000}s`
+      : status ? `HTTP ${status} with no verdict (no \`code\`)`
+      : `the connection was lost after the request was sent (${err.cause?.code || err.message})`;
     return {
       ok: false,
       code: "NO_ANSWER",
       solution_id: id,
-      http_status: err.status ?? null,
-      error:
-        `No verdict came back for the forced delete of "${id}" ` +
-        (err.timedOut ? `(no answer within ${FORCE_DELETE_TIMEOUT_MS / 1000}s)` : `(HTTP ${err.status} with no JSON body)`) +
-        ". It was sent once and NOT re-sent.",
+      http_status: status ?? null,
+      error: `No verdict came back for the forced delete of "${id}" (${what}). It was sent once and NOT re-sent.`,
+      ...(body && { upstream: body }),
       _next: deleteNoAnswerNext(id),
     };
   }
   throw err;
+}
+
+/**
+ * ONE answer to "may an async kick that failed be sent again the old,
+ * synchronous way?" Only when the kick provably never reached the server
+ * (api.js marks a refused connection `neverSent`), or when the server said it
+ * has no such door (404/405). Any other failure means the server may have
+ * started the work: re-sending it is a second write, so the caller gets what
+ * happened. The sync fallback was taken on ANY failure (redeploy, github_pull,
+ * upload_connector, create_plugin): a JSON 502 verdict or a kick that took
+ * longer than 30s was sent again.
+ * @param {any} err  the error the async kick threw
+ * @returns {boolean}
+ */
+function kickFallsBackToSync(err) {
+  return err?.neverSent === true || err?.status === 404 || err?.status === 405;
 }
 
 // ─── Tool definitions ───────────────────────────────────────────────
@@ -4430,7 +4458,7 @@ export const handlers = {
     // Phase 1: Validate
     let validation;
     try {
-      validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000 });
+      validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000, idempotent: true });
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
       // A DEAD SOCKET IS NOT A FORMAT ERROR. "fetch failed" / ECONNREFUSED /
@@ -4518,7 +4546,10 @@ export const handlers = {
       deploy = await post("/deploy/solution", deployBody, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
-      if (!isTimeoutError(err)) {
+      // A VERDICT IS NOT A TIMEOUT. isTimeoutError counts every 502, so a 502
+      // whose body named what failed was re-POSTed in async mode. Only a
+      // failure with no verdict may move to the async door.
+      if (!isTimeoutError(err) || jsonVerdictOf(err.body)) {
         return { ok: false, phase: "deployment", phases, error: err.message, validation_warnings: validation.warnings || [] };
       }
 
@@ -5673,7 +5704,7 @@ export const handlers = {
       // "misconfigured" (no probe ticket), "bad_input" / "forbidden" (Core refused
       // the call). Those are failed calls, and a verdict tool says so in `error`
       // (mcpFailure.isLogicalFailure) — none of them carries one.
-      const parsed = jsonVerdictOf(err?.body);
+      const parsed = jsonBodyOf(err?.body);
       if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) {
         if (parsed.verdict !== "surface_failed" && parsed.error == null) {
           const why = Array.isArray(parsed.failures) && parsed.failures.length ? `: ${parsed.failures.join("; ")}` : "";
@@ -6150,7 +6181,7 @@ export const handlers = {
       // solution_id, when the true state is "Core may be running this connector
       // and nobody can reproduce it". Say that, and name the two tools that act
       // on it, instead of leaving the agent to improvise a rewrite.
-      const parsed = jsonVerdictOf(err.body);
+      const parsed = jsonBodyOf(err.body);
       if (err.status === 404 && parsed?.code === "AUTHORED_SOURCE_MISSING") {
         return {
           ok: false,
@@ -6242,7 +6273,7 @@ export const handlers = {
     } catch (err) {
       // The refusal is the point of the tool, so report it as a decision the
       // caller has to make rather than as a failure it should retry past.
-      const parsed = jsonVerdictOf(err.body);
+      const parsed = jsonBodyOf(err.body);
       if (err.status === 409 && parsed?.code === "AUTHORED_SOURCE_EXISTS") {
         return {
           ok: false,
@@ -6548,6 +6579,7 @@ export const handlers = {
     try {
       kicked = await post(`/deploy/solutions/${solution_id}/github/pull`, { async: true, ...discard }, sid, { timeoutMs: 30_000 });
     } catch (err) {
+      if (!kickFallsBackToSync(err)) throw err;
       // Sync fallback (older backend without async support)
       return await post(`/deploy/solutions/${solution_id}/github/pull`, { ...discard }, sid, { timeoutMs: 300_000 });
     }
@@ -6607,11 +6639,11 @@ export const handlers = {
 
   ateam_github_reconcile: async ({ solution_id, dry_run }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
-    return await post(`/deploy/solutions/${solution_id}/reconcile`, { dry_run: dry_run === true }, sid);
+    return await post(`/deploy/solutions/${solution_id}/reconcile`, { dry_run: dry_run === true }, sid, { idempotent: dry_run === true });
   },
 
   ateam_github_sync_from_main: async ({ solution_id, dry_run }, sid) =>
-    post(`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid),
+    post(`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid, { idempotent: dry_run === true }),
 
   ateam_github_rollback: async ({ solution_id, target, tag }, sid) =>
     // Accept both `target` (new spec) and `tag` (legacy callers)
@@ -6659,7 +6691,8 @@ export const handlers = {
 
     // Preview: no confirm needed to LOOK, and looking is the default.
     if (force !== true) {
-      const preview = await del(solutionPath, sid);
+      // A read (the id check keeps ?force out of the path), so a transport failure may be re-sent.
+      const preview = await del(solutionPath, sid, { idempotent: true });
       return {
         ...preview,
         _next:
@@ -6765,6 +6798,7 @@ export const handlers = {
     try {
       kicked = await post(url, { ...body, async: true }, sid, { timeoutMs: 30_000 });
     } catch (err) {
+      if (!kickFallsBackToSync(err)) throw err;
       return await post(url, body, sid, { timeoutMs: 300_000 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async
@@ -6926,6 +6960,7 @@ export const handlers = {
         ? await pollDeployJob(kicked.job_id, sid, { label: 'create-plugin', maxMs: 15 * 60_000, intervalMs: 2000 })
         : kicked;
     } catch (err) {
+      if (!kickFallsBackToSync(err)) throw err;
       result = await post(_uploadUrl, { files }, sid, { timeoutMs: 120_000 });
     }
 
@@ -7003,17 +7038,19 @@ export const handlers = {
     } catch (err) {
       lastErr = err;
       // Sync fallback for backends without async support
-      try {
-        result = await post(endpoint, {}, sid, { timeoutMs: 300_000 });
-        lastErr = null;
-      } catch (syncErr) {
-        lastErr = syncErr;
+      if (kickFallsBackToSync(err)) {
+        try {
+          result = await post(endpoint, {}, sid, { timeoutMs: 300_000 });
+          lastErr = null;
+        } catch (syncErr) {
+          lastErr = syncErr;
+        }
       }
     }
 
     if (!result && lastErr) {
       const notFound = /not found|404|ENOENT/i.test(lastErr.message);
-      const isTimeout = isTimeoutError(lastErr);
+      const isTimeout = isTimeoutError(lastErr) && !jsonVerdictOf(lastErr.body);
       return {
         ok: false,
         error: lastErr.message,
@@ -7024,7 +7061,7 @@ export const handlers = {
           hint: "Skill not found in Builder storage. Write it to the repo with ateam_github_write(solution_id, path: 'skills/<skill-id>/skill.json', content) (or ateam_github_patch for an edit), which also puts it in the Builder, then retry this ateam_redeploy. To ship it: ateam_github_promote, then ateam_build_and_run(solution_id).",
         }),
         ...(isTimeout && {
-          hint: "Redeploy timed out even after async polling (15min). Use ateam_redeploy(solution_id, skill_id: '<specific-skill>') to redeploy one skill at a time.",
+          hint: "The redeploy timed out with no answer, so it may still be running; it was not re-sent. Check ateam_status_all before issuing it again, and for a large solution redeploy one skill at a time: ateam_redeploy(solution_id, skill_id: '<specific-skill>').",
         }),
       };
     }

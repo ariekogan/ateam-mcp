@@ -11,21 +11,32 @@
   (`/^[a-z0-9][a-z0-9_-]{0,127}$/i`) and refused with no request sent, and
   both the preview and the forced call encode it.
 - A forced `ateam_delete_solution` is sent once, with a 95s timeout (under
-  Cloudflare's ~100s). A JSON answer comes back whole, with `http_status` and
-  a `_next` chosen from its `code`. No answer (a timeout, or a 504, 524 or 502
-  page without JSON) returns `NO_ANSWER`: the delete may have run, so check
-  with the preview or `ateam_list_solutions`.
+  Cloudflare's ~100s). A verdict (a JSON body with a `code`), or any JSON
+  4xx, comes back whole, with `http_status` and a `_next` chosen from its
+  `code`. Anything else returns `NO_ANSWER` and says to call the preview
+  before re-issuing. That covers a timeout, a 5xx without a `code` (a gateway
+  page, a Cloudflare 520, or the skill-validator's own `{ok:false,error}`),
+  and a socket reset after the request was sent.
 
 ### Retries
 
-- A response that carries a JSON body is never re-sent, whatever its status:
-  the server answered. Only a transport failure (this call's timeout, a
-  refused connection, a gateway's 502/504 page without JSON) is re-sent, and
-  only for a read: a GET, or a POST declared `idempotent` (the validators,
-  `ateam_design_advisor`, `ateam_spec_search`). No write is re-sent. Before
-  this, every call re-sent on 502, 504 and its own timeout, writes included,
-  without reading the body. `api.js` `mayAutoRetry` decides this for every
-  request.
+- A response whose body carries a verdict (a JSON object with a `code`) is
+  never re-sent, whatever its status: the server answered.
+- A request whose connection was refused is re-sent, whatever its method,
+  because nothing was sent.
+- After the request was sent, only a read is re-sent on a transport failure:
+  a timeout, a gateway's 502/504 page, or a hop's bare `{ok:false,error}`.
+  A read is a GET, or a POST declared `idempotent`: the validators,
+  `ateam_design_advisor`, `ateam_spec_search`, the delete preview,
+  `build_and_run`'s validate phase, and reconcile/sync-from-main with
+  `dry_run:true`. A write is not re-sent, and its 5xx hint no longer says "Try
+  again in a minute". `api.js` `mayAutoRetry` decides this for every request.
+- `ateam_redeploy`, `ateam_github_pull`, `ateam_upload_connector` and
+  `ateam_create_plugin` fall back from their async kick to the sync call only
+  when the kick never reached the server or got a 404/405. Before this, any
+  failure re-sent the write, including a JSON 502 verdict or a kick slower
+  than 30s. `ateam_build_and_run` no longer re-POSTs its deploy in async mode
+  after a 502 that carries a verdict.
 
 ### Tools
 
