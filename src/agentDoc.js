@@ -18,6 +18,7 @@
 
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_TYPES } from './exampleTypes.js';
+import { ACTOR_ID_TODAY } from "./actorIdToday.js";
 
 export const AGENT_DOC_SENTINEL = "<!-- SOLUTION-SPECIFIC NOTES BELOW — not auto-regenerated -->";
 
@@ -308,7 +309,7 @@ function buildToolTable() {
 
 function buildUniversalPitfalls() {
   return [
-    "- **`ateam_test_connector` runs as `_system_service`.** Core strips user-provided `_adas_actor` when you call via the test harness. Use it for connector-level bugs; use `ateam_test_skill` / `ateam_conversation` for per-user-actor flows.",
+    "- **`ateam_test_connector` runs as `_system_service`.** Core strips user-provided `_adas_actor` when you call via the test harness. Use it for connector-level bugs. **`ateam_test_skill` / `ateam_conversation` are not per-user by default either.** " + ACTOR_ID_TODAY,
     "- **`.ateam/export.json` is auto-generated.** Never hand-edit. Deploys read it, so stale copies silently break things.",
     "- **Prefer `ateam_patch` over `github_patch` + a deploy** for skill-definition edits. One call that writes `dev` and redeploys what it patched; check its `redeploy` phase, which reports a failed redeploy (the edit is kept).",
     "- **Always refetch dynamic ids.** Corpus ids, job ids, actor ids change. Call `docs.corpus.list` / `ateam_list_solutions` / etc. in the current job — don't reuse ids from memory or previous sessions.",

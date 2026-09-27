@@ -560,8 +560,8 @@ export function touchSession(sessionId, { toolName, solutionId, skillId, actorId
   // test_<ts>_<rand> thread key is dropped rather than sent to Core (which 401s on
   // an actor it cannot find). An explicit actor_id on a call still wins. (2026-08-22.)
   // ONLY A REAL ACTOR. ateam_conversation mints a throwaway THREAD key
-  // (test_<ts>_<rand>) for anonymous use and returns it as actor_id — the docs
-  // tell callers to pass it back for multi-turn. It is not an actor Core can
+  // (test_<ts>_<rand>) for anonymous use and returns it as actor_id — a label
+  // that continues nothing (actorIdToday.js). It is not an actor Core can
   // resolve, and Core 401s the WHOLE REQUEST on an actor it cannot find.
   //
   // I shipped this without the filter and broke ateam_chain_status — the tool
@@ -1000,11 +1000,18 @@ export function formatError(method, path, status, body, baseUrl) {
     // response, with this same classifier, it unbinds the session's actor
     // before this message is built (clearSessionActor). So the true remedy is
     // the cheaper one: retry.
+    //
+    // It must also agree with the Builder's own ACTOR_NOT_FOUND hint, which
+    // stays in the body ("Retrying will not help … OMIT the actor entirely"):
+    // re-sending the SAME actor fails again, and the same call without one acts
+    // as the tenant. It used to point at "the one ateam_conversation returned"
+    // — a test_<ts>_<rand> label that is never an actor (actorIdToday.js).
     hints[status] =
       `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
-      `Re-authenticating will not help. Either pass a real actor id (the one ateam_conversation returned for the thread), ` +
-      `or omit the actor entirely to act as the tenant. If you never sent an actor, this session was carrying a stale one: ` +
-      `it has been dropped with this error, so retrying the same call now acts as the tenant.`;
+      `Re-authenticating will not help, and neither will sending that actor again. Either pass the id of an actor that ` +
+      `exists in this tenant, or omit the actor entirely to act as the tenant. If you never sent an actor, this session ` +
+      `was carrying a stale one: it has been dropped with this error, so the same call, sent again without an actor, now ` +
+      `acts as the tenant.`;
   }
 
   // A 404 ON /spec IS NOT A MISSING SOLUTION.
@@ -1082,8 +1089,15 @@ export function formatError(method, path, status, body, baseUrl) {
   // the endpoint's correct "re-read the file and copy the exact bytes"
   // followed by "Check the solution_id … use ateam_list_solutions", and the
   // agent went hunting for a missing solution three times.
+  //
+  // EXCEPT the actor-not-found hint. It is not a status-level guess: it reports
+  // what request() just did to THIS session (dropped its stale actor), which no
+  // endpoint can know. The Builder's test and job routes answer 400
+  // ACTOR_NOT_FOUND with their own hint, so this rule silently removed it
+  // there — the one path where it mattered (d357b5c98d). Both are shown; the
+  // wording above is what keeps them from contradicting each other.
   const hasSpecificHint = /"code"\s*:/.test(bodyStr) && /"hint"\s*:/.test(bodyStr);
-  const hint = hasSpecificHint ? "" : (hints[status] || "");
+  const hint = hasSpecificHint && !notFound ? "" : (hints[status] || "");
   // Truncated, never dropped. Before 4b36c4d a body of 2000+ chars was dropped
   // ENTIRELY, so the richer the error the less the caller was told — a 422
   // carrying the full diagnosis (ui.surfaceProbe's failures) arrived as a bare
