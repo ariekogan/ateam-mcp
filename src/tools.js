@@ -66,7 +66,7 @@ const VERDICT_TOOLS = new Set([
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
-import { ACTOR_ID_TODAY } from "./actorIdToday.js";
+import { ACTOR_ID_TODAY, SERVICE_ACTOR_AT_TOOLS } from "./actorIdToday.js";
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { isTimeoutError } from "./api.js";
 
@@ -1069,7 +1069,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "Optional: the id of an actor that exists in this tenant, to run the call as that actor. The test_<ts>_<rand> id a previous response returned does NOT continue that conversation (see actor_id TODAY in this tool's description).",
+          description: "Optional: the id of an actor that exists in this tenant, to run the call as that actor. The test_<ts>_<rand> id a previous response returned runs the call as _system_service, exactly like omitting it (see actor_id TODAY in this tool's description).",
         },
       },
       required: ["solution_id", "message"],
@@ -3067,9 +3067,10 @@ function getActorId(args) {
       "(1) this tool's inputSchema does not DECLARE _adas_actor, so MCP stripped it " +
       "before your handler ran — add it to inputSchema.properties (see toolSchemas() " +
       "below, every data tool must spread ...actor); or " +
-      "(2) the caller is not actor-scoped — ateam_test_connector always runs as _system_service, " +
-      "and so do ateam_test_skill and ateam_conversation unless actor_id names a real actor of this tenant: " +
-      "exercise per-user tools with a real actor's id."
+      "(2) Core had no actor for this call, so it sent none. A test call is NOT this cause: " +
+      "ateam_test_connector, and ateam_test_skill / ateam_conversation without a real actor_id, run as the " +
+      "tenant's shared _system_service actor, and ${SERVICE_ACTOR_AT_TOOLS}. " +
+      "Exercise per-user tools with a real actor's id."
     );
   }
   return id;
@@ -3649,7 +3650,7 @@ export const handlers = {
         // and list promote + build_and_run, so the loop an agent follows most
         // often told it to ship every change.
         { step: 4, action: "Iterate", description: `Change it on \`${BRANCH_WORKFLOW.write_branch}\` and deploy it from \`${BRANCH_WORKFLOW.write_branch}\` to test it, with no promote. Connector code: ateam_github_patch, ONE FILE AT A TIME, then ateam_upload_connector(solution_id, connector_id, github:true). Skill or solution definitions: ateam_patch, which writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call. ${BRANCH_WORKFLOW.iterate_note} NEVER re-pass all connector code inline after first deploy.`, tools: ["ateam_github_patch", "ateam_upload_connector", "ateam_patch", "ateam_redeploy"] },
-        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; today one message is one conversation, see conversation_flow.actor_id_today). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; what a follow-up inherits, and from which earlier chain, is conversation_flow.actor_id_today). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} Then ateam_build_and_run(solution_id) deploys \`${BRANCH_WORKFLOW.deploy_branch}\`. ${BRANCH_WORKFLOW.the_silent_mistake} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
@@ -3659,7 +3660,7 @@ export const handlers = {
         "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id } immediately. The reply is NOT here.",
         "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true, OR when pending_question is set (the assistant is asking the user something — read step 4 before you answer).",
         "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
-        "4. NEXT TURN — ateam_conversation(solution_id, message) again. It starts a new chain and, today, does NOT carry the earlier turns: actor_id_today below says why and when it does. Repeat from step 2.",
+        "4. NEXT TURN — ateam_conversation(solution_id, message) again. It starts a new chain. What that chain inherits from an earlier one, and from WHICH one (as _system_service it may be another test thread's), is actor_id_today below. Repeat from step 2.",
       ],
       example: {
         kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "test_x" }',

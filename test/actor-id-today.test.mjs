@@ -9,6 +9,16 @@
 // earlier turns (Core C2/C3). An agent that followed the docs sent "yes" to a
 // conversation that did not remember asking.
 //
+// The first fix (c847a4b) overcorrected into two more false texts, which CORE
+// read against Core origin/dev: "passing it back does NOT continue a
+// conversation (the planner is given no earlier turns)" and "per-user tools see
+// no user". A _system_service job gets no transcript, but a message classified
+// `continue` inherits the tenant's LAST _system_service chain (Core
+// worker/chainContinuation.js, keyed on the actor), so two unrelated test
+// threads can share context; and its tools receive _adas_actor
+// "_system_service" (utils/callerContext.js:224-226), which actorStore refuses
+// ("unsafe actor segment", actorstore-mcp/pool.js:28-35).
+//
 // This drives the real surfaces — the tool list, the bootstrap response, the
 // tenant CLAUDE.md, the conversation handler's own _poll block, the scaffolded
 // connector and the actor-not-found hint — and holds them to ONE text
@@ -19,10 +29,17 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setSessionCredentials, formatError } from "../src/api.js";
 import { tools, handlers, handleToolCall } from "../src/tools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
-import { ACTOR_ID_TODAY } from "../src/actorIdToday.js";
+// A namespace import, so a build that lacks one of the two texts fails the
+// tests that need it (with their messages) instead of failing to link.
+import * as today from "../src/actorIdToday.js";
+const { ACTOR_ID_TODAY, SERVICE_ACTOR_AT_TOOLS } = today;
 
 const SID = "sess-actor-id-today";
 const KEY = "adas_tenanta_00000000000000000000000000000000";
@@ -57,6 +74,11 @@ const FALSE_PROMISES = [
   [/auto-expires in 24h/i, "a test actor is created and expires"],
   [/multi-turn via actor_id/i, "multi-turn via actor_id"],
   [/use ateam_test_skill or a real conversation to exercise per-user/i, "test_skill is actor-scoped"],
+  // c847a4b's overcorrection: "nothing carries" and "no user". Both false.
+  [/does NOT (continue|carry)\b/i, "a follow-up carries nothing over"],
+  [/one message is one conversation/i, "a follow-up carries nothing over"],
+  [/see no user/i, "per-user tools see no user"],
+  [/caller is not actor-scoped/i, "a _system_service caller leaves _adas_actor missing"],
 ];
 const assertNoPromise = (where, text) => {
   for (const [rx, claim] of FALSE_PROMISES) assert.doesNotMatch(text, rx, `${where} still promises: ${claim}`);
@@ -65,9 +87,24 @@ const tool = (name) => tools.find((t) => t.name === name);
 
 test("the text says what happens today, and names the only path that is per-user", () => {
   assert.match(ACTOR_ID_TODAY, /_system_service/);
-  assert.match(ACTOR_ID_TODAY, /does NOT continue a conversation/);
   assert.match(ACTOR_ID_TODAY, /EXISTS in this tenant/);
   assertNoPromise("ACTOR_ID_TODAY", ACTOR_ID_TODAY);
+});
+
+test("a follow-up: no transcript, but a 'continue' inherits the tenant's LAST _system_service chain", () => {
+  assert.match(ACTOR_ID_TODAY, /its chat transcript is empty/, "does not say a _system_service turn gets no transcript");
+  assert.match(ACTOR_ID_TODAY, /intent 'continue' inherits .* of the tenant's most recently finished _system_service chain \(last 30 min\), whichever thread ran it/,
+    "does not say a 'continue' inherits the tenant's last _system_service chain");
+  assert.match(ACTOR_ID_TODAY, /two unrelated test threads can share context/, "does not say what that means for two test threads");
+  assert.match(ACTOR_ID_TODAY, /passing it back does not choose what a turn continues/, "does not say the label picks nothing");
+});
+
+test("per-user tools receive the actor '_system_service', and actorStore refuses it", () => {
+  assert.equal(typeof SERVICE_ACTOR_AT_TOOLS, "string", "no one text says what a per-user tool receives as _system_service");
+  assert.match(SERVICE_ACTOR_AT_TOOLS, /receive _adas_actor '_system_service'/, "does not say what a per-user tool receives");
+  assert.match(SERVICE_ACTOR_AT_TOOLS, /actorStore refuses a per-actor call made with it \('actorstore-mcp: unsafe actor segment'\)/,
+    "does not say what actorStore does with that actor");
+  assert.ok(ACTOR_ID_TODAY.includes(SERVICE_ACTOR_AT_TOOLS), "ACTOR_ID_TODAY does not render SERVICE_ACTOR_AT_TOOLS");
 });
 
 test("ateam_test_skill and ateam_conversation carry it, and promise nothing else", () => {
@@ -86,6 +123,10 @@ test("the bootstrap conversation_flow carries it; no step promises a thread", as
   const boot = await handlers.ateam_bootstrap({}, SID);
   assert.equal(findDeep(boot, "conversation_flow")?.actor_id_today, ACTOR_ID_TODAY,
     "conversation_flow does not render ACTOR_ID_TODAY");
+  const step4 = findDeep(boot, "conversation_flow")?.steps?.[3] || "";
+  assert.match(step4, /^4\. NEXT TURN/, "(conversation_flow step 4 not found)");
+  assert.match(step4, /from WHICH one \(as _system_service it may be another test thread's\), is actor_id_today below/,
+    "step 4 does not say which earlier chain a next turn inherits from");
   assertNoPromise("ateam_bootstrap", JSON.stringify(boot));
 });
 
@@ -111,6 +152,19 @@ test("a scaffolded connector's missing-actor error does not call test_skill acto
   const server = uploads.flatMap((u) => u.files || []).find((f) => f.path.endsWith("server.js"))?.content || "";
   assert.match(server, /_adas_actor missing/, "(the scaffold's actor guard was not found)");
   assertNoPromise("scaffolded server.js", server);
+  // The message the connector actually throws, as its string expression evaluates.
+  const expr = server.match(/if \(!id\) \{\s*throw new Error\(([\s\S]*?)\);\s*\}/)?.[1];
+  assert.ok(expr, "(the scaffold's missing-actor throw was not found)");
+  const message = new Function(`return (${expr});`)();
+  assert.ok(message.includes(`A test call is NOT this cause: ateam_test_connector, and ateam_test_skill / ateam_conversation without a real actor_id, run as the tenant's shared _system_service actor, and ${SERVICE_ACTOR_AT_TOOLS}.`),
+    `the missing-actor error does not say a test call reaches the tool as '_system_service': ${message}`);
+  assertNoPromise("scaffolded missing-actor error", message);
+  // The text is embedded in a double-quoted string of GENERATED code: prove it still parses.
+  const dir = mkdtempSync(join(tmpdir(), "actor-scaffold-"));
+  try {
+    writeFileSync(join(dir, "server.mjs"), server);
+    execFileSync(process.execPath, ["--check", join(dir, "server.mjs")], { stdio: "pipe" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("the actor-not-found hint does not point at the label ateam_conversation returns", () => {

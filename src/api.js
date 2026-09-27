@@ -561,7 +561,7 @@ export function touchSession(sessionId, { toolName, solutionId, skillId, actorId
   // an actor it cannot find). An explicit actor_id on a call still wins. (2026-08-22.)
   // ONLY A REAL ACTOR. ateam_conversation mints a throwaway THREAD key
   // (test_<ts>_<rand>) for anonymous use and returns it as actor_id — a label
-  // that continues nothing (actorIdToday.js). It is not an actor Core can
+  // Core never runs a job as (actorIdToday.js). It is not an actor Core can
   // resolve, and Core 401s the WHOLE REQUEST on an actor it cannot find.
   //
   // I shipped this without the filter and broke ateam_chain_status — the tool
