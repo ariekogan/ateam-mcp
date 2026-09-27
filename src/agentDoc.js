@@ -17,6 +17,7 @@
  */
 
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
+import { EXAMPLE_TYPES } from './exampleTypes.js';
 
 export const AGENT_DOC_SENTINEL = "<!-- SOLUTION-SPECIFIC NOTES BELOW — not auto-regenerated -->";
 
@@ -197,7 +198,7 @@ ${pitfalls}
 
 - \`ateam_get_spec(topic: "skill")\` — full skill schema
 - \`ateam_get_spec(topic: "solution")\` — solution schema
-- \`ateam_get_examples(type: "skill" | "connector" | "connector-ui" | "solution")\`
+- \`ateam_get_examples(type: ${EXAMPLE_TYPES.map((t) => `"${t}"`).join(" | ")})\`
 - \`ateam_get_workflows()\` — builder workflow state machines
 
 Read these on your first edit into an area you haven't touched.

@@ -993,11 +993,18 @@ export function formatError(method, path, status, body, baseUrl) {
     // The structured code carries no name — say "the actor you sent" rather
     // than printing empty quotes.
     const who = notFound.actor || "you sent";
+    // Every sentence here must be something the code does. This used to end
+    // "call ateam_auth again to reset the session binding" — ateam_auth does
+    // not: setSessionCredentials carries the session's context, actor
+    // included, across a sign-in. What does drop it is request(): on this same
+    // response, with this same classifier, it unbinds the session's actor
+    // before this message is built (clearSessionActor). So the true remedy is
+    // the cheaper one: retry.
     hints[status] =
       `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
       `Re-authenticating will not help. Either pass a real actor id (the one ateam_conversation returned for the thread), ` +
-      `or omit the actor entirely to act as the tenant. If you never sent an actor, the session is bound to a stale one: ` +
-      `call ateam_auth again to reset the session binding.`;
+      `or omit the actor entirely to act as the tenant. If you never sent an actor, this session was carrying a stale one: ` +
+      `it has been dropped with this error, so retrying the same call now acts as the tenant.`;
   }
 
   // A 404 ON /spec IS NOT A MISSING SOLUTION.

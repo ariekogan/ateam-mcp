@@ -37,7 +37,7 @@ import {
   clearSession, setSessionCredentials, parseApiKey, whoami, baseUrlForKeyEnv, getCredentials,
   startSessionSweeper, getSessionStats, sweepStaleSessions,
   bindSessionBearer, bindSessionPlatform, getAuthOverride, getSessionOwner, sessionOwnershipOk,
-  presentsPlatformSecret, PLATFORM_PRINCIPAL,
+  presentsPlatformSecret, PLATFORM_PRINCIPAL, getBaseUrl,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
 import { connectGithubPage } from "./pages.js";
@@ -122,7 +122,7 @@ export function startHttpServer(port = 3100) {
   const oauthDisabled = process.env.ATEAM_OAUTH_DISABLED === "1";
   const baseUrl = process.env.ATEAM_BASE_URL || "https://mcp.ateam-ai.com";
 
-  let bearerMiddleware = null;
+  let bearerMiddlewareFor = null;
   if (!oauthDisabled) {
     // ─── Token capture middleware — MUST be BEFORE mcpAuthRouter ───
     // Intercepts POST /token responses to cache access_tokens for
@@ -152,7 +152,7 @@ export function startHttpServer(port = 3100) {
     });
 
     const oauth = mountOAuth(app, baseUrl);
-    bearerMiddleware = oauth.bearerMiddleware;
+    bearerMiddlewareFor = oauth.bearerMiddlewareFor;
 
     console.log(`  OAuth: enabled (issuer: ${baseUrl})`);
   } else {
@@ -257,9 +257,11 @@ export function startHttpServer(port = 3100) {
     next();
   };
   const unlessPlatform = (mw) => (req, res, next) => (req.platformPrincipal ? next() : mw(req, res, next));
-  const mcpAuth = [
+  // ONE rule on both mounts. Only the challenge differs: each names the
+  // protected-resource metadata for the URL the client called (see mountOAuth).
+  const mcpAuthFor = (path) => [
     platformGate,
-    ...(bearerMiddleware ? [autoInjectToken, bearerMiddleware].map(unlessPlatform) : []),
+    ...(bearerMiddlewareFor ? [autoInjectToken, bearerMiddlewareFor(path)].map(unlessPlatform) : []),
   ];
 
   // ─── CORS — required for browser-based MCP clients ──────────────
@@ -283,7 +285,11 @@ export function startHttpServer(port = 3100) {
       if (!CORS_ALLOW_ANY) res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id, authorization");
-      res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+      // WWW-Authenticate is not a CORS-safelisted response header. Without it
+      // here a browser client gets the 401 but cannot read the challenge that
+      // tells it where to authenticate — the discovery pointer this gate exists
+      // to send (39ff024) never reached that class of client.
+      res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, WWW-Authenticate");
       if (req.method === "OPTIONS") {
         res.status(204).end();
         return;
@@ -501,8 +507,9 @@ export function startHttpServer(port = 3100) {
   };
 
   // Mount MCP handlers at both "/" (Claude.ai) and "/mcp" (ChatGPT).
-  // ONE auth rule for both — see mcpAuth above for why the split was removed.
+  // ONE auth rule for both — see mcpAuthFor above for why the split was removed.
   for (const path of MCP_PATHS) {
+    const mcpAuth = mcpAuthFor(path);
     app.post(path, ...mcpAuth, mcpPost);
     app.get(path, ...mcpAuth, mcpGet);
     app.delete(path, ...mcpAuth, mcpDelete);
@@ -601,22 +608,38 @@ async function seedCredentials(req, sessionId) {
     return;
   }
 
-  // A SEALED key does not spell out its tenant, so it has to be asked for —
-  // ONCE. This runs on every request for an existing session, so without the
-  // guard below it would be a network round trip per MCP call.
+  // A key that does not spell out its tenant has to be asked — ONCE. This runs
+  // on every request for an existing session, so without the guard below it
+  // would be a network round trip per MCP call. Two shapes get here: a SEALED
+  // key (adas_<env>_<blob>) and a LEGACY one (adas_<32hex>).
   const current = (() => { try { return getCredentials(sessionId); } catch { return null; } })();
   if (current?.tenant && current.apiKey === token) return;
 
+  // WHERE TO ASK is the rule ateam_auth follows for the same key: the key's own
+  // environment, else this session's base (the process default for a key that
+  // names none). This asked `apiUrl` alone, which a legacy key does not have,
+  // so whoami threw "no base url" without asking anyone.
+  const base = apiUrl || getBaseUrl(sessionId);
   try {
-    const me = await whoami(token, apiUrl);
+    const me = await whoami(token, base);
     setSessionCredentials(sessionId, { tenant: me.tenant, apiKey: token, apiUrl, explicit: true });
   } catch (err) {
-    // Credentials are still set: the tenant lives INSIDE the key and Core reads
-    // it, so calls authenticate correctly with no X-ADAS-TENANT header at all.
-    // What we must not do is fill the gap with a guess — an unresolved tenant
-    // is recorded as null and retried on the next request. Anything that needs
-    // the name will say it does not have it.
-    console.warn(`[Auth] whoami failed for session ${sessionId} at ${apiUrl}: ${err.message} — proceeding with the tenant unresolved, never assumed.`);
+    if (!parsed.sealed) {
+      // A LEGACY key carries no tenant anywhere Core can read without one, so
+      // there is nothing to seed. Recording tenant:null for it throws — by
+      // design, setSessionCredentials never invents a tenant — and that throw
+      // used to escape into the request handler as an opaque 500 on every call.
+      // The session stays signed out instead: tenant tools refuse and say how
+      // to sign in, and the next request asks again.
+      console.warn(`[Auth] whoami failed for session ${sessionId} at ${base}: ${err.message} — a legacy key names no tenant, so this session is left signed out (ateam_auth, or a key that names its tenant).`);
+      return;
+    }
+    // A SEALED key: credentials are still set. The tenant lives INSIDE the key
+    // and Core reads it, so calls authenticate correctly with no X-ADAS-TENANT
+    // header at all. What we must not do is fill the gap with a guess — an
+    // unresolved tenant is recorded as null and retried on the next request.
+    // Anything that needs the name will say it does not have it.
+    console.warn(`[Auth] whoami failed for session ${sessionId} at ${base}: ${err.message} — proceeding with the tenant unresolved, never assumed.`);
     setSessionCredentials(sessionId, { tenant: null, apiKey: token, apiUrl, explicit: true });
   }
 }

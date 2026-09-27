@@ -65,6 +65,7 @@ const VERDICT_TOOLS = new Set([
 ]);
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
+import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { isTimeoutError } from "./api.js";
 
@@ -832,7 +833,9 @@ export const tools = [
       properties: {
         type: {
           type: "string",
-          enum: ["skill", "connector", "connector-ui", "solution", "script-cache-skill", "ui-plugin-native", "ui-plugin-iframe", "device-tools", "index"],
+          // From the one owner (src/exampleTypes.js), so the schema cannot
+          // accept a type the handler cannot serve, or refuse one it can.
+          enum: [...EXAMPLE_TYPES],
           description:
             "Example type: 'skill' = Order Support Agent, 'connector' = stdio MCP connector, 'connector-ui' = UI-capable connector, 'solution' = full 3-skill e-commerce solution, 'script-cache-skill' = fat-tool skill with script_cache opt-in (reference implementation of script-level JIT shortcuts — study this before building any browser-automation skill), 'ui-plugin-native' = complete working React Native (mobile) UI plugin (rn-src/index.tsx + esbuild build:rn → rn-bundle, @adas/plugin-sdk, es2015), 'ui-plugin-iframe' = complete working web (iframe) UI plugin with the postMessage protocol, 'device-tools' = a solution's OWN tools that execute ON THE PHONE (runtime:\"device\") — BOTH halves and why they must agree: the plugin-bundle implementation, the connector manifest that declares it (Core cannot introspect a phone, so the manifest is the entire contract), and the skill wiring without which the skill gets none of them. Read this before designing anything that needs a LIVE device reading rather than the last synced one, 'index' = list all available examples",
         },
@@ -1155,7 +1158,7 @@ export const tools = [
       "- Change intent: updates: { \"intents.supported_update\": [{ id: \"i1\", description: \"new desc\" }] }\n" +
       "- CREATE a new skill: target='skill', skill_id='my-new-skill', updates: { \"problem.statement\": \"...\", \"role.persona\": \"...\" } — auto-scaffolded and added to solution topology.\n\n" +
       "PREVIEW BEFORE WRITING: pass dry_run:true to see the diff (arrays_merged, arrays_replaced, dropped_ids, added_ids) without applying. Use this before any destructive-looking edit.\n\n" +
-      "VERDICT (skill target): the response carries a NON-BLOCKING `validation` block { skill_id, valid, ready_to_export, error_count, incomplete_sections[], unresolved_refs } — the patch always saves even if the def is now invalid, so CHECK valid: false and fix incomplete_sections before relying on it (build_and_run will refuse to deploy an invalid skill). error_count can include auto-import connector-tool artifacts, so act on incomplete_sections first.",
+      "VERDICT (skill target): the response carries a NON-BLOCKING `validation` block { skill_id, valid, ready_to_export, error_count, incomplete_sections[], unresolved_refs } — the patch always saves (and redeploys) even if the def is now invalid, and build_and_run does not run this check (its gate is the solution validator, POST /validate/solution), so nothing refuses a skill for it: CHECK valid: false yourself and fix incomplete_sections before relying on the skill. error_count can include auto-import connector-tool artifacts, so act on incomplete_sections first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2277,7 +2280,7 @@ export const tools = [
     core: true,
     description:
       "Read any file from a solution's GitHub repo. Returns the file content. Use this to read connector source code, skill definitions, or any versioned file. " +
-      "Default reads from `main` (deployed/prod state). Pass `ref: 'dev'` to read in-progress work.\n\n" +
+      "Default reads `dev`, the working branch your writes land on (the Builder picks it when no ref is passed, and creates it if the repo has none yet). Pass `ref: 'main'` to read the promoted/production state. The response's `branch` says which one you got.\n\n" +
       "⚠️ NOT RUNTIME STATE. For `solution.json` and `skills/<id>/skill.json` this returns a git MIRROR, not what is deployed. " +
       "Connector-imported tools are regenerated at deploy time, so a repo copy's `tools[]` can differ from production (on one solution `dev` showed 29 tools while production ran 66). " +
       "Reads of those paths carry an `_ateam_representation` field saying what you are holding. " +
@@ -2296,8 +2299,12 @@ export const tools = [
         },
         ref: {
           type: "string",
-          description: "Branch, tag, or commit SHA to read from. Default: 'main' (prod). Use 'dev' to read in-progress work.",
-          default: "main",
+          // No `default` here, deliberately. The Builder owns the branch rule
+          // (resolveBranch, kind 'iterative' → dev) and this handler sends no
+          // branch when none is given. A schema default is something an MCP
+          // client may fill in on its own, and "main" here would have made such a
+          // client read production while the text told it otherwise.
+          description: "Branch, tag, or commit SHA to read from. Omit it to read `dev` (the working branch — the Builder resolves it). Use 'main' for the promoted/production state.",
         },
       },
       required: ["solution_id", "path"],
@@ -2413,7 +2420,7 @@ export const tools = [
     core: true,
     description:
       "View commit history for a solution's GitHub repo. Shows recent commits with messages, SHAs, timestamps, and links. " +
-      "Default reads from `main` (prod). Pass `ref: 'dev'` to see in-progress work.",
+      "Default reads `dev`, the working branch your writes land on (the Builder picks it when no ref is passed). Pass `ref: 'main'` to see what has been promoted to production. The response's `branch` says which one you got.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2427,8 +2434,8 @@ export const tools = [
         },
         ref: {
           type: "string",
-          description: "Branch to read commits from. Default: 'main'.",
-          default: "main",
+          // No `default` — see ateam_github_read's ref: the Builder resolves it.
+          description: "Branch to read commits from. Omit it for `dev` (the working branch — the Builder resolves it). Use 'main' for production.",
         },
       },
       required: ["solution_id"],
@@ -2716,6 +2723,106 @@ export const tools = [
   },
 ];
 
+// ─── MCP SAFETY HINTS — what a call may do to the tenant ────────────
+//
+// A client decides from `annotations` whether a tool may run without asking
+// (MCP 2025-03-26 ToolAnnotations). None of these tools carried any (ateam-mcp
+// #4: "0/47 tools annotated"), and a tool with none is, by the spec's defaults,
+// one that may destroy data — so every read here was presented as dangerous as
+// a delete.
+//
+// ONE TABLE, read in one screen, rather than a field scattered through 70
+// definitions: the question is the same for every tool, and a reviewer should
+// be able to see every answer at once. test/tool-annotations.test.mjs fails if
+// a tool is missing from it, if it names a tool that does not exist, and — by
+// driving every read and additive tool through the dispatcher — if one of them
+// issues a request its class does not allow. So a tool cannot leave
+// `destructive` without its behaviour being checked against the class it joins.
+//
+//   read        — changes nothing on the platform or in a repo. It may POST
+//                 when the question needs a body (validate, search, advisor).
+//   additive    — creates something new (a log entry, a notification, an
+//                 intent-and-planning run that executes no tool) or signs this
+//                 session in; overwrites and removes nothing that exists.
+//   destructive — may overwrite or remove what exists: definitions, deployed
+//                 code, repo files and branches, running jobs. AND anything
+//                 that runs code this server cannot see, since that code may do
+//                 any of those: a connector tool called directly, a deployed
+//                 skill whose planner calls connector tools, a plugin whose own
+//                 JS calls them while it renders. Which tool that code picks
+//                 (a "read-shaped" name, a plugin's mount-time fetch) is not a
+//                 proof of what it does.
+// When unsure, the more cautious class: a hint that says "safe" wrongly lets a
+// client act without asking, and the opposite mistake only costs a prompt.
+export const TOOL_SAFETY = Object.freeze({
+  read: [
+    "ateam_bootstrap", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
+    "ateam_design_advisor", "ateam_spec_search",
+    "ateam_validate_skill", "ateam_validate_solution",
+    "ateam_list_solutions", "ateam_get_solution", "ateam_show_skill_minimal", "ateam_show_solution_minimal",
+    "ateam_get_progress", "ateam_get_lessons",
+    "ateam_get_execution_logs", "ateam_test_status", "ateam_get_chain", "ateam_chain_status",
+    "ateam_get_metrics", "ateam_connector_logs", "ateam_status_all",
+    "ateam_get_widget_catalog",
+    "ateam_get_connector_source", "ateam_get_deployed_connector_source",
+    "ateam_diff", "ateam_verify_consistency",
+    "ateam_github_status", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
+  ],
+  additive: [
+    "ateam_auth",
+    // Intent detection + planning only: Core plans the first step and executes
+    // none of the skill's tools (server.js /api/test-pipeline).
+    "ateam_test_pipeline",
+    // A new [TEST] notification to an existing actor's channels.
+    "ateam_test_notification",
+    "ateam_log_progress", "ateam_log_lesson",
+  ],
+  destructive: [
+    "ateam_build_and_run", "ateam_patch", "ateam_update", "ateam_redeploy",
+    "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector",
+    "ateam_upload_connector", "ateam_upload_connector_files",
+    // Scaffolds, but onto an id that may exist: the connector upload replaces,
+    // the plugin files overwrite their namesakes.
+    "ateam_create_connector", "ateam_create_plugin",
+    "ateam_delete_solution", "ateam_delete_skill", "ateam_delete_connector",
+    "ateam_recover_connector_source", "ateam_write_agent_doc",
+    "ateam_github_push", "ateam_github_pull", "ateam_github_patch", "ateam_github_write",
+    "ateam_github_promote", "ateam_github_reconcile", "ateam_github_sync_from_main", "ateam_github_rollback",
+    "ateam_sync_all", "ateam_test_abort",
+    // RUNS CODE THIS SERVER CANNOT SEE.
+    //   a connector tool, by name:            ateam_test_connector
+    //   one per connector, "read-shaped" name: ateam_verify (its smoke call)
+    //   a deployed skill, end to end — its
+    //   planner calls whatever tools it has:  ateam_test_skill, ateam_conversation,
+    //                                         ateam_test_voice
+    //   the Solution Bot, which edits the
+    //   solution it is asked about:           ateam_solution_chat
+    //   the plugin's own JS, in the real host,
+    //   with live tool calls:                 ateam_verify_surface
+    "ateam_test_connector", "ateam_verify",
+    "ateam_test_skill", "ateam_conversation", "ateam_test_voice",
+    "ateam_solution_chat", "ateam_verify_surface",
+  ],
+});
+const SAFETY_HINTS = {
+  read: { readOnlyHint: true },
+  additive: { readOnlyHint: false, destructiveHint: false },
+  destructive: { readOnlyHint: false, destructiveHint: true },
+};
+/** tool name → "read" | "additive" | "destructive". Exported for tests, which
+ *  also check that no name sits in two classes (a Map would keep the last). */
+export const toolSafetyClass = new Map(
+  Object.entries(TOOL_SAFETY).flatMap(([cls, names]) => names.map((n) => [n, cls])),
+);
+// Not a throw for an unclassified tool: this module is the public server, and a
+// missing hint must not take it down. A tool left out simply carries none —
+// the spec's own cautious default — and test/tool-annotations.test.mjs refuses
+// to let that ship.
+for (const t of tools) {
+  const cls = toolSafetyClass.get(t.name);
+  if (cls) t.annotations = { ...SAFETY_HINTS[cls] };
+}
+
 /**
  * Core tools — shown in MCP tools/list.
  * Advanced tools are still callable but not advertised.
@@ -2809,18 +2916,6 @@ const SPEC_PATHS = {
   "platform-truth": "/spec/platform-truth",
   sdk: "/spec/sdk",
   workflows: "/spec/workflows",
-};
-
-const EXAMPLE_PATHS = {
-  index: "/spec/examples",
-  skill: "/spec/examples/skill",
-  connector: "/spec/examples/connector",
-  "connector-ui": "/spec/examples/connector-ui",
-  solution: "/spec/examples/solution",
-  "script-cache-skill": "/spec/examples/script-cache-skill",
-  "ui-plugin-native": "/spec/examples/ui-plugin-native",
-  "ui-plugin-iframe": "/spec/examples/ui-plugin-iframe",
-  "device-tools": "/spec/examples/device-tools",
 };
 
 // Tools that are tenant-aware — require EXPLICIT ateam_auth (env vars alone not enough).
@@ -3134,9 +3229,13 @@ Use \`ateam_create_plugin\` (or drop the files yourself): iframe plugins go unde
 RN plugins have editable source at \`rn-src/<plugin-name>.tsx\` (imported from
 \`@adas/plugin-sdk\`) AND a PRE-BUILT, COMMITTED bundle at
 \`rn-bundle/<plugin-name>.bundle.js\` — the mobile
-app downloads the bundle, and Core never compiles the .tsx (deploys run
-\`npm install --no-optional\`, which skips esbuild). After editing the .tsx,
-rebuild the bundle with the esbuild command in its header and commit it. This
+app downloads the bundle, never the .tsx. A deploy builds only what this
+package.json declares: it runs every \`build\` / \`build:*\` script it finds, and
+this scaffold declares none. So after editing the .tsx, rebuild the bundle with
+the esbuild command in its header and commit it, or declare a \`build:rn\`
+script with \`esbuild\` in \`devDependencies\` and let the deploy build it (a
+package with a build script is installed WITH its devDependencies;
+\`ateam_get_spec(topic: "ui-plugins")\`). This
 connector's \`ui.listPlugins\` / \`ui.getPlugin\` read the manifests at call time,
 so a new plugin renders with NO server.js edit.
 
@@ -3222,12 +3321,17 @@ function _scaffoldPluginFiles({ connectorId, pluginName, kind }) {
   if (kind === "rn" || kind === "adaptive") {
     const tsx = `// ${pluginName} — React Native plugin SOURCE (editable). Generated by ateam_create_plugin.
 //
-// ⚠️  Core does NOT compile this .tsx. Deploys run "npm install --production
-//     --no-optional" (which skips esbuild's platform binary) and only ever run a
-//     "build" script — never "build:rn". The mobile app therefore loads the
-//     PRE-BUILT, COMMITTED bundle at rn-bundle/${pluginName}.bundle.js, NOT this
-//     file. cp.getContextPlugin advertises reactNative.bundleUrl only when that
-//     bundle exists on disk — no bundle → mobile has nothing to download.
+// ⚠️  The mobile app loads the PRE-BUILT, COMMITTED bundle at
+//     rn-bundle/${pluginName}.bundle.js, NOT this file. cp.getContextPlugin
+//     advertises reactNative.bundleUrl only when that bundle exists on disk —
+//     no bundle → mobile has nothing to download.
+//
+//     A deploy builds only what the connector's package.json declares: it runs
+//     every "build" / "build:*" script there. This scaffold declares none, so
+//     nothing rebuilds the bundle for you. Either rebuild it yourself (below),
+//     or declare a "build:rn" script with esbuild in devDependencies and let
+//     the deploy build it (a package with a build script is installed WITH its
+//     devDependencies) — see ateam_get_spec(topic: "ui-plugins").
 //
 // After editing this file, rebuild the bundle and commit it (target=es2015 is
 // REQUIRED — the mobile runtime evals the bundle with new Function(), which
@@ -3294,13 +3398,15 @@ export default {
 
     // Pre-built RN bundle — THIS is the file the mobile app actually downloads.
     // cp.getContextPlugin only advertises reactNative.bundleUrl when a
-    // rn-bundle/<pluginId>.bundle.js (or index.bundle.js) exists on disk; the
-    // deploy pipeline can't produce it (npm install --no-optional skips esbuild,
-    // and only a "build" script would run — not "build:rn"), so we SHIP it
-    // pre-built and committed. Without this file the manifest carries
-    // render.reactNative.component but no bundleUrl and mobile renders nothing
-    // (the web iframe still works). Named per-plugin (matches cp.getContextPlugin's
-    // \`${'$'}{pluginId}.bundle.js\` primary lookup) so multiple RN widgets can
+    // rn-bundle/<pluginId>.bundle.js (or index.bundle.js) exists on disk. A
+    // deploy runs the connector's `build` / `build:*` scripts (Core's mcp-store,
+    // connectorBuildScripts.js since Core 0fa6d551e), but this scaffold's
+    // package.json declares none and has no dependencies, so nothing builds it
+    // there: we SHIP it pre-built and committed. Without this file the manifest
+    // carries render.reactNative.component but no bundleUrl and mobile renders
+    // nothing (the web iframe still works), and Core refuses a connector that
+    // has rn-src/ but no rn-bundle/*.bundle.js (422). Named per-plugin (matches
+    // cp.getContextPlugin's \`${'$'}{pluginId}.bundle.js\` primary lookup) so multiple RN widgets can
     // coexist in one connector. Kept in sync with the .tsx above via the esbuild
     // command in its header. es2015 CJS, plain-object default export, no
     // async/await — passes the mobile new Function() load test.
@@ -3995,10 +4101,12 @@ export const handlers = {
     // An unknown type used to reach get(undefined) and fetch the API root, so a
     // typo answered with something that looked like a valid response. Say what
     // exists instead — the caller cannot see this map.
-    const path = EXAMPLE_PATHS[type];
+    // Own keys only: "toString" or "constructor" must not resolve to something
+    // inherited from Object.prototype and be fetched as a path.
+    const path = Object.hasOwn(EXAMPLE_PATHS, String(type)) ? EXAMPLE_PATHS[type] : null;
     if (!path) {
       throw new Error(
-        `Unknown example type "${type}". Available: ${Object.keys(EXAMPLE_PATHS).join(", ")}.`
+        `Unknown example type "${type}". Available: ${EXAMPLE_TYPES.join(", ")}.`
       );
     }
     return get(path, sid);
@@ -5057,25 +5165,54 @@ export const handlers = {
     // the bug": a patch that leaves the definition invalid used to return ok:true
     // with NO verdict, so an agent (or a persona routing here as the "cheapest
     // correct tool") never saw it went red, and an invalid def slipped toward
-    // Core (build_and_run refuses on errors, but the patch path reported nothing).
-    // Report the verdict keyed by skill_id; never block. error_count can be
+    // Core. Report the verdict keyed by skill_id; never block.
+    //
+    // NOTHING ELSE CHECKS IT EITHER, so say that and no more. f09301b told the
+    // caller "build_and_run will refuse to deploy while errors stand". It will
+    // not: build_and_run's only gate is POST /validate/solution, which runs the
+    // SOLUTION validator (cross-skill contracts, connectors, privileges) and has
+    // never run this per-skill check (2db689b onward). A red verdict here and a
+    // green deploy are both true at once. error_count can be
     // inflated by auto-imported connector tools (INVALID_TOOL_INPUTS /
     // MISSING_TOOL_OUTPUT fire on every solution because Core resolves their
     // contract at deploy, not the author) — so lead with the author-facing
     // signal: which sections are still incomplete, plus any unresolved refs.
+    //
+    // THE ROUTE IS /validate. This asked for …/skills/:id/validation from the
+    // day it shipped (f09301b). The skill-validator has never served that path
+    // — its route is …/skills/:id/validate (2b467c9), which proxies to the
+    // Builder's /api/solutions/:id/skills/:id/validation — so every call 404'd
+    // into a bare catch, and this verdict never once reached a caller.
+    //
+    // ADVISORY, SO IT GETS AN ADVISORY BUDGET. The patch is saved and its
+    // redeploy has run by now; the request default (120s, 2 retries) could hold
+    // that finished result for ~6 minutes, long enough for a client to time out
+    // and lose it. The route itself gives up after 15s.
+    //
+    // AND IT SAYS WHEN IT COULD NOT ANSWER. A verdict that is missing because
+    // the check failed must not look like a verdict that was never asked for.
     let validation = null;
     if (target === "skill" && skill_id) {
       try {
-        const vr = await get(`/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}/validation`, sid);
+        const vr = await get(
+          `/deploy/solutions/${solution_id}/skills/${encodeURIComponent(skill_id)}/validate`,
+          sid,
+          { timeoutMs: 20_000, retries: 0 },
+        );
         const v = vr?.validation || vr || {};
         const incomplete_sections = Object.entries(v.sections || {})
           .filter(([, s]) => s && s.complete === false)
           .map(([name]) => name);
         const unresolved = Object.entries(v.unresolved_refs || {}).filter(([, n]) => Number(n) > 0);
+        // UNKNOWN IS NOT FALSE. `valid` is read as the Builder states it; a
+        // response without it is null, so an absent field can never raise the
+        // INVALID banner below, and every reader of `valid` agrees.
+        const tri = (x) => (typeof x === "boolean" ? x : null);
+        const valid = tri(v.valid);
         validation = {
           skill_id,
-          valid: v.valid === true,
-          ready_to_export: v.ready_to_export === true,
+          valid,
+          ready_to_export: tri(v.ready_to_export),
           error_count: v.error_count ?? null,
           warning_count: v.warning_count ?? null,
           ...(incomplete_sections.length && { incomplete_sections }),
@@ -5083,14 +5220,27 @@ export const handlers = {
           ...(v.error_count > 0 && {
             _note: `error_count can include auto-import connector-tool artifacts — INVALID_TOOL_INPUTS / MISSING_TOOL_OUTPUT fire on every solution because Core resolves an auto-imported tool's contract at deploy, not the author. Act on incomplete_sections${unresolved.length ? " + unresolved_refs" : ""} first.`,
           }),
-          ...(v.valid === false && {
-            _verdict: `Skill "${skill_id}" is INVALID — the patch was still saved + redeployed (non-blocking), but build_and_run will REFUSE to deploy while errors stand. Fix the above, then re-check.`,
+          // What happened to the patch is stated as it happened: "redeployed"
+          // only when the redeploy phase says so.
+          ...(valid === false && {
+            _verdict: `Skill "${skill_id}" is INVALID — the patch was still saved${redeployOk ? " and redeployed" : " (its redeploy did not complete — see phases)"} (non-blocking). build_and_run does not run this check (its gate is the solution validator), so it will not stop on it either: fix the above yourself, then re-check.`,
           }),
         };
-      } catch { /* advisory — a validation hiccup never downgrades a saved patch */ }
+        phases.push({ phase: "validation", status: "done" });
+      } catch (err) {
+        // Still advisory: the saved patch is not downgraded. But the reason is
+        // kept, with the status that tells a missing route from a slow one.
+        phases.push({
+          phase: "validation",
+          status: "unavailable",
+          ...(err?.status && { http_status: err.status }),
+          error: String(err?.message || err).slice(0, 500),
+        });
+        console.warn(`[ateam_patch] Validation verdict unavailable for ${skill_id}: ${err?.message || err}`);
+      }
     }
     const validationStatus = (validation && validation.valid === false)
-      ? ` ⚠️ Skill "${skill_id}" is INVALID (${validation.error_count ?? "?"} error(s)) — see validation (non-blocking; build_and_run will refuse until fixed).`
+      ? ` ⚠️ Skill "${skill_id}" is INVALID (${validation.error_count ?? "?"} error(s)) — see validation (advisory: neither this patch nor build_and_run blocks on it).`
       : "";
 
     // A PATCH THAT DID NOT REBUILD IS NOT A SUCCESSFUL PATCH.
@@ -6698,7 +6848,7 @@ export const handlers = {
       verified,
       next_steps: [
         k === "rn" || k === "adaptive"
-          ? `Edit rn-src/${plugin_name}.tsx — fill in the Component body, THEN rebuild + commit rn-bundle/${plugin_name}.bundle.js (esbuild command is in the .tsx header). Core does NOT compile the .tsx — mobile loads the committed bundle. A pre-built starter bundle ships with this scaffold, so it renders as-is until you edit it.`
+          ? `Edit rn-src/${plugin_name}.tsx — fill in the Component body, THEN rebuild + commit rn-bundle/${plugin_name}.bundle.js (esbuild command is in the .tsx header) — mobile loads that bundle, never the .tsx. A deploy runs only the build scripts package.json declares ("build", "build:*"), and this scaffold declares none; add a "build:rn" script, with esbuild in devDependencies, if you want the deploy to build it — a package with a build script is installed WITH its devDependencies (ateam_get_spec(topic:"ui-plugins")). A pre-built starter bundle ships with this scaffold, so it renders as-is until you edit it.`
           : null,
         k === "iframe" || k === "adaptive"
           ? `Edit ui-dist/${plugin_name}/index.html — replace the placeholder UI.`

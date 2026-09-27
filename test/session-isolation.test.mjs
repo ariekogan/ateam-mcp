@@ -216,17 +216,18 @@ async function mcp(method, { path = "/mcp", base = BASE, headers = {}, body } = 
   const stream = method === "GET" && res.status === 200;
   const text = stream ? "" : await res.text();
   if (stream) res.body?.cancel().catch(() => {});
-  return { status: res.status, sid: res.headers.get("mcp-session-id"), www: res.headers.get("www-authenticate") || "", text };
+  return { status: res.status, sid: res.headers.get("mcp-session-id"), www: res.headers.get("www-authenticate") || "", text, path };
 }
 const sid = (s) => ({ "mcp-session-id": s });
 const bearer = (b) => ({ authorization: `Bearer ${b}` });
 
 // Layer 1 answered: 401, a WWW-Authenticate that sends the client to OAuth
-// discovery (RFC 9728), and no session id handed out.
+// discovery (RFC 9728) — the metadata for the mount it CALLED, "/" or "/mcp"
+// (test/oauth-edges.test.mjs follows it) — and no session id handed out.
 const challenged = (r) =>
   r.status === 401 &&
   /^Bearer /.test(r.www) &&
-  r.www.includes(`resource_metadata="${BASE}/.well-known/oauth-protected-resource"`) &&
+  r.www.includes(`resource_metadata="${BASE}/.well-known/oauth-protected-resource${r.path === "/" ? "" : r.path}"`) &&
   !r.sid;
 // Layer 2 answered: the session belongs to a different credential.
 const ownershipDenied = (r) => r.status === 401 && /"code":\s*-32001/.test(r.text) && /different credential/.test(r.text);
