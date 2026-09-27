@@ -24,14 +24,16 @@ import { apiPath, pathSeg, rawQuery } from "../src/pathParam.js";
 
 const SID = "sess-raw-path-ids";
 let hits = [];
+let routes = {};
 let server;
 before(async () => {
   server = createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
     req.resume();
     req.on("end", () => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, chain: { chainJobs: [] } }));
+      const reply = routes[`${req.method} ${req.url.split("?")[0]}`] || { status: 200, body: { ok: true, chain: { chainJobs: [] } } };
+      res.writeHead(reply.status || 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(reply.body));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -43,14 +45,15 @@ before(async () => {
 });
 after(() => server.close());
 
-async function call(tool, args) {
+async function call(tool, args, r = {}) {
+  routes = r;
   hits = [];
   const res = await handleToolCall(tool, args, SID);
   return { res, text: res.content[0].text };
 }
 
 // CORE's payloads, and the neighbours they stand for.
-const PAYLOADS = ["..?force=true", "%2e%2e?force=true", "walkmate?force=true#", "..", ".", "", "a b", "x\\y", "x%2Fy"];
+const PAYLOADS = ["..?force=true", "%2e%2e?force=true", "walkmate?force=true#", "..", ".", "", "a b", "x\\y", "x%2Fy", "a/b", "../x"];
 
 test("R1: delete_skill, delete_connector and test_abort refuse an injecting id with ZERO requests", async () => {
   const cases = (bad) => [
@@ -85,15 +88,14 @@ test("(control) valid ids reach the path encoded, one segment each", async () =>
   assert.deepEqual(hits, ["DELETE /deploy/solutions/walkmate/skills/walk-guide"]);
   await call("ateam_delete_connector", { solution_id: "walkmate", connector_id: "device-mock-mcp", confirm: true });
   assert.deepEqual(hits, ["DELETE /deploy/solutions/walkmate/connectors/device-mock-mcp"]);
-  await call("ateam_test_abort", { solution_id: "walkmate", skill_id: "k", job_id: "redeploy-skill-a/b" });
-  assert.deepEqual(hits, ["DELETE /deploy/solutions/walkmate/skills/k/test/redeploy-skill-a%2Fb"],
-    "a legacy job id with '/' must stay one segment");
+  await call("ateam_test_abort", { solution_id: "walkmate", skill_id: "k", job_id: "redeploy-skill-a--b" });
+  assert.deepEqual(hits, ["DELETE /deploy/solutions/walkmate/skills/k/test/redeploy-skill-a--b"]);
   await call("ateam_github_read", { solution_id: "walkmate", path: "skills/a b/skill.json", ref: "dev" });
   assert.deepEqual(hits, ["GET /deploy/solutions/walkmate/github/read?path=skills%2Fa+b%2Fskill.json&branch=dev"]);
 });
 
 test("pathSeg and apiPath: check, then encode; query values encoded; rawQuery untouched", () => {
-  for (const ok of ["walkmate", "Walk_Mate-2", "mcp:w:p", "a/b", "v1.2", 42]) {
+  for (const ok of ["walkmate", "Walk_Mate-2", "mcp:w:p", "v1.2", "a--b", 42]) {
     assert.equal(pathSeg(ok), encodeURIComponent(String(ok)), String(ok));
   }
   for (const bad of [...PAYLOADS, undefined, null, {}, NaN, "x\ny"]) {
@@ -106,6 +108,50 @@ test("pathSeg and apiPath: check, then encode; query values encoded; rawQuery un
   assert.equal(apiPath`/deploy/jobs/${"j"}/chain?${rawQuery(qs)}`, "/deploy/jobs/j/chain?x=1&y=2");
   assert.equal(apiPath`/deploy/solutions/${"s"}/logs${rawQuery("")}`, "/deploy/solutions/s/logs");
   assert.throws(() => apiPath`/deploy/solutions/${"..?force=true"}`, /Nothing was sent/);
+});
+
+// ─── ids that come back from the server, and ids that go into a body ───────
+
+const withinMs = (ms, p) => Promise.race([p, new Promise((r) => setTimeout(() => r("STILL RUNNING"), ms))]);
+
+test("a job id apiPath refuses is refused at once — not polled for the whole budget, then 'timed out'", async () => {
+  // pollDeployJob, via ateam_github_pull's async kick.
+  const t0 = Date.now();
+  const pull = await withinMs(1500, call("ateam_github_pull", { solution_id: "walkmate" },
+    { "POST /deploy/solutions/walkmate/github/pull": { body: { ok: true, async: true, job_id: "../x" } } }));
+  assert.notEqual(pull, "STILL RUNNING", "pollDeployJob kept polling a job id it can never send");
+  assert.deepEqual(hits.filter((h) => h.startsWith("GET ")), [], `polled: ${hits.join(", ")}`);
+  assert.match(pull.text, /cannot be used as an id in a URL path/);
+  assert.ok(Date.now() - t0 < 1500);
+
+  // build_and_run's own async poll, after a sync 524.
+  const bar = await withinMs(1500, call("ateam_build_and_run", { solution: { id: "sol", name: "Sol" }, skills: [{ id: "s1" }], mcp_store: {} }, {
+    "POST /validate/solution": { body: { ok: true, errors: [], warnings: [] } },
+    "POST /deploy/solution": { status: 524, body: "A timeout occurred" },
+  }));
+  assert.notEqual(bar, "STILL RUNNING", "build_and_run kept polling a job id it can never send");
+  assert.deepEqual(hits.filter((h) => h.startsWith("GET /deploy/jobs")), [], `polled: ${hits.join(", ")}`);
+});
+
+test("ateam_get_solution's skill_id goes through apiPath like every other id", async () => {
+  const { res } = await call("ateam_get_solution", { solution_id: "walkmate", skill_id: "../x" });
+  assert.deepEqual(hits, [], `sent: ${hits.join(", ")}`);
+  assert.equal(res.structuredContent?.code, "INVALID_PATH_PARAM");
+  await call("ateam_get_solution", { solution_id: "walkmate", skill_id: "walk-guide" });
+  assert.deepEqual(hits, ["GET /deploy/solutions/walkmate/skills/walk-guide"]);
+});
+
+test("a solution id no path could carry is refused before it is deployed — build_and_run and deploy_solution", async () => {
+  for (const id of ["a/b", "x?force=true", "..", "a b"]) {
+    for (const [tool, args] of [
+      ["ateam_build_and_run", { solution: { id, name: "S" }, skills: [{ id: "s1" }], mcp_store: {} }],
+      ["ateam_deploy_solution", { solution: { id, name: "S" }, skills: [] }],
+    ]) {
+      const { res } = await call(tool, args);
+      assert.deepEqual(hits, [], `${tool} with solution.id ${JSON.stringify(id)} sent: ${hits.join(", ")}`);
+      assert.equal(res.structuredContent?.code, "INVALID_PATH_PARAM", `${tool} ${JSON.stringify(id)}`);
+    }
+  }
 });
 
 // ─── the guard ──────────────────────────────────────────────────────────────
@@ -122,6 +168,12 @@ test("GUARD: every API path in src/ with an interpolation is built by apiPath", 
       const tagged = src.slice(Math.max(0, m.index - 7), m.index) === "apiPath";
       if (!tagged) offenders.push(`${f}:${line(m.index)} raw template: \`${m[1].slice(0, 90)}\``);
       else if (/encodeURIComponent\(/.test(m[1])) offenders.push(`${f}:${line(m.index)} encoded twice: \`${m[1].slice(0, 90)}\``);
+    }
+    // A path built on a variable base (`${base}/skills/${skill_id}`): the tag
+    // cannot check what follows a base it did not build, so such a path is
+    // written out in full with apiPath instead.
+    for (const m of src.matchAll(/`\$\{[A-Za-z_$][\w$.]*\}\/[^/`][^`]*?\$\{[^`]*`/g)) {
+      offenders.push(`${f}:${line(m.index)} built on a variable base: ${m[0].slice(0, 90)}`);
     }
     // A path glued together with +.
     for (const m of src.matchAll(new RegExp(`["'\`]${API_PREFIX}[^"'\`]*["'\`]\\s*\\+`, "g"))) {

@@ -27,15 +27,14 @@ export class InvalidPathParam extends Error {
   }
 }
 
-// `?` `#` start a query or fragment, `%` would smuggle a pre-encoded one
-// (%2e%2e is a dot-segment to a URL parser), `\` is a separator to some
-// parsers, and whitespace or a control character is in no id.
-const NOT_IN_AN_ID = /[?#%\\\s\x00-\x1f\x7f]/;
+// `/` and `\` separate segments, `?` `#` start a query or fragment, `%` would
+// smuggle a pre-encoded one (%2e%2e is a dot-segment to a URL parser), and
+// whitespace or a control character is in no id. The Builder answers 400 to
+// any "/" in these params, so no working flow sends one.
+const NOT_IN_AN_ID = /[/?#%\\\s\x00-\x1f\x7f]/;
 
 /**
- * One path segment: the value checked, then percent-encoded. A `/` is allowed
- * and encoded (%2F), because older skill-validators minted job ids that
- * contain one; it cannot climb, since only a whole "." or ".." segment does.
+ * One path segment: the value checked, then percent-encoded.
  * @param {unknown} value
  * @returns {string}
  */

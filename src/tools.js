@@ -68,7 +68,7 @@ import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { isTimeoutError } from "./api.js";
-import { apiPath, rawQuery } from "./pathParam.js";
+import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
 // three different things here (the mac1 container, npm, and each developer's local
@@ -98,16 +98,14 @@ export const MCP_VERSION = (() => {
 async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000, intervalMs = 2000 } = {}) {
   const start = Date.now();
   let lastStatus = null;
-  // apiPath encodes jobId — older skill-validators returned composite job IDs
-  // with literal `/` (e.g. `redeploy-skill-personal-adas/pa-orchestrator-...`)
-  // which broke the Express route /deploy/jobs/:jobId. Polling silently
-  // 404'd every iteration until the MCP host's stdio idle timeout fired
-  // (~30s) and dropped the connection. Encoding here is defense-in-depth
-  // even after the server-side fix that replaced `/` with `--`.
+  // Built ONCE, before the loop. Inside the try, an id apiPath refuses was
+  // caught as a "transient" poll error and retried for the whole budget, then
+  // reported as "polling timed out". Refused now, at once, with nothing sent.
+  const jobPath = apiPath`/deploy/jobs/${jobId}`;
   while (Date.now() - start < maxMs) {
     await new Promise(r => setTimeout(r, intervalMs));
     try {
-      const job = await get(apiPath`/deploy/jobs/${jobId}`, sid);
+      const job = await get(jobPath, sid);
       lastStatus = job?.status;
       if (job?.status === 'done' || job?.status === 'failed') {
         return job; // job entry has the full result merged in
@@ -4156,6 +4154,9 @@ export const handlers = {
     if (!solutionId) {
       return { ok: false, phase: "pre_check", error: "Provide either solution (object) or solution_id (string)." };
     }
+    // An id no path can carry is refused before anything is sent: deployed, it
+    // would be a solution no later tool call could address.
+    pathSeg(solutionId);
     const phases = [];
 
     // Guard: reject large mcp_store — agent should use github_patch instead
@@ -4435,13 +4436,15 @@ export const handlers = {
         if (asyncResult.job_id) {
           // Poll for completion (up to 10 min)
           const jobId = asyncResult.job_id;
+          // Built once, before the loop: see pollDeployJob.
+          const jobPath = apiPath`/deploy/jobs/${jobId}`;
           const maxWait = 600_000;
           const pollInterval = 5_000;
           const start = Date.now();
           while (Date.now() - start < maxWait) {
             await new Promise(r => setTimeout(r, pollInterval));
             try {
-              const job = await get(apiPath`/deploy/jobs/${jobId}`, sid);
+              const job = await get(jobPath, sid);
               if (job.status === 'done' || job.status === 'failed') {
                 deploy = job;
                 phases.push({ phase: "deploy", status: job.status });
@@ -5337,8 +5340,11 @@ export const handlers = {
   ateam_validate_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
     post("/validate/solution", { solution, skills, connectors, mcp_store }, sid),
 
-  ateam_deploy_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
-    post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid),
+  // solution.id is checked before the deploy, as in ateam_build_and_run.
+  ateam_deploy_solution: async ({ solution, skills, connectors, mcp_store }, sid) => {
+    pathSeg(solution?.id);
+    return post("/deploy/solution", { solution, skills, connectors, mcp_store }, sid);
+  },
 
   ateam_deploy_skill: async ({ solution_id, skill }, sid) =>
     post(apiPath`/deploy/solutions/${solution_id}/skills`, { skill }, sid),
@@ -5418,7 +5424,7 @@ export const handlers = {
     const base = apiPath`/deploy/solutions/${solution_id}`;
     const paged = (offset != null || limit != null);
     if (skill_id) {
-      const r = await get(`${base}/skills/${skill_id}`, sid);
+      const r = await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
       // OPEN-8: a single skill def can be 50KB+ and truncate at the output cap.
       // `section` slices it to one field (dotted paths ok, e.g. intents.supported);
       // offset/limit page the raw bytes — so a big skill is always readable.

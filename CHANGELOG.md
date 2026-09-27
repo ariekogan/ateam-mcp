@@ -11,9 +11,15 @@
   confirm. `ateam_delete_skill` and `ateam_delete_connector` did the same with
   `"..?force=true"`, `"%2e%2e?force=true"` or `"walkmate?force=true#"`.
   Every API path is now built by one tag, `apiPath` in `src/pathParam.js`. It
-  refuses a value that cannot be an id (`.`, `..`, `?`, `#`, `%`, `\`,
+  refuses a value that cannot be an id (`.`, `..`, `/`, `?`, `#`, `%`, `\`,
   whitespace, or empty) before any request, and percent-encodes every other
-  value. A test fails on any API path built another way.
+  value. A test fails on any API path built another way, including one
+  built on a variable base.
+- A job id the tag refuses fails at once, instead of being polled for the
+  whole budget and reported as "polling timed out".
+- `ateam_build_and_run` and `ateam_deploy_solution` refuse a `solution.id`
+  that no path could carry, before deploying a solution that no later call
+  could address.
 
 ## 0.4.106 — 2026-09-27
 
