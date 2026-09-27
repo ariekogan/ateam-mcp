@@ -28,8 +28,9 @@
   a timeout, a gateway's 502/504 page, or a hop's bare `{ok:false,error}`.
   A read is a GET, or a POST declared `idempotent`: the validators,
   `ateam_design_advisor`, `ateam_spec_search`, the delete preview,
-  `build_and_run`'s validate phase, and reconcile/sync-from-main with
-  `dry_run:true`. A write is not re-sent, and its 5xx hint no longer says "Try
+  `build_and_run`'s validate phase and its Phase 0 pull-bundle, and
+  sync-from-main with `dry_run:true`. Reconcile is not a read even as a dry
+  run: the Builder merges before it checks `dryRun`. A write is not re-sent, and its 5xx hint no longer says "Try
   again in a minute". `api.js` `mayAutoRetry` decides this for every request.
 - `ateam_redeploy`, `ateam_github_pull`, `ateam_upload_connector` and
   `ateam_create_plugin` fall back from their async kick to the sync call only

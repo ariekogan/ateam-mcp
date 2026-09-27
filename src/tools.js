@@ -4347,7 +4347,9 @@ export const handlers = {
           `/deploy/solutions/${solutionId}/github/pull-bundle`,
           { branch: BRANCH_WORKFLOW.deploy_branch },
           sid,
-          { timeoutMs: 60_000 },
+          // A read over POST (it bundles the repo, writes nothing): declared
+          // idempotent, so one lost answer does not fail the whole deploy.
+          { timeoutMs: 60_000, idempotent: true },
         );
         if (!pullResult.ok) {
           return {
@@ -6639,7 +6641,7 @@ export const handlers = {
 
   ateam_github_reconcile: async ({ solution_id, dry_run }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
-    return await post(`/deploy/solutions/${solution_id}/reconcile`, { dry_run: dry_run === true }, sid, { idempotent: dry_run === true });
+    return await post(`/deploy/solutions/${solution_id}/reconcile`, { dry_run: dry_run === true }, sid);
   },
 
   ateam_github_sync_from_main: async ({ solution_id, dry_run }, sid) =>

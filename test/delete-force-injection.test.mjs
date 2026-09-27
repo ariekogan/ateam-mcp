@@ -499,9 +499,9 @@ test("vj-probe C + R5: the pure reads over POST/DELETE are re-sent after a lost 
   const cases = [
     ["ateam_validate_solution", { solution: { id: "walkmate" }, skills: [] }, "/validate/solution", true],
     ["ateam_delete_solution (preview)", { solution_id: "walkmate" }, "/deploy/solutions/walkmate", true],
-    ["ateam_github_reconcile dry_run", { solution_id: "walkmate", dry_run: true }, "/reconcile", true],
     ["ateam_github_sync_from_main dry_run", { solution_id: "walkmate", dry_run: true }, "/sync-from-main", true],
-    ["ateam_github_reconcile (not a dry run)", { solution_id: "walkmate" }, "/reconcile", false],
+    // Not a read even as a dry run: the Builder's reconcileBranches merges before it checks dryRun.
+    ["ateam_github_reconcile dry_run", { solution_id: "walkmate", dry_run: true }, "/reconcile", false],
   ];
   for (const [label, args, path, read] of cases) {
     t.mock.timers.reset();
@@ -524,6 +524,28 @@ test("vj-probe C + R5: the pure reads over POST/DELETE are re-sent after a lost 
       return json(404, { error: "no route" });
     }, { advanceMs: 20_000 });
   assert.equal(validates, 2, `build_and_run's validate phase was sent ${validates} times`);
+});
+
+test("build_and_run Phase 0: a lost answer from pull-bundle (a read) is re-sent, and the deploy proceeds", async (t) => {
+  let bundles = 0;
+  let deploys = 0;
+  const log = await drive(t,
+    () => handleToolCall("ateam_build_and_run", { solution_id: "sol", github: true }, SID),
+    (_n, _o, url) => {
+      const u = String(url).split("?")[0];
+      if (u.endsWith("/github/pull-bundle")) {
+        return ++bundles === 1
+          ? new Response("<html>502 Bad Gateway</html>", { status: 502 })
+          : json(200, { ok: true, solution: { id: "sol", name: "Sol" }, skills: [{ id: "s1" }], mcp_store: {} });
+      }
+      if (u.endsWith("/validate/solution")) return json(200, { ok: true, errors: [], warnings: [] });
+      if (u.endsWith("/deploy/solution")) { deploys += 1; return json(200, { ok: true, import: { skills: ["s1"], connectors: 0 } }); }
+      return json(404, { error: "no route" });
+    }, { advanceMs: 20_000 });
+  assert.equal(bundles, 2, `pull-bundle was sent ${bundles} times: one 502 must be re-sent once`);
+  assert.equal(deploys, 1, "the deploy did not proceed after pull-bundle was re-sent");
+  assert.ok(log.settled);
+  assert.notEqual(toolOut(log).phase, "github_pull", `the deploy failed at pull-bundle: ${log.value.content[0].text.slice(0, 300)}`);
 });
 
 test("R5: formatError tells a read to try again, never a write", () => {
