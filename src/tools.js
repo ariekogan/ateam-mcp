@@ -67,7 +67,7 @@ import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agent
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
-import { isTimeoutError } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
@@ -738,6 +738,126 @@ function _guardArrayReplace({ target, key, value, current, updates }) {
   };
 }
 
+// ─── Deletes: what they do, and how a forced solution delete answers ─
+//
+// SAID ONCE. The tool descriptions, the refusals and the preview's _next all
+// quote these, so what a caller reads before a delete cannot drift between
+// them. The recovery sentences are CORE's (2026-09-27). They replace "RECOVERY:
+// ateam_github_pull rebuilds from main", which named a repo the delete itself
+// empties, and a recovery for runtime data that has none.
+const DELETE_SOLUTION_EFFECT =
+  "It removes EVERY skill and connector from the tenant's Core registry, including any ORPHAN that no longer " +
+  "belongs to a solution, and deletes the solution record and its Builder records. It WIPES the tenant's " +
+  "conversations and history, memory facts and stored actor data, and clears the voice configuration. It KEEPS " +
+  "the tenant account, its members and its settings.";
+const GIT_RECOVERY =
+  "Code and config can be recovered from git history, and rolling main back to a prod tag restores the files.";
+const DELETE_SOLUTION_RECOVERY =
+  `${GIT_RECOVERY} Conversations, memory and stored data are gone and cannot be recovered.`;
+
+// THE BUILDER'S SOLUTION-ID RULE, the same pattern (apps/backend/src/store/
+// solutions.js validateSolutionId). The id is a PATH SEGMENT. It was pasted
+// into the URL raw, so solution_id:"walkmate?force=true" turned a PREVIEW into
+// a forced delete that no confirm had approved, and "../x" left the route. An
+// id the Builder would refuse is refused here before any request is sent, and
+// every path still encodes it. Exported for the test that holds it to the
+// Builder's pattern.
+export const SOLUTION_ID_RX = /^[a-z0-9][a-z0-9_-]{0,127}$/i;
+
+// ONE ATTEMPT, ANSWERED BEFORE THE EDGE GIVES UP. Cloudflare answers 524 at
+// ~100s, and CORE budgets the whole delete at ~90s end to end (Core's job stop
+// alone may take 20s). 95s is past the delete's budget and under the edge's.
+// It used to be the request default: 120s, with two silent re-sends.
+const FORCE_DELETE_TIMEOUT_MS = 95_000;
+
+// Stopped part-way, and re-running finishes it: every step is idempotent for
+// exactly this (Core Docs/SOLUTION_DELETE_CONTRACT.md).
+const DELETE_RERUN_SAFE = new Set([
+  "SOLUTION_TEARDOWN_INCOMPLETE", "SOLUTION_RESET_INCOMPLETE", "GITHUB_CLEANUP_INCOMPLETE",
+]);
+// The server answered, but only to say that what it waited on did not.
+const DELETE_NO_ANSWER_CODES = new Set(["BUILDER_NO_ANSWER", "CORE_NO_ANSWER"]);
+
+// Until the Builder joins a delete already in flight (its PR-1), re-issuing
+// starts a second run, so the preview comes first.
+const deleteNoAnswerNext = (id) =>
+  `The delete may have run. Call the preview first (ateam_delete_solution(solution_id:"${id}") without force), ` +
+  "then re-issue the forced delete only if it still shows the solution.";
+
+// The socket died after the request went out: it may have run.
+const SOCKET_LOST = new Set(["ECONNRESET", "UND_ERR_SOCKET", "EPIPE"]);
+
+function forceDeleteNext(code, status, id) {
+  if (status === 504 || status === 524 || DELETE_NO_ANSWER_CODES.has(code)) return deleteNoAnswerNext(id);
+  if (DELETE_RERUN_SAFE.has(code)) {
+    return `The delete stopped part-way (${code}); the steps above say what ran. Re-running is safe and finishes it: ` +
+      `ateam_delete_solution(solution_id:"${id}", confirm:true, confirm_solution_id:"${id}", force:true).`;
+  }
+  if (code === "SOLUTION_NOT_FOUND" || status === 404) {
+    return `Do not retry: there is no solution "${id}" in this tenant, so nothing was deleted. ateam_list_solutions shows its id.`;
+  }
+  if (status === 401 || status === 403) {
+    return "Do not retry: this key may not delete the solution, and the same call gets the same refusal. Fix the credentials first.";
+  }
+  if (status === 400) return "Do not retry: the request was refused as invalid. Fix what `error` says first.";
+  return "The delete did not finish, and `error` above says where it stopped. It was NOT re-sent. Before issuing it " +
+    `again, run the preview (ateam_delete_solution(solution_id:"${id}") without force) to see what is still there.`;
+}
+
+/**
+ * What a forced delete that did not succeed hands back. It is sent ONCE
+ * (retries:0), so this is the only answer the caller gets.
+ *   - Nothing was sent (a refused connection): thrown as is.
+ *   - The server answered: a verdict with a `code` (jsonVerdictOf), or any
+ *     JSON 4xx. That body whole, plus http_status and a _next from its code.
+ *   - Anything else: NO_ANSWER, and the delete may have run. That covers this
+ *     call's timeout, a 5xx without a code (a gateway page, a Cloudflare 520,
+ *     or the skill-validator's own {ok:false,error} for a hop it lost), and a
+ *     socket that died after the request went out. A body that came with it
+ *     is kept under `upstream`.
+ */
+function forceDeleteFailure(err, id) {
+  if (err?.neverSent) throw err;
+  const status = err?.status;
+  const body = jsonBodyOf(err?.body);
+  const answer = jsonVerdictOf(err?.body) || (status >= 400 && status < 500 ? body : null);
+  if (answer) {
+    return { ...answer, ok: false, http_status: status, _next: forceDeleteNext(answer.code, status, id) };
+  }
+  if (status >= 400 && status < 500) throw err;
+  if (isTimeoutError(err) || status >= 500 || SOCKET_LOST.has(err?.cause?.code)) {
+    const what = err.timedOut ? `no answer within ${FORCE_DELETE_TIMEOUT_MS / 1000}s`
+      : status ? `HTTP ${status} with no verdict (no \`code\`)`
+      : `the connection was lost after the request was sent (${err.cause?.code || err.message})`;
+    return {
+      ok: false,
+      code: "NO_ANSWER",
+      solution_id: id,
+      http_status: status ?? null,
+      error: `No verdict came back for the forced delete of "${id}" (${what}). It was sent once and NOT re-sent.`,
+      ...(body && { upstream: body }),
+      _next: deleteNoAnswerNext(id),
+    };
+  }
+  throw err;
+}
+
+/**
+ * ONE answer to "may an async kick that failed be sent again the old,
+ * synchronous way?" Only when the kick provably never reached the server
+ * (api.js marks a refused connection `neverSent`), or when the server said it
+ * has no such door (404/405). Any other failure means the server may have
+ * started the work: re-sending it is a second write, so the caller gets what
+ * happened. The sync fallback was taken on ANY failure (redeploy, github_pull,
+ * upload_connector, create_plugin): a JSON 502 verdict or a kick that took
+ * longer than 30s was sent again.
+ * @param {any} err  the error the async kick threw
+ * @returns {boolean}
+ */
+function kickFallsBackToSync(err) {
+  return err?.neverSent === true || err?.status === 404 || err?.status === 405;
+}
+
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -1253,20 +1373,21 @@ export const tools = [
     name: "ateam_delete_solution",
     core: true,
     description:
-      "⚠️ IRREVERSIBLE — THIS CLEARS THE WHOLE TENANT, not just the named solution. " +
-      "TENANT === SOLUTION, so it wipes EVERY skill and connector in the tenant's Core registry, the solution record, " +
-      "and Builder FS — INCLUDING any orphaned skill that no longer belongs to a solution. The name says 'solution'; the " +
-      "blast radius is the tenant. Read the tenant's skill list first (ateam_get_solution view:'skills' or Core's registry) " +
-      "and know what you are destroying — an orphan from an earlier solution is still in there and still goes. " +
+      "⚠️ IRREVERSIBLE — THIS CLEARS THE WHOLE TENANT, not just the named solution. TENANT === SOLUTION. " +
+      DELETE_SOLUTION_EFFECT + " " +
+      "The name says 'solution'; the blast radius is the tenant. Read the tenant's skill list first " +
+      "(ateam_get_solution view:'skills' or Core's registry) and know what you are destroying — an orphan from an " +
+      "earlier solution is still in there and still goes. " +
       "REQUIRES `confirm:true` AND `confirm_solution_id` echoing the solution id you're destroying (defeats typos and hallucinated ids). " +
-      "RECOVERY: only what GitHub holds. `ateam_github_pull` rebuilds from `main` — anything never pushed there is GONE. " +
+      "A forced delete is sent ONCE and never re-sent: if it answers NO_ANSWER, check with the preview before issuing it again. " +
+      "RECOVERY: " + DELETE_SOLUTION_RECOVERY + " " +
       "A skill authored FS-only, or orphaned before its solution was pushed, has no copy anywhere.",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: {
           type: "string",
-          description: "The solution ID to delete",
+          description: "The solution ID to delete. Letters, digits, '-' and '_' only: anything else is refused before any request is sent.",
         },
         confirm: {
           type: "boolean",
@@ -1280,7 +1401,8 @@ export const tools = [
           type: "boolean",
           description:
             "Omit (DEFAULT) to PREVIEW: returns will_clear — every skill and connector that would be destroyed, with " +
-            "orphan_skills called out separately — and clears NOTHING. Pass true only after reading that list. The " +
+            "orphan_skills called out separately — and clears NOTHING. The conversations, memory and stored data a " +
+            "forced delete wipes are not in that list. Pass true only after reading it. The " +
             "preview exists because a description cannot name the orphan you did not know was in the registry.",
         },
       },
@@ -1291,8 +1413,9 @@ export const tools = [
     name: "ateam_delete_skill",
     core: true,
     description:
-      "⚠️ IRREVERSIBLE in Core + Builder FS — kills the running MCP process, unregisters from skill registry, deletes the Mongo record, drops from solution.skills[] and solution.linked_skills, and removes the skill's files from Builder FS. " +
-      "REQUIRES `confirm:true`. RECOVERY: the skill still lives in GitHub — `ateam_github_pull` rebuilds the whole solution (no per-skill restore path).",
+      "⚠️ IRREVERSIBLE — kills the running MCP process, unregisters from skill registry, deletes the Mongo record, drops from solution.skills[] and solution.linked_skills, and removes the skill's files from Builder FS. " +
+      "ALSO REMOVES THE SOURCE: `skills/<id>/` is deleted from the repo on BOTH dev and main in the same call. If that removal fails, the response says so under `github`. " +
+      "REQUIRES `confirm:true`. RECOVERY: " + GIT_RECOVERY + " There is no per-skill restore path.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4119,7 +4242,8 @@ export const handlers = {
     // header rides along (post() sets it), so the Builder resolves this tenant's
     // LLM via Core's sys.llm gateway (stage→tier→model, transparent — no keys in
     // the Builder). Reachable externally on prod: the relay forwards /spec/*.
-    return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1 });
+    // A read over POST: declared idempotent, so a transport failure may be re-sent (api.js mayAutoRetry).
+    return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1, idempotent: true });
   },
 
   // Semantic search over the full /spec corpus. Reaches the sysSpecSearch-mcp
@@ -4135,7 +4259,8 @@ export const handlers = {
       apiPath`/deploy/solutions/${sol}/connectors/sysSpecSearch-mcp/call`,
       { tool: "sysSpecSearch.search", args: { query, ...(top_k ? { top_k } : {}) } },
       sid,
-      { timeoutMs: 30_000, retries: 1 },
+      // A search over POST: declared idempotent (api.js mayAutoRetry).
+      { timeoutMs: 30_000, retries: 1, idempotent: true },
     );
     // Unwrap the MCP tool result: { result: { content: [{ type:"text", text }] } }.
     const text = r?.result?.content?.[0]?.text;
@@ -4223,7 +4348,9 @@ export const handlers = {
           apiPath`/deploy/solutions/${solutionId}/github/pull-bundle`,
           { branch: BRANCH_WORKFLOW.deploy_branch },
           sid,
-          { timeoutMs: 60_000 },
+          // A read over POST (it bundles the repo, writes nothing): declared
+          // idempotent, so one lost answer does not fail the whole deploy.
+          { timeoutMs: 60_000, idempotent: true },
         );
         if (!pullResult.ok) {
           return {
@@ -4334,7 +4461,7 @@ export const handlers = {
     // Phase 1: Validate
     let validation;
     try {
-      validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000 });
+      validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000, idempotent: true });
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
       // A DEAD SOCKET IS NOT A FORMAT ERROR. "fetch failed" / ECONNREFUSED /
@@ -4422,7 +4549,10 @@ export const handlers = {
       deploy = await post("/deploy/solution", deployBody, sid, { timeoutMs: 120_000 });
       phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
     } catch (err) {
-      if (!isTimeoutError(err)) {
+      // A VERDICT IS NOT A TIMEOUT. isTimeoutError counts every 502, so a 502
+      // whose body named what failed was re-POSTed in async mode. Only a
+      // failure with no verdict may move to the async door.
+      if (!isTimeoutError(err) || jsonVerdictOf(err.body)) {
         return { ok: false, phase: "deployment", phases, error: err.message, validation_warnings: validation.warnings || [] };
       }
 
@@ -5335,10 +5465,12 @@ export const handlers = {
 
   // ─── Original handlers (unchanged) ────────────────────────────────
 
-  ateam_validate_skill: async ({ skill }, sid) => post("/validate/skill", { skill }, sid),
+  // Validation is a read over POST: declared idempotent, so a transport failure
+  // may still be re-sent (api.js mayAutoRetry).
+  ateam_validate_skill: async ({ skill }, sid) => post("/validate/skill", { skill }, sid, { idempotent: true }),
 
   ateam_validate_solution: async ({ solution, skills, connectors, mcp_store }, sid) =>
-    post("/validate/solution", { solution, skills, connectors, mcp_store }, sid),
+    post("/validate/solution", { solution, skills, connectors, mcp_store }, sid, { idempotent: true }),
 
   // solution.id is checked before the deploy, as in ateam_build_and_run.
   ateam_deploy_solution: async ({ solution, skills, connectors, mcp_store }, sid) => {
@@ -5580,16 +5712,13 @@ export const handlers = {
       // "misconfigured" (no probe ticket), "bad_input" / "forbidden" (Core refused
       // the call). Those are failed calls, and a verdict tool says so in `error`
       // (mcpFailure.isLogicalFailure) — none of them carries one.
-      if (typeof err?.body === "string" && err.body) {
-        let parsed = null;
-        try { parsed = JSON.parse(err.body); } catch { /* not the probe's body — fall through */ }
-        if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) {
-          if (parsed.verdict !== "surface_failed" && parsed.error == null) {
-            const why = Array.isArray(parsed.failures) && parsed.failures.length ? `: ${parsed.failures.join("; ")}` : "";
-            parsed.error = `the surface probe did not run (verdict ${parsed.verdict || "none"})${why}`;
-          }
-          return parsed;
+      const parsed = jsonBodyOf(err?.body);
+      if (parsed && (parsed.verdict || Array.isArray(parsed.failures))) {
+        if (parsed.verdict !== "surface_failed" && parsed.error == null) {
+          const why = Array.isArray(parsed.failures) && parsed.failures.length ? `: ${parsed.failures.join("; ")}` : "";
+          parsed.error = `the surface probe did not run (verdict ${parsed.verdict || "none"})${why}`;
         }
+        return parsed;
       }
       throw err;
     }
@@ -6060,8 +6189,7 @@ export const handlers = {
       // solution_id, when the true state is "Core may be running this connector
       // and nobody can reproduce it". Say that, and name the two tools that act
       // on it, instead of leaving the agent to improvise a rewrite.
-      let parsed = null;
-      try { parsed = JSON.parse(err.body || "{}"); } catch { /* not JSON */ }
+      const parsed = jsonBodyOf(err.body);
       if (err.status === 404 && parsed?.code === "AUTHORED_SOURCE_MISSING") {
         return {
           ok: false,
@@ -6153,8 +6281,7 @@ export const handlers = {
     } catch (err) {
       // The refusal is the point of the tool, so report it as a decision the
       // caller has to make rather than as a failure it should retry past.
-      let parsed = null;
-      try { parsed = JSON.parse(err.body || "{}"); } catch { /* not JSON */ }
+      const parsed = jsonBodyOf(err.body);
       if (err.status === 409 && parsed?.code === "AUTHORED_SOURCE_EXISTS") {
         return {
           ok: false,
@@ -6460,8 +6587,9 @@ export const handlers = {
     try {
       kicked = await post(apiPath`/deploy/solutions/${solution_id}/github/pull`, { async: true, ...discard }, sid, { timeoutMs: 30_000 });
     } catch (err) {
+      if (!kickFallsBackToSync(err)) throw err;
       // Sync fallback (older backend without async support)
-      return await post(apiPath`/deploy/solutions/${solution_id}/github/pull`, { ...discard }, sid, { timeoutMs: 300_000, retries: 2 });
+      return await post(apiPath`/deploy/solutions/${solution_id}/github/pull`, { ...discard }, sid, { timeoutMs: 300_000 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async — return as-is
     return await pollDeployJob(kicked.job_id, sid, { label: 'github-pull', maxMs: 15 * 60_000, intervalMs: 2000 });
@@ -6523,7 +6651,7 @@ export const handlers = {
   },
 
   ateam_github_sync_from_main: async ({ solution_id, dry_run }, sid) =>
-    post(apiPath`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid, { idempotent: dry_run === true }),
 
   ateam_github_rollback: async ({ solution_id, target, tag }, sid) =>
     // Accept both `target` (new spec) and `tag` (legacy callers)
@@ -6547,6 +6675,19 @@ export const handlers = {
   // answer "did you mean THIS tenant"; force answers "have you read what is in
   // it". Both are needed, and neither substitutes for the other.
   ateam_delete_solution: async ({ solution_id, confirm, confirm_solution_id, force }, sid) => {
+    // Before anything else, and before any request: see SOLUTION_ID_RX.
+    if (typeof solution_id !== "string" || !SOLUTION_ID_RX.test(solution_id)) {
+      return {
+        ok: false,
+        code: "INVALID_SOLUTION_ID",
+        error:
+          `⚠️ REFUSED: solution_id ${JSON.stringify(solution_id)} is not a solution id (it must match ${SOLUTION_ID_RX}). ` +
+          "Nothing was sent.",
+        hint: "A solution id is letters, digits, '-' and '_' only. ateam_list_solutions shows this tenant's.",
+      };
+    }
+    const solutionPath = apiPath`/deploy/solutions/${solution_id}`;
+
     if (confirm_solution_id !== undefined && confirm_solution_id !== solution_id) {
       return {
         ok: false,
@@ -6558,12 +6699,15 @@ export const handlers = {
 
     // Preview: no confirm needed to LOOK, and looking is the default.
     if (force !== true) {
-      const preview = await del(apiPath`/deploy/solutions/${solution_id}`, sid);
+      // A read (the id check keeps ?force out of the path), so a transport failure may be re-sent.
+      const preview = await del(solutionPath, sid, { idempotent: true });
       return {
         ...preview,
         _next:
           "Nothing was cleared. Read will_clear above — especially orphan_skills, which belong to no solution and " +
-          "are the ones most likely to be unrecoverable. To proceed: ateam_delete_solution(solution_id, " +
+          "are the ones most likely to be unrecoverable. The forced delete also WIPES the tenant's conversations and " +
+          "history, memory facts and stored actor data, which will_clear does not list and which cannot be recovered. " +
+          "To proceed: ateam_delete_solution(solution_id, " +
           `confirm:true, confirm_solution_id:"${solution_id}", force:true)`,
       };
     }
@@ -6572,10 +6716,9 @@ export const handlers = {
       return {
         ok: false,
         error:
-          "⚠️ REFUSED: force:true also requires confirm:true. THIS CLEARS THE WHOLE TENANT — TENANT === SOLUTION, so " +
-          "every skill and connector in the tenant's Core registry goes, including any ORPHAN that no longer belongs " +
-          "to a solution. Recovery reaches only as far as GitHub: anything never pushed is unrecoverable.",
-        recovery: "ateam_github_pull(solution_id, ref:'main') — restores ONLY what `main` holds",
+          "⚠️ REFUSED: force:true also requires confirm:true. THIS CLEARS THE WHOLE TENANT — TENANT === SOLUTION. " +
+          DELETE_SOLUTION_EFFECT,
+        recovery: DELETE_SOLUTION_RECOVERY,
       };
     }
     if (confirm_solution_id !== solution_id) {
@@ -6586,15 +6729,23 @@ export const handlers = {
         received: confirm_solution_id,
       };
     }
-    return del(apiPath`/deploy/solutions/${solution_id}?force=true`, sid);
+    // ONCE. retries:0 says it here; api.js mayAutoRetry refuses to re-send any
+    // write as well. Before, request()'s default re-sent this DELETE on a 502
+    // without reading the body, so the caller saw the answer to the last pass
+    // and never the verdict of the first (B7).
+    try {
+      return await del(`${solutionPath}?force=true`, sid, { retries: 0, timeoutMs: FORCE_DELETE_TIMEOUT_MS });
+    } catch (err) {
+      return forceDeleteFailure(err, solution_id);
+    }
   },
 
   ateam_delete_skill: async ({ solution_id, skill_id, confirm }, sid) => {
     if (confirm !== true) {
       return {
         ok: false,
-        error: `⚠️ REFUSED: ateam_delete_skill requires confirm:true. Kills the running MCP process and deletes the skill from Core + Builder FS. GitHub source is preserved — ateam_github_pull rebuilds the whole solution.`,
-        recovery: "ateam_github_pull(solution_id, ref:'main') — no per-skill restore path",
+        error: `⚠️ REFUSED: ateam_delete_skill requires confirm:true. Kills the running MCP process, deletes the skill from Core + Builder FS, and deletes its source (skills/<id>/) from the repo on BOTH dev and main.`,
+        recovery: `${GIT_RECOVERY} There is no per-skill restore path.`,
       };
     }
     return del(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
@@ -6604,8 +6755,8 @@ export const handlers = {
     if (confirm !== true) {
       return {
         ok: false,
-        error: `⚠️ REFUSED: ateam_delete_connector requires confirm:true. Cascading — any skill wired to this connector's tools will fail its next execution. GitHub source is preserved.`,
-        recovery: "ateam_build_and_run(solution_id, github:true) can resurrect from GitHub",
+        error: `⚠️ REFUSED: ateam_delete_connector requires confirm:true. Cascading — any skill wired to this connector's tools will fail its next execution. It also deletes the source (connectors/<id>/) from the repo on BOTH dev and main: copy it out first (ateam_get_connector_source) if you want the code kept.`,
+        recovery: GIT_RECOVERY,
       };
     }
     return del(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
@@ -6655,7 +6806,8 @@ export const handlers = {
     try {
       kicked = await post(url, { ...body, async: true }, sid, { timeoutMs: 30_000 });
     } catch (err) {
-      return await post(url, body, sid, { timeoutMs: 300_000, retries: 1 });
+      if (!kickFallsBackToSync(err)) throw err;
+      return await post(url, body, sid, { timeoutMs: 300_000 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async
     return await pollDeployJob(kicked.job_id, sid, { label: 'connector-upload', maxMs: 15 * 60_000, intervalMs: 2000 });
@@ -6772,7 +6924,7 @@ export const handlers = {
       apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
       { files, replace: true },
       sid,
-      { timeoutMs: 120_000, retries: 1 },
+      { timeoutMs: 120_000 },
     );
     return {
       ok: true,
@@ -6816,7 +6968,8 @@ export const handlers = {
         ? await pollDeployJob(kicked.job_id, sid, { label: 'create-plugin', maxMs: 15 * 60_000, intervalMs: 2000 })
         : kicked;
     } catch (err) {
-      result = await post(_uploadUrl, { files }, sid, { timeoutMs: 120_000, retries: 1 });
+      if (!kickFallsBackToSync(err)) throw err;
+      result = await post(_uploadUrl, { files }, sid, { timeoutMs: 120_000 });
     }
 
     // Verify the plugin actually became RENDERABLE — poll Core's live catalog
@@ -6893,17 +7046,19 @@ export const handlers = {
     } catch (err) {
       lastErr = err;
       // Sync fallback for backends without async support
-      try {
-        result = await post(endpoint, {}, sid, { timeoutMs: 300_000, retries: 2 });
-        lastErr = null;
-      } catch (syncErr) {
-        lastErr = syncErr;
+      if (kickFallsBackToSync(err)) {
+        try {
+          result = await post(endpoint, {}, sid, { timeoutMs: 300_000 });
+          lastErr = null;
+        } catch (syncErr) {
+          lastErr = syncErr;
+        }
       }
     }
 
     if (!result && lastErr) {
       const notFound = /not found|404|ENOENT/i.test(lastErr.message);
-      const isTimeout = isTimeoutError(lastErr);
+      const isTimeout = isTimeoutError(lastErr) && !jsonVerdictOf(lastErr.body);
       return {
         ok: false,
         error: lastErr.message,
@@ -6914,7 +7069,7 @@ export const handlers = {
           hint: "Skill not found in Builder storage. Write it to the repo with ateam_github_write(solution_id, path: 'skills/<skill-id>/skill.json', content) (or ateam_github_patch for an edit), which also puts it in the Builder, then retry this ateam_redeploy. To ship it: ateam_github_promote, then ateam_build_and_run(solution_id).",
         }),
         ...(isTimeout && {
-          hint: "Redeploy timed out even after async polling (15min). Use ateam_redeploy(solution_id, skill_id: '<specific-skill>') to redeploy one skill at a time.",
+          hint: "The redeploy timed out with no answer, so it may still be running; it was not re-sent. Check ateam_status_all before issuing it again, and for a large solution redeploy one skill at a time: ateam_redeploy(solution_id, skill_id: '<specific-skill>').",
         }),
       };
     }

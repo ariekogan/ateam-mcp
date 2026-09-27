@@ -960,7 +960,13 @@ export function actorNotFound(status, body) {
  * Exported so the hints can be TESTED as behaviour rather than as source text.
  * A test that greps for the right-looking code passes on code that never runs.
  */
-export function formatError(method, path, status, body, baseUrl) {
+export function formatError(method, path, status, body, baseUrl, { read = method === "GET" } = {}) {
+  // A WRITE IS NOT "TRY AGAIN IN A MINUTE". request() does not re-send one
+  // that may have reached the server, and a hint telling the caller to re-send
+  // it would undo that: it may already have run.
+  const again = read
+    ? "Try again in a minute."
+    : "The call was not re-sent: check whether it took effect before issuing it again.";
   const hints = {
     400: "Bad request — see the error details above for what to fix.",
     401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call ateam_auth(api_key: \"your_key\").",
@@ -969,9 +975,9 @@ export function formatError(method, path, status, body, baseUrl) {
     409: "Conflict — the resource may already exist or is in a conflicting state.",
     422: "Validation failed. Check the request payload against the spec (use ateam_get_spec).",
     429: "Rate limited. Wait a moment and try again.",
-    500: "A-Team server error. The platform may be temporarily unavailable. Try again in a minute.",
-    502: "A-Team API is unreachable. The service may be restarting. Try again in a minute.",
-    503: "A-Team API is temporarily unavailable. Try again in a minute.",
+    500: `A-Team server error. The platform may be temporarily unavailable. ${again}`,
+    502: `A-Team API is unreachable. The service may be restarting. ${again}`,
+    503: `A-Team API is temporarily unavailable. ${again}`,
   };
 
   // A 401 IS NOT ALWAYS AN AUTH PROBLEM, AND SAYING SO COSTS A RUN.
@@ -1124,22 +1130,103 @@ export function isTimeoutError(err) {
 }
 
 /**
+ * The JSON object a response body carries, or null when it carries none (an
+ * HTML gateway page, an empty body, a bare string, an array).
+ * @param {unknown} body  the raw response text (err.body)
+ * @returns {object|null}
+ */
+export function jsonBodyOf(body) {
+  if (typeof body !== "string" || !body.trim()) return null;
+  try {
+    const v = JSON.parse(body);
+    return v !== null && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The VERDICT a response body carries: a JSON object with a `code`. Null
+ * otherwise, and that includes a bare {ok:false, error}.
+ *
+ * ONE answer to "did the server that owns this call answer it?". request()'s
+ * retry gate asks it before re-sending a read, and ateam_delete_solution asks
+ * it before calling a failure "no answer". A JSON body alone is not enough:
+ * the skill-validator reports its OWN transport failures ("fetch failed", its
+ * 15s proxy abort) as 502 {ok:false, error} at some 40 sites. That is a hop
+ * saying it lost the answer, not the answer.
+ * @param {unknown} body  the raw response text (err.body)
+ * @returns {object|null}
+ */
+export function jsonVerdictOf(body) {
+  const o = jsonBodyOf(body);
+  return o && typeof o.code === "string" && o.code ? o : null;
+}
+
+/** A read: a GET, or a call its site declared `idempotent`. */
+const isRead = (method, idempotent) => idempotent ?? method === "GET";
+
+/**
+ * ONE answer to "may request() send this again by itself?" (CORE ruling 11,
+ * 2026-09-27). Every retry request() makes goes through here.
+ *
+ * NEVER A RESPONSE THAT CARRIES A VERDICT (jsonVerdictOf), whatever its
+ * status. The server answered. A Builder 502 whose body names the step that
+ * failed is the result, and sending the call again swaps it for the answer to
+ * a different question. B7: a forced ateam_delete_solution got the Builder's
+ * JSON 502 ("a Core cleanup step failed"), and request() re-sent the DELETE
+ * twice without reading the body. The caller saw the last pass, which found
+ * Core already empty and reported `core_skills: []`.
+ *
+ * ANY METHOD, WHEN THE REQUEST PROVABLY NEVER REACHED THE SERVER: the
+ * connection was refused, so not one byte of it was sent. Re-sending that is
+ * not a second write. This is the case c99acb7 (bug #6) was for.
+ *
+ * OTHERWISE ONLY A READ. After the request was sent, a write that got no
+ * answer (this request's own timeout, a gateway's 502/504 page, a hop's bare
+ * {ok:false,error}) may still have run. Sending it again is a second write the
+ * caller never asked for, and it hides what the first one did. A read is
+ * re-sent on those. `idempotent` defaults from the method: GET is a read, and
+ * every other method is a write. A POST that only reads (a validator, a
+ * search, a dry run) passes `{ idempotent: true }` at its call site.
+ * @param {{ method: string, idempotent?: boolean, status?: number, body?: string, noAnswer?: boolean, neverSent?: boolean }} f
+ *   neverSent: the connection was refused (ECONNREFUSED); nothing was sent
+ *   noAnswer: the request was sent and no response arrived (own timeout)
+ * @returns {boolean}
+ */
+export function mayAutoRetry({ method, idempotent, status, body, noAnswer = false, neverSent = false }) {
+  if (neverSent) return true;
+  if (!isRead(method, idempotent)) return false;
+  if (noAnswer) return true;
+  if (status !== 502 && status !== 504) return false;
+  return jsonVerdictOf(body) === null;
+}
+
+/**
  * Core fetch wrapper with timeout and error formatting.
  * @param {string} method
  * @param {string} path
  * @param {*} body
  * @param {string} sessionId
- * @param {{ timeoutMs?: number }} [opts]
+ * @param {{ timeoutMs?: number, retries?: number, idempotent?: boolean }} [opts]
+ *   retries: how many times an IDEMPOTENT READ may be re-sent after a transport
+ *   failure (default 2). It never re-sends a write: mayAutoRetry decides.
+ *   idempotent: declare a non-GET call a read (see mayAutoRetry).
  */
 async function request(method, path, body, sessionId, opts = {}) {
   const timeoutMs = opts.timeoutMs || REQUEST_TIMEOUT_MS;
-  // Default to 2 retries on transient proxy errors (502/504). Existing
-  // gate further down only retries on those status codes — real errors
-  // (4xx, 5xx other than 502/504) still fail fast on attempt 0. Bumping
-  // the default from 0 → 2 protects every wrapper call against a
-  // skill-builder mid-restart 502 (bug #6 in parallel-agent feedback)
-  // without callers having to remember to pass retries everywhere.
+  // 2 since c99acb7 (bug #6: a redeploy hit a 502 while the skill-builder was
+  // restarting). That default re-sent EVERY method, writes included, on any
+  // 502/504 and on this request's own timeout. mayAutoRetry now decides which
+  // failures may be re-sent at all; this is only how many times.
   const maxRetries = opts.retries ?? 2;
+  const mayRetry = (attempt, failure) =>
+    attempt < maxRetries && mayAutoRetry({ method, idempotent: opts.idempotent, ...failure });
+  const backoff = async (attempt, what) => {
+    const wait = Math.min(5000 * (attempt + 1), 15000);
+    console.error(`[MCP] ${method} ${path} ${what}, retrying in ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+    await new Promise(r => setTimeout(r, wait));
+  };
   const baseUrl = getBaseUrl(sessionId);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -1158,16 +1245,14 @@ async function request(method, path, body, sessionId, opts = {}) {
 
       const res = await fetch(`${baseUrl}${path}`, fetchOpts);
 
-      // Auto-retry on 502/504 (proxy timeout during long deploys)
-      if ((res.status === 502 || res.status === 504) && attempt < maxRetries) {
-        const wait = Math.min(5000 * (attempt + 1), 15000);
-        console.error(`[MCP] ${method} ${path} returned ${res.status}, retrying in ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-        await new Promise(r => setTimeout(r, wait));
-        continue;
-      }
-
       if (!res.ok) {
+        // The body is read BEFORE deciding to re-send: a JSON verdict is an
+        // answer, and only the body can say whether there is one.
         const text = await res.text().catch(() => "");
+        if (mayRetry(attempt, { status: res.status, body: text })) {
+          await backoff(attempt, `returned ${res.status} with no verdict`);
+          continue;
+        }
         // SELF-HEAL A BAD ACTOR BINDING. Core saying `Actor "X" not found` is
         // proof the session is carrying an actor that does not exist, and every
         // subsequent request would send it again. Restricting where a bind may
@@ -1189,7 +1274,7 @@ async function request(method, path, body, sessionId, opts = {}) {
         // Attach the HTTP status so callers can distinguish a genuine 404
         // (resource absent) from a transient/5xx failure. ateam_patch relies
         // on this to NOT scaffold-clobber an existing skill on a read error.
-        const e = new Error(formatError(method, path, res.status, text, baseUrl));
+        const e = new Error(formatError(method, path, res.status, text, baseUrl, { read: isRead(method, opts.idempotent) }));
         e.status = res.status;
         // Keep the RAW body on the error. formatError truncates for humans, and
         // an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe's 422
@@ -1203,36 +1288,36 @@ async function request(method, path, body, sessionId, opts = {}) {
       return res.json();
     } catch (err) {
       if (err.name === "AbortError") {
-        if (attempt < maxRetries) {
-          const wait = Math.min(5000 * (attempt + 1), 15000);
-          console.error(`[MCP] ${method} ${path} timed out, retrying in ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-          await new Promise(r => setTimeout(r, wait));
+        if (mayRetry(attempt, { noAnswer: true })) {
+          await backoff(attempt, "timed out");
           continue;
         }
         const t = new Error(
           `A-Team API timeout: ${method} ${path} did not respond within ${timeoutMs / 1000}s.\n` +
+          (isRead(method, opts.idempotent) ? "" : "It was NOT re-sent: a write that got no answer may still have run. Check its effect before issuing it again.\n") +
           `Hint: The A-Team API at ${baseUrl} may be down. Check ${baseUrl}/health`
         );
         t.timedOut = true; // read by isTimeoutError — never the message
         throw t;
       }
+      // NOTHING WAS SENT. `neverSent` on the error lets a caller that falls
+      // back to another door (an async kick's sync fallback) know that the
+      // first one never reached the server.
       if (err.cause?.code === "ECONNREFUSED") {
-        if (attempt < maxRetries) {
-          const wait = Math.min(5000 * (attempt + 1), 15000);
-          console.error(`[MCP] ${method} ${path} connection refused, retrying in ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-          await new Promise(r => setTimeout(r, wait));
+        if (mayRetry(attempt, { neverSent: true })) {
+          await backoff(attempt, "connection refused");
           continue;
         }
-        throw new Error(
-          `Cannot connect to A-Team API at ${baseUrl}.\n` +
+        throw Object.assign(new Error(
+          `Cannot connect to A-Team API at ${baseUrl}. Nothing was sent.\n` +
           `Hint: The service may be down. Check ${baseUrl}/health`
-        );
+        ), { neverSent: true });
       }
       if (err.cause?.code === "ENOTFOUND") {
-        throw new Error(
-          `Cannot resolve A-Team API host: ${baseUrl}.\n` +
+        throw Object.assign(new Error(
+          `Cannot resolve A-Team API host: ${baseUrl}. Nothing was sent.\n` +
           `Hint: Check your internet connection and ADAS_API_URL setting.`
-        );
+        ), { neverSent: true });
       }
       throw err;
     } finally {

@@ -4,6 +4,20 @@
 
 ### Security
 
+- `ateam_delete_solution` no longer lets `solution_id` carry `?force=true`.
+  The id was pasted into the URL raw, so `solution_id:"walkmate?force=true"`
+  in PREVIEW mode sent a forced delete that no `confirm` had approved, and
+  `"../x"` left the route. The id is now checked against the Builder's own rule
+  (`/^[a-z0-9][a-z0-9_-]{0,127}$/i`) and refused with no request sent, and
+  both the preview and the forced call encode it.
+- A forced `ateam_delete_solution` is sent once, with a 95s timeout (under
+  Cloudflare's ~100s). A verdict (a JSON body with a `code`), or any JSON
+  4xx, comes back whole, with `http_status` and a `_next` chosen from its
+  `code`. Anything else returns `NO_ANSWER` and says to call the preview
+  before re-issuing. That covers a timeout, a 5xx without a `code` (a gateway
+  page, a Cloudflare 520, or the skill-validator's own `{ok:false,error}`),
+  and a socket reset after the request was sent.
+
 - No tool puts a caller's id into a URL path raw. Over a hundred API paths in
   `tools.js` pasted ids in as they came. Because fetch normalizes `..`,
   `ateam_test_abort(skill_id:"..", job_id:"..?force=true")` sent
@@ -20,6 +34,39 @@
 - `ateam_build_and_run` and `ateam_deploy_solution` refuse a `solution.id`
   that no path could carry, before deploying a solution that no later call
   could address.
+
+### Retries
+
+- A response whose body carries a verdict (a JSON object with a `code`) is
+  never re-sent, whatever its status: the server answered.
+- A request whose connection was refused is re-sent, whatever its method,
+  because nothing was sent.
+- After the request was sent, only a read is re-sent on a transport failure:
+  a timeout, a gateway's 502/504 page, or a hop's bare `{ok:false,error}`.
+  A read is a GET, or a POST declared `idempotent`: the validators,
+  `ateam_design_advisor`, `ateam_spec_search`, the delete preview,
+  `build_and_run`'s validate phase and its Phase 0 pull-bundle, and
+  sync-from-main with `dry_run:true`. Reconcile is not a read even as a dry
+  run: the Builder merges before it checks `dryRun`. A write is not re-sent,
+  and its 5xx hint no longer says "Try again in a minute". `api.js`
+  `mayAutoRetry` decides this for every request.
+- `ateam_redeploy`, `ateam_github_pull`, `ateam_upload_connector` and
+  `ateam_create_plugin` fall back from their async kick to the sync call only
+  when the kick never reached the server or got a 404/405. Before this, any
+  failure re-sent the write, including a JSON 502 verdict or a kick slower
+  than 30s. `ateam_build_and_run` no longer re-POSTs its deploy in async mode
+  after a 502 that carries a verdict.
+
+### Tools
+
+- `ateam_delete_solution` says that it wipes conversations and history,
+  memory facts and stored actor data, clears voice config, and keeps the tenant
+  account, members and settings. Recovery: code and config can be recovered
+  from git history, and rolling main back to a prod tag restores the files.
+  Conversations, memory and stored data cannot be recovered. It no longer
+  names `ateam_github_pull` as the recovery.
+- `ateam_delete_skill` and `ateam_delete_connector` no longer say the GitHub
+  source is preserved. Both delete it from the repo on dev and main.
 
 ## 0.4.106 — 2026-09-27
 
