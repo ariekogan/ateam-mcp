@@ -18,6 +18,23 @@
   page, a Cloudflare 520, or the skill-validator's own `{ok:false,error}`),
   and a socket reset after the request was sent.
 
+- No tool puts a caller's id into a URL path raw. Over a hundred API paths in
+  `tools.js` pasted ids in as they came. Because fetch normalizes `..`,
+  `ateam_test_abort(skill_id:"..", job_id:"..?force=true")` sent
+  `DELETE /deploy/solutions/<id>?force=true`, a forced tenant wipe with no
+  confirm. `ateam_delete_skill` and `ateam_delete_connector` did the same with
+  `"..?force=true"`, `"%2e%2e?force=true"` or `"walkmate?force=true#"`.
+  Every API path is now built by one tag, `apiPath` in `src/pathParam.js`. It
+  refuses a value that cannot be an id (`.`, `..`, `/`, `?`, `#`, `%`, `\`,
+  whitespace, or empty) before any request, and percent-encodes every other
+  value. A test fails on any API path built another way, including one
+  built on a variable base.
+- A job id the tag refuses fails at once, instead of being polled for the
+  whole budget and reported as "polling timed out".
+- `ateam_build_and_run` and `ateam_deploy_solution` refuse a `solution.id`
+  that no path could carry, before deploying a solution that no later call
+  could address.
+
 ### Retries
 
 - A response whose body carries a verdict (a JSON object with a `code`) is
@@ -30,8 +47,9 @@
   `ateam_design_advisor`, `ateam_spec_search`, the delete preview,
   `build_and_run`'s validate phase and its Phase 0 pull-bundle, and
   sync-from-main with `dry_run:true`. Reconcile is not a read even as a dry
-  run: the Builder merges before it checks `dryRun`. A write is not re-sent, and its 5xx hint no longer says "Try
-  again in a minute". `api.js` `mayAutoRetry` decides this for every request.
+  run: the Builder merges before it checks `dryRun`. A write is not re-sent,
+  and its 5xx hint no longer says "Try again in a minute". `api.js`
+  `mayAutoRetry` decides this for every request.
 - `ateam_redeploy`, `ateam_github_pull`, `ateam_upload_connector` and
   `ateam_create_plugin` fall back from their async kick to the sync call only
   when the kick never reached the server or got a 404/405. Before this, any
