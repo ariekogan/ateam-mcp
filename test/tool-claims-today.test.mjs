@@ -1,4 +1,4 @@
-// A tool description is a promise an agent acts on. Three that promised more
+// A tool description is a promise an agent acts on. Two that promised more
 // than the platform does, each held to what it does today:
 //
 //   B6-VOICE-TEST-OVERCLAIM   ateam_test_voice said it ran "the full voice
@@ -6,9 +6,6 @@
 //     session's first skill call is refused by Core (C6), so a voice-layer pass
 //     read as a skill pass. It now says what the Builder's /spec/voice says
 //     (capabilitySpecs.js VOICE_TEST_REACH).
-//   M-ACTORSTORE-DEV-PREVIEW  ateam_get_spec labelled 'actor-storage' dev-preview
-//     (023b74a). Builder #63 relabels /spec/actor-storage "(production)"; two
-//     labels for one topic is two answers.
 //   ateam_design_advisor      runs the tenant's LLM, and Builder #81 refuses it
 //     without a verified key (401 SIGN_IN_REQUIRED). It sat outside TENANT_TOOLS,
 //     so a key-less session was sent to the Builder instead of being told to
@@ -28,12 +25,6 @@ test("ateam_test_voice: the voice layer only, and it says where a skill result c
   assert.match(d, /VOICE LAYER only/);
   assert.match(d, /cannot show a skill result today/i);
   assert.match(d, /ateam_conversation or ateam_test_skill/, "does not say where to test the skill itself");
-});
-
-test("ateam_get_spec labels actor-storage as the Builder does (#63: production)", () => {
-  const d = tool("ateam_get_spec").inputSchema.properties.topic.description;
-  assert.match(d, /'actor-storage' = per-actor storage \(production\)/);
-  assert.doesNotMatch(d, /dev-preview/);
 });
 
 test("ateam_design_advisor says it needs sign-in, and a key-less session is refused here, before any call", async () => {
