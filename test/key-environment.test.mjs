@@ -26,10 +26,26 @@ const HEX = "0123456789abcdef0123456789abcdef";
 const DEV_KEY = `adas_dev_acme_${HEX}`;
 const PROD_KEY = `adas_prod_acme_${HEX}`;
 const OLD_KEY = `adas_acme_${HEX}`;
-// A real sealed key Core minted on mac1 dev. Kept verbatim so these tests pin
-// the ACTUAL format, not my reading of a description of it. Note the `_` inside
-// the blob — base64url overlaps the separator, which is why order matters.
-const SEALED_KEY = "adas_dev_AdEqxaD9XtOmWBHbIqt0yFC0o3qDz-uPte_SUUni1VZoCHnLQElOQ-hFvnz1oL8";
+// A sealed key in the layout Core mints (ai-dev-assistant
+// apps/backend/utils/apiKeySealing.js, sealKeyBody, 2aadba0b4):
+//   adas_<env>_ + base64url([version 1][iv 8][AES-256-GCM(tenant)][tag 8][secret 16])
+// BUILT, NOT PASTED. The bytes are synthetic, so nothing here authenticates
+// anywhere, and nothing here decodes a blob (see the sealed-keys section). A key
+// Core really minted sat here verbatim (47dea01): a sealed literal cannot be told
+// from a live credential by eye, and test/no-committed-keys.test.mjs now refuses
+// one anywhere in src/ or test/. What the real key was kept to pin is pinned by
+// assertion instead (see "the fixture has the minted shape"): a 14-byte tenant
+// (whoami's "ateam-mcp-test" below) makes 47 bytes = 63 characters, the length
+// Core mints, and the blob holds `_` and `-` — base64url overlaps the separator,
+// which is why parse ORDER matters.
+const SEALED_BLOB = Buffer.concat([
+  Buffer.from([1]),             // version
+  Buffer.alloc(8, 0xfb),        // iv
+  Buffer.alloc(14, 0xff),       // "ciphertext" of a 14-byte tenant
+  Buffer.alloc(8, 0xef),        // tag
+  Buffer.alloc(16, 0x00),       // secret
+]).toString("base64url");
+const SEALED_KEY = `adas_dev_${SEALED_BLOB}`;
 const PROD = "https://api.ateam-ai.com";
 const DEV = "https://dev-api.ateam-ai.com";
 
@@ -182,6 +198,16 @@ describe("sealed keys: the tenant is asked for, never guessed", () => {
     ok: true, status: 200, headers: { get: () => "application/json" },
     json: async () => ({ solutions: [] }), text: async () => "{}",
   };
+
+  test("the fixture has the minted shape (it is built, so its shape is asserted)", () => {
+    // 1 + 8 + 14 + 8 + 16 = 47 bytes -> 63 base64url characters, what Core mints
+    // for a 14-byte tenant. The `_` and `-` are base64url's own characters: with
+    // a blob free of them, the parse test below would still pass if SEALED_KEY_RE
+    // stopped accepting them, and every real key holding one would be refused.
+    assert.equal(SEALED_BLOB.length, 63);
+    assert.match(SEALED_BLOB, /_/);
+    assert.match(SEALED_BLOB, /-/);
+  });
 
   test("a sealed key parses: env named, tenant deliberately absent", () => {
     assert.deepEqual(parseApiKey(SEALED_KEY), { env: "dev", tenant: null, sealed: true, isValid: true });

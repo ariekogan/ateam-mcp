@@ -18,8 +18,14 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # Exactly the lockfile, or the release stops. This used to be
+      # `npm ci … 2>/dev/null || npm install …` (324eb47): a failing `npm ci`
+      # was silenced and replaced by a fresh, unpinned resolution, and the
+      # lockfile carried merge-conflict markers from d5bc9d9 (2026-07-01) on
+      # without this step ever saying so. test/release-metadata.test.mjs keeps
+      # it this way.
       - name: Install deps
-        run: npm ci --ignore-scripts 2>/dev/null || npm install --ignore-scripts
+        run: npm ci --ignore-scripts
 
       - name: Publish to npm
         run: npm publish --access public

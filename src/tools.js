@@ -12,7 +12,7 @@ import {
   get, post, patch, del,
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
-  setAuthOverride, switchTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
+  setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -6788,8 +6788,8 @@ export const handlers = {
     }
     const tenants = await listTenants(sid);
     const results = [];
-    for (const t of tenants) {
-      switchTenant(sid, t.id);
+    // Each tenant in its own scope: the session stays on its tenant (runAsTenant).
+    for (const t of tenants) await runAsTenant(sid, t.id, async () => {
       try {
         const { solutions } = await get("/deploy/solutions", sid);
         for (const sol of (solutions || [])) {
@@ -6812,7 +6812,7 @@ export const handlers = {
       } catch (err) {
         results.push({ tenant: t.id, error: err.message });
       }
-    }
+    });
     return { ok: true, tenants: tenants.length, solutions: results.length, results };
   },
 
@@ -6822,8 +6822,8 @@ export const handlers = {
     }
     const tenants = await listTenants(sid);
     const results = [];
-    for (const t of tenants) {
-      switchTenant(sid, t.id);
+    // Each tenant in its own scope: the session stays on its tenant (runAsTenant).
+    for (const t of tenants) await runAsTenant(sid, t.id, async () => {
       try {
         const { solutions } = await get("/deploy/solutions", sid);
         for (const sol of (solutions || [])) {
@@ -6851,7 +6851,7 @@ export const handlers = {
       } catch (err) {
         results.push({ tenant: t.id, error: err.message });
       }
-    }
+    });
     const pushCount = results.filter(r => r.push?.ok).length;
     const pullCount = results.filter(r => r.pull?.ok).length;
     const errors = results.filter(r => r.error || r.push?.ok === false || r.pull?.ok === false).length;
@@ -7094,6 +7094,16 @@ export async function handleToolCall(name, args, sessionId) {
     };
   }
 
+  // Master mode: per-call tenant override (no re-auth needed). BEFORE
+  // touchSession: this call's solution and actor belong to the tenant it names,
+  // and touchSession writes them into the record the call acts as. Run after
+  // it (94b9bc0), they went into the previous tenant's record, which a call
+  // already in flight as that tenant still holds. isMasterMode implies an
+  // explicit ateam_auth, so this does not get ahead of the auth gate below.
+  if (TENANT_TOOLS.has(name) && isMasterMode(sessionId) && args?.tenant) {
+    switchTenant(sessionId, args.tenant);
+  }
+
   // Track activity + context on every tool call (keeps session alive, records what user is working on)
   touchSession(sessionId, {
     toolName: name,
@@ -7152,11 +7162,6 @@ export async function handleToolCall(name, args, sessionId) {
       // Only this line sets `stage`: handlers never build structuredContent.
       structuredContent: { ok: false, code: "UNAUTHENTICATED", stage: "auth_gate" },
     };
-  }
-
-  // Master mode: per-call tenant override (no re-auth needed)
-  if (TENANT_TOOLS.has(name) && isMasterMode(sessionId) && args?.tenant) {
-    switchTenant(sessionId, args.tenant);
   }
 
   try {
