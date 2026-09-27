@@ -720,20 +720,28 @@ for (const path of ["/mcp", "/"]) {
     p.status === 200 && getSessionOwner(p.sid) === PLATFORM_PRINCIPAL);
 }
 {
-  // The source holds no token cache keyed by client IP, and nothing reads req.ip
-  // to pick a credential. Comments may tell the history; code may not bring it
-  // back. src/stub.js is a standalone manual OAuth stub that no served module
-  // imports; the second check keeps that true.
-  const { readFileSync, readdirSync } = await import("node:fs");
-  const srcDir = new URL("../src/", import.meta.url);
-  const code = (f) => readFileSync(new URL(f, srcDir), "utf8").split("\n")
-    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
-  const served = readdirSync(srcDir).filter((f) => f.endsWith(".js") && f !== "stub.js" && !f.endsWith(".test.js"));
-  const offenders = served.filter((f) => /recentTokensByIp|autoInjectToken|TOKEN_TTL|\breq\.ip\b|\.ip\s*\|\|\s*["']unknown["']/.test(code(f)));
-  check(`no served source file keeps or reads an IP-keyed token cache (found in: ${offenders.join(", ") || "none"})`,
+  // No PACKAGED file keeps a token cache or injects a token: not keyed by IP
+  // (recentTokensByIp, autoInjectToken, TOKEN_TTL, a req.ip lookup), and not
+  // process-global (recentTokens + getNewestToken, the finding #28 shape that
+  // src/stub.js kept until it was deleted in BUILDER-SEC-SIGNIN-P0). The set is
+  // what npm actually ships, asked of npm itself, so a file the "files" list
+  // pulls in cannot be skipped. Comments may tell the history; code may not
+  // bring it back.
+  const { readFileSync } = await import("node:fs");
+  const { execFileSync } = await import("node:child_process");
+  const root = new URL("../", import.meta.url);
+  const packed = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"],
+    { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))[0].files.map((f) => f.path);
+  check(`the packaged set was read from npm (${packed.length} files, src/http.js among them)`,
+    packed.includes("src/http.js") && packed.includes("src/oauth.js"));
+  const code = (f) => {
+    const text = readFileSync(new URL(f, root), "utf8");
+    return /\.(c|m)?js$/.test(f) ? text.split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n") : text;
+  };
+  const TOKEN_CACHE = /\brecentTokens(ByIp)?\b|\bautoInjectToken\b|\bTOKEN_TTL\b|\bgetNewestToken\b|\breq\.ip\b|\.ip\s*\|\|\s*["']unknown["']/;
+  const offenders = packed.filter((f) => TOKEN_CACHE.test(code(f)));
+  check(`no packaged file keeps a token cache or injects a token (found in: ${offenders.join(", ") || "none"})`,
     offenders.length === 0);
-  const importsStub = served.filter((f) => /from\s+["']\.\/stub\.js["']|import\(\s*["']\.\/stub\.js["']/.test(code(f)));
-  check(`no served source file imports src/stub.js (found in: ${importsStub.join(", ") || "none"})`, importsStub.length === 0);
 }
 
 // ─── done ────────────────────────────────────────────────────────────────────
