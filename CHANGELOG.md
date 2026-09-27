@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.106 — 2026-09-27
+
 ### HTTP mode
 
 - The 401 on `/mcp` now names `/.well-known/oauth-protected-resource/mcp`,
