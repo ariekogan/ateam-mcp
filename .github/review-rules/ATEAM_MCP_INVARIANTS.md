@@ -18,9 +18,10 @@
   Claude.ai session + refresh).
 - Because the code is exchanged for that raw key, `redirect_uri` decides who gets
   it. A redirect is accepted only if `redirectRequester` (`src/oauth.js`) allows
-  it, at `/register` AND at `/authorize`: the exact Claude / ChatGPT / VS Code
-  https callbacks, loopback http (`localhost`, `127.0.0.1`, any port), Cursor's
-  app scheme on Cursor's hosts. The consent page names the requester from that
+  it, at `/register` AND at `/authorize`: the exact Claude / ChatGPT / Cursor /
+  VS Code https callbacks, ChatGPT's per-connection
+  `https://chatgpt.com/connector/oauth/<one segment>`, loopback http
+  (`localhost`, `127.0.0.1`, any port), Cursor's app scheme on Cursor's hosts. The consent page names the requester from that
   table by the redirect's host, NEVER by `client_name`. Accepting or merging a
   caller's redirect, or showing `client_name` ⇒ BLOCKING
   (`test/oauth-redirect-allowlist.test.mjs`).
@@ -38,7 +39,10 @@
   cross-user bypass of finding #28; its IP-scoped successor (`recentTokensByIp` +
   `autoInjectToken`) was the same bypass behind a shared egress IP (Claude.ai and
   ChatGPT share them), and ran before the strict gate. Both were deleted
-  (BUILDER-SEC-SIGNIN-P0). Bringing any injection back ⇒ BLOCKING.
+  (BUILDER-SEC-SIGNIN-P0). The injection was a workaround for Claude.ai dropping
+  its token (anthropics/claude-ai-mcp#35); prod logs now show Claude.ai sending
+  its own bearer, which is why removing it is safe. Bringing any injection
+  back ⇒ BLOCKING.
 - This is layer 2, and it is not redundant with the bearer gate (§3):
   `verifyAccessToken` is structural-only (§1), so ANY well-formed key passes the
   gate, including a made-up key naming the victim's own tenant. Only the ownership

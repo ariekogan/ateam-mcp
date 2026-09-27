@@ -47,10 +47,15 @@ async function test(name, fn) {
   catch (e) { failures++; console.error(`  ✗ ${name}\n      ${String(e.message).split("\n")[0]}`); }
 }
 
+// The SDK limits /register to 20 an hour per client IP, and this file registers
+// more than that. trust proxy is 1, so each registration comes from its own
+// X-Forwarded-For address.
+let registrations = 0;
 async function register(redirect_uris, client_name = "t") {
+  const n = ++registrations;
   const r = await fetch(`${BASE}/register`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-forwarded-for": `10.77.${n >> 8}.${n & 255}` },
     body: JSON.stringify({ redirect_uris, client_name, token_endpoint_auth_method: "none" }),
     signal: AbortSignal.timeout(5000),
   });
@@ -90,6 +95,18 @@ for (const bad of [
   "http://10.0.0.5:8080/cb",                           // a LAN host is not loopback
   "cursor://evil.example/oauth/callback",             // Cursor's scheme, not Cursor's host
   "javascript:alert(1)",
+  // ChatGPT's per-connection prefix admits ONE segment on chatgpt.com, nothing else
+  "https://chatgpt.com.evil.example/connector/oauth/cb123",
+  "https://www.chatgpt.com/connector/oauth/cb123",
+  "https://chatgpt.com:8443/connector/oauth/cb123",
+  "http://chatgpt.com/connector/oauth/cb123",
+  "https://chatgpt.com/connector/oauth/",
+  "https://chatgpt.com/connector/oauth/a/b",
+  "https://chatgpt.com/connector/oauth/../x",
+  "https://chatgpt.com/connector/oauth/..",
+  "https://chatgpt.com/connector/oauth/cb123?next=https://evil.example",
+  "https://chatgpt.com/connector/oauth/cb123#frag",
+  "https://chatgpt.com/connector/oauth/a%2Fb",
 ]) {
   await test(`register refuses ${bad}`, async () => {
     const r = await register([bad]);
@@ -100,18 +117,56 @@ for (const bad of [
 const good = {};
 for (const [label, uri] of [
   ["claude.ai", CLAUDE],
-  ["claude.com", "https://claude.com/api/mcp/auth_callback"],
-  ["chatgpt.com", "https://chatgpt.com/connector_platform_oauth_redirect"],
   ["vscode.dev", "https://vscode.dev/redirect"],
   ["loopback localhost, any port", "http://localhost:49152/callback"],
   ["loopback 127.0.0.1, another port", "http://127.0.0.1:33418/"],
-  ["Cursor app scheme", "cursor://anysphere.cursor-mcp/oauth/callback"],
 ]) {
   await test(`register accepts ${label} (${uri}), and records exactly what was sent`, async () => {
     const r = await register([uri]);
     assert.equal(r.status, 201, `registering ${uri} answered ${r.status}: ${JSON.stringify(r.json)}`);
     assert.deepEqual(r.json.redirect_uris, [uri], `the record holds ${JSON.stringify(r.json.redirect_uris)}`);
     good[uri] = r.json.client_id;
+  });
+}
+
+// ─── the supported clients, end to end ──────────────────────────────────────
+// Each registers exactly as the client does, then completes /authorize: the
+// consent page, a well-formed key submitted, and a 302 to ITS redirect carrying
+// the code and the state. Claude.ai (both hosts), ChatGPT (the old exact
+// callback and the per-connection one), and Cursor (its https callback,
+// registered together with cursor://, and the cursor:// one itself).
+const KEY = `adas_acme_${"c3".repeat(16)}`;
+async function complete(clientId, uri) {
+  const page = await authorize(clientId, uri);
+  assert.ok(isConsentPage(page), `/authorize with ${uri} answered ${page.status}: ${page.text.slice(0, 160)}`);
+  const pending = /name="pending_id" value="([^"]+)"/.exec(page.text)?.[1];
+  const r = await fetch(`${BASE}/authorize-submit`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ pending_id: pending, api_key: KEY }),
+    redirect: "manual",
+  });
+  assert.equal(r.status, 302, `/authorize-submit answered ${r.status}`);
+  const to = new URL(r.headers.get("location"));
+  assert.equal(`${to.origin === "null" ? `${to.protocol}//${to.host}` : to.origin}${to.pathname}`, uri, `the code went to ${to.href}, not ${uri}`);
+  assert.ok(to.searchParams.get("code"), "no code on the redirect");
+  assert.equal(to.searchParams.get("state"), "st");
+}
+const CHATGPT_PER_CONNECTION = "https://chatgpt.com/connector/oauth/cb_8f3KzQ2-x.y~Z";
+const CURSOR_HTTPS = "https://www.cursor.com/agents/mcp/oauth/callback";
+const CURSOR_APP = "cursor://anysphere.cursor-mcp/oauth/callback";
+for (const [client, uris, authorizeWith] of [
+  ["Claude (claude.ai)", [CLAUDE], [CLAUDE]],
+  ["Claude (claude.com)", ["https://claude.com/api/mcp/auth_callback"], ["https://claude.com/api/mcp/auth_callback"]],
+  ["ChatGPT (exact callback)", ["https://chatgpt.com/connector_platform_oauth_redirect"], ["https://chatgpt.com/connector_platform_oauth_redirect"]],
+  ["ChatGPT (per-connection callback)", [CHATGPT_PER_CONNECTION], [CHATGPT_PER_CONNECTION]],
+  ["Cursor (https + cursor://)", [CURSOR_HTTPS, CURSOR_APP], [CURSOR_HTTPS, CURSOR_APP]],
+]) {
+  await test(`client matrix: ${client} registers ${uris.join(" + ")} and completes /authorize with ${authorizeWith.join(" and ")}`, async () => {
+    const reg = await register(uris);
+    assert.equal(reg.status, 201, `registering ${uris.join(", ")} answered ${reg.status}: ${JSON.stringify(reg.json)}`);
+    assert.deepEqual(reg.json.redirect_uris, uris, `the record holds ${JSON.stringify(reg.json.redirect_uris)}`);
+    for (const uri of authorizeWith) await complete(reg.json.client_id, uri);
   });
 }
 

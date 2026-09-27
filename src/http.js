@@ -197,10 +197,12 @@ export function startHttpServer(port = 3100) {
   // in d61465b). Claude.ai and ChatGPT reach this server from SHARED provider
   // egress IPs (prod logged the cache filling from 160.79.106.x), so one
   // person's tenant key could be handed to another person's bearer-less
-  // request, and the injection defeated the strict gate below. Its reason
-  // (e23bd3e: "the MCP client sends POST /mcp without auth") was the missing
-  // challenge that 39ff024 fixed: a client that is refused with a challenge
-  // sends its token. A request without a bearer now gets exactly that 401.
+  // request, and the injection defeated the strict gate below. It was a
+  // workaround for Claude.ai dropping the token its OAuth client had just
+  // obtained (anthropics/claude-ai-mcp#35; e23bd3e: "the MCP client sends POST
+  // /mcp without auth"). Prod logs now show Claude.ai sending its own bearer
+  // (POST / answered 200 with the client's bearer, and no "Auto-injected" line),
+  // which is why removing it is safe. A request without a bearer gets the 401.
   // test/session-isolation.test.mjs §6 fails if any injection comes back.
   const mcpAuthFor = (path) => [
     platformGate,

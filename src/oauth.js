@@ -33,6 +33,11 @@ const PENDING_TTL = 10 * 60 * 1000;    // 10 minutes
 // Now a redirect is accepted only if it is one of these, at registration AND at
 // /authorize. Adding a client is a code change here.
 //   - the exact https callbacks below;
+//   - ChatGPT's per-connection callback, https://chatgpt.com/connector/oauth/
+//     followed by exactly ONE segment of unreserved characters (OpenAI's
+//     connector registration, used when the server lacks RFC 9207). Matched on
+//     the raw string, so no other host, port, userinfo, "/", "..", query or
+//     fragment gets through;
 //   - loopback, http://localhost or http://127.0.0.1 on any port and path, for
 //     native clients (Claude Code, VS Code's 127.0.0.1:33418) — RFC 8252 §7.3;
 //     a code sent there stays on the person's own machine;
@@ -43,9 +48,17 @@ const HTTPS_REDIRECTS = new Map([
   ["https://claude.ai/api/mcp/auth_callback", "Claude"],
   ["https://claude.com/api/mcp/auth_callback", "Claude"],
   ["https://chatgpt.com/connector_platform_oauth_redirect", "ChatGPT"],
+  // Cursor desktop registers this with cursor://anysphere.cursor-mcp/oauth/callback
+  // and authorizes with this one.
+  ["https://www.cursor.com/agents/mcp/oauth/callback", "Cursor"],
   ["https://vscode.dev/redirect", "VS Code"],
   ["https://insiders.vscode.dev/redirect", "VS Code Insiders"],
 ]);
+const HTTPS_PREFIX_REDIRECTS = [
+  { prefix: "https://chatgpt.com/connector/oauth/", name: "ChatGPT", host: "chatgpt.com" },
+];
+// One path segment of RFC 3986 unreserved characters, and not "." or "..".
+const ONE_SEGMENT = /^(?!\.+$)[A-Za-z0-9._~-]+$/;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
 const APP_SCHEME_HOSTS = new Map([
   ["cursor:", { hosts: new Set(["anysphere.cursor-mcp", "anysphere.cursor-retrieval"]), name: "Cursor" }],
@@ -61,6 +74,9 @@ export function redirectRequester(uri) {
   try { url = new URL(uri); } catch { return null; }
   if (url.username || url.password || url.hash) return null;
   if (HTTPS_REDIRECTS.has(uri)) return { name: HTTPS_REDIRECTS.get(uri), host: url.host };
+  for (const { prefix, name, host } of HTTPS_PREFIX_REDIRECTS) {
+    if (uri.startsWith(prefix) && ONE_SEGMENT.test(uri.slice(prefix.length))) return { name, host };
+  }
   if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) {
     return { name: "an app on this computer", host: url.host };
   }
@@ -111,7 +127,7 @@ class ATeamClientsStore {
     if (uris.length === 0 || refused.length > 0) {
       throw new InvalidClientMetadataError(uris.length === 0
         ? "redirect_uris is required"
-        : `redirect_uri not allowed: ${refused.join(", ")}. This server issues codes only to Claude, ChatGPT, VS Code, Cursor, and loopback (http://localhost or http://127.0.0.1) redirects.`);
+        : `redirect_uri not allowed: ${refused.join(", ")}. This server issues codes only to Claude, ChatGPT, Cursor, VS Code, and loopback (http://localhost or http://127.0.0.1) redirects.`);
     }
     const clientId = clientMetadata.client_id || randomUUID();
     const record = { ...clientMetadata, client_id: clientId, redirect_uris: uris };
