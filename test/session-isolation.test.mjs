@@ -10,10 +10,8 @@
 //   Layer 1 — the bearer gate (`mcpAuth` in src/http.js, on BOTH "/" and
 //     "/mcp" since 39ff024). A request with no valid bearer gets a 401 OAuth
 //     challenge before any MCP handler runs: no session is minted, and none is
-//     reused. Its one deliberate exception is token auto-injection: a request
-//     with no Authorization, from the client IP that just completed /token, is
-//     given THAT IP's token for TOKEN_TTL. Section 5 checks it stays scoped to
-//     that IP and that window.
+//     reused. It has NO exception: section 6 checks that a /token exchange
+//     does not make a bearer-less request from the same IP authenticated.
 //   Layer 2 — session ownership (`denySessionReuse` + `sessionOwnershipOk`,
 //     c294d0f). A session is bound to the bearer that created it, and any other
 //     bearer is refused with 401 -32001, on POST, GET and DELETE. Layer 1 cannot
@@ -684,15 +682,15 @@ check("A signs in → ok", succeeded(await call(INFLIGHT, "ateam_auth", { api_ke
     seen.length > 0 && seen.every((c) => c.key === BEARER_A && c.actor === "actor-minted-by-bearer-a"));
 }
 
-// ─── 6. Layer 1's one exception: token auto-injection ───────────────────────
-// Claude.ai's OAuth client and its MCP client do not share tokens. So after a
-// /token exchange, the server puts that token into no-Authorization requests
-// from the SAME client IP, for TOKEN_TTL (5 min). It must stay scoped to that
-// IP and that window. A process-global "newest token" gave every anonymous
-// caller the last user's key (finding #28). trust proxy is 1, so req.ip is the
-// X-Forwarded-For address; that is how this test plays several clients. This
-// section runs last because it leaves tokens in the cache.
-console.log("auto-injection: a /token exchange serves only its own IP, and only briefly");
+// ─── 6. No token injection: a /token exchange authenticates nothing else ─────
+// Until BUILDER-SEC-SIGNIN-P0 the server cached each /token response by client
+// IP for 5 minutes and put that token into any request from the same IP that
+// arrived with no Authorization. Claude.ai and ChatGPT share egress IPs, so that
+// handed one person's key to another person's request. It is deleted: a
+// bearer-less request is refused with the challenge no matter which IP just
+// finished OAuth. trust proxy is 1, so req.ip is the X-Forwarded-For address;
+// that is how this test plays a client.
+console.log("no injection: a bearer-less request from an IP that just completed /token is refused");
 const ipHeaders = (ip) => ({ "x-forwarded-for": ip });
 async function exchange(key, ip) {
   const r = await fetch(`${BASE}/token`, {
@@ -704,34 +702,38 @@ async function exchange(key, ip) {
   const json = await r.json().catch(() => ({}));
   return r.status === 200 && json.access_token === key;
 }
-const IP_A = "10.9.9.1", IP_OTHER = "10.9.9.2", IP_B = "10.9.9.3";
+const IP_A = "10.9.9.1";
+// The exchange really happened, so the refusals below are not vacuous.
 check(`A's /token exchange from ${IP_A} → 200 with A's token`, await exchange(BEARER_A, IP_A));
-check(`anonymous POST on A's sid from ANOTHER ip → 401 challenge`,
-  challenged(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_OTHER) }, body: TOOLS_LIST })));
-check(`anonymous initialize from ANOTHER ip → 401 challenge, no session minted`,
-  challenged(await mcp("POST", { headers: ipHeaders(IP_OTHER), body: INIT })));
-// Positive control: the cache IS live, so the two refusals above are not vacuous.
-check(`anonymous POST on A's sid from A's own ip, within TTL → injected, 200 tools/list (by design)`,
-  listedTools(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_A) }, body: TOOLS_LIST })));
+check(`bearer-less POST on A's sid from A's own ip, right after /token → 401 challenge, not A's session`,
+  challenged(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_A) }, body: TOOLS_LIST })));
+for (const path of ["/mcp", "/"]) {
+  const r = await mcp("POST", { path, headers: ipHeaders(IP_A), body: INIT });
+  check(`bearer-less initialize on "${path}" from A's ip, right after /token → 401 challenge, no session minted`,
+    challenged(r) && !r.sid);
+}
 {
-  // Injection runs only when there is no platform token: a platform call from an
-  // IP that just finished OAuth must never become that user's session.
+  // A platform call from an IP that just finished OAuth is the platform's own
+  // session, never that user's.
   const p = await mcp("POST", { headers: { ...platform(), ...ipHeaders(IP_A) }, body: INIT });
-  check(`platform initialize from A's ip, within TTL → the platform's session, not A's`,
+  check(`platform initialize from A's ip, right after /token → the platform's session, not A's`,
     p.status === 200 && getSessionOwner(p.sid) === PLATFORM_PRINCIPAL);
 }
-check(`B's /token exchange from ${IP_B} → 200 with B's token`, await exchange(BEARER_B, IP_B));
-check(`anonymous POST on A's sid from B's ip → B's token injected, still 401 -32001`,
-  ownershipDenied(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_B) }, body: TOOLS_LIST })));
 {
-  const realNow = Date.now;
-  // Just past TOKEN_TTL (5 min in src/http.js). Lengthening the TTL fails this
-  // check on purpose: the window is part of the security property.
-  Date.now = () => realNow() + 5 * 60 * 1000 + 5000;
-  try {
-    check(`anonymous POST on A's sid from A's own ip, AFTER TTL → 401 challenge`,
-      challenged(await mcp("POST", { headers: { ...sid(SID_A), ...ipHeaders(IP_A) }, body: TOOLS_LIST })));
-  } finally { Date.now = realNow; }
+  // The source holds no token cache keyed by client IP, and nothing reads req.ip
+  // to pick a credential. Comments may tell the history; code may not bring it
+  // back. src/stub.js is a standalone manual OAuth stub that no served module
+  // imports; the second check keeps that true.
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const srcDir = new URL("../src/", import.meta.url);
+  const code = (f) => readFileSync(new URL(f, srcDir), "utf8").split("\n")
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+  const served = readdirSync(srcDir).filter((f) => f.endsWith(".js") && f !== "stub.js" && !f.endsWith(".test.js"));
+  const offenders = served.filter((f) => /recentTokensByIp|autoInjectToken|TOKEN_TTL|\breq\.ip\b|\.ip\s*\|\|\s*["']unknown["']/.test(code(f)));
+  check(`no served source file keeps or reads an IP-keyed token cache (found in: ${offenders.join(", ") || "none"})`,
+    offenders.length === 0);
+  const importsStub = served.filter((f) => /from\s+["']\.\/stub\.js["']|import\(\s*["']\.\/stub\.js["']/.test(code(f)));
+  check(`no served source file imports src/stub.js (found in: ${importsStub.join(", ") || "none"})`, importsStub.length === 0);
 }
 
 // ─── done ────────────────────────────────────────────────────────────────────
