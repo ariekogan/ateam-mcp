@@ -11,6 +11,9 @@
 //   - hosted: startHttpServer (src/http.js), spoken to over HTTP. Including a
 //     client that names its session "stdio" — the id an HTTP client chooses and
 //     http.js reuses — which must not make it local.
+// Plus the hosted base64 path end to end: a 7 MB file goes through the hosted
+// server to the Builder (express's default 100 KB refused it before).
+//
 // Run: node test/test-attachments-transport.test.mjs
 import { createServer } from "node:http";
 import net from "node:net";
@@ -166,6 +169,26 @@ for (const sid of ["sess-hosted-attach", "stdio"]) {
     check(`${tool}:   the Builder got nothing`, testPosts().length === 0);
   }
 }
+
+console.log("hosted: base64 is the hosted path, and it carries a real file");
+hits = [];
+const SEVEN = Buffer.alloc(7 * MB, 3).toString("base64");
+let res = await hostedCall("sess-hosted-attach", "ateam_conversation", {
+  solution_id: "sol", message: "what is this?", attachments: [{ data: SEVEN, mimeType: "application/pdf", name: "big.pdf" }],
+});
+check("a 7 MB file (the cap) sent as base64 through the hosted server reaches the Builder",
+  res.status === 200 && res.result && !res.result.isError && testPosts().length === 1,
+  `${res.status} ${res.text.slice(0, 200)}`);
+check("  unchanged", testPosts()[0]?.body?.attachments?.[0]?.data === SEVEN && testPosts()[0]?.body?.attachments?.[0]?.name === "big.pdf");
+
+hits = [];
+res = await hostedCall("sess-hosted-attach", "ateam_conversation", {
+  solution_id: "sol", message: "what is this?", attachments: [{ data: Buffer.alloc(8 * MB, 3).toString("base64"), mimeType: "application/pdf", name: "too.pdf" }],
+});
+check("a body over the hosted limit is a named 413, not a 500",
+  res.status === 413 && /over the 10485760-byte limit of this route/.test(res.error?.message || "") && /capped at 7 MB/.test(res.error?.message || ""),
+  `${res.status} ${res.text.slice(0, 200)}`);
+check("  and the Builder got nothing", testPosts().length === 0);
 
 upstream.close();
 if (failures) { console.error(`\n${failures} check(s) FAILED`); process.exit(1); }
