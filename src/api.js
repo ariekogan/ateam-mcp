@@ -1306,7 +1306,25 @@ async function request(method, path, body, sessionId, opts = {}) {
         throw e;
       }
 
-      return res.json();
+      // THE ONE PARSE OF A SUCCESS BODY. It was `res.json()` from the first
+      // commit on, and an empty body made that "Unexpected end of JSON input":
+      // a bare SyntaxError naming no call, no status and no server (MGAP-A19,
+      // the Builder's /spec/skill?search answering 200 with nothing). An empty
+      // or blank 2xx body is now EMPTY_RESPONSE, naming the call; it is never
+      // read as {}. A 204 too: no route this client calls answers one, and
+      // every caller reads fields off the result, so a null would only fail
+      // later, unnamed.
+      // Not awaited, as res.json() was not: this attempt's timer is cleared
+      // once the status is in, so a call that answered is never re-sent or
+      // reported as "did not respond" because its body was slow.
+      return res.text().then((text) => {
+        if (text.trim()) return JSON.parse(text);
+        throw Object.assign(new Error(
+          `A-Team API ${method} ${path} answered ${res.status} with an empty body: there is no result to read (server: ${baseUrl}).\n` +
+          `Hint: the server answered success with no body.` +
+          (isRead(method, opts.idempotent) ? "" : " This write was not re-sent, and it may have taken effect: check before issuing it again.")
+        ), { code: "EMPTY_RESPONSE", status: res.status, method, path, body: text });
+      });
     } catch (err) {
       if (err.name === "AbortError") {
         if (mayRetry(attempt, { noAnswer: true })) {
