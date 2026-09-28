@@ -1,0 +1,48 @@
+# CI — the test suite, on every pull request and every push to main.
+#
+# WHY THIS EXISTS. ateam-mcp had no test workflow. publish.yml publishes to npm
+# on every push to main that touches src/** or package.json, and until this
+# change it never ran a test (324eb47 on): a release shipped whatever main held,
+# whether or not the suite passed, and nothing in GitHub could have said which.
+# The suite ran only when somebody remembered to run it locally.
+#
+# A test nobody is made to run is a suggestion.
+#
+# So: every pull request runs `npm test` — whatever it touches, so a PR that
+# only edits a test or a workflow is checked too — and so does every push to
+# main. publish.yml runs the same `npm test` between `npm ci` and
+# `npm publish`, so a red main does not publish even if this run is cancelled
+# or ignored. test/release-metadata.test.mjs pins both files.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite takes ~2.5 min locally, most of it polling stubs that sleep.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The install publish.yml does, character for character: CI tests the
+      # tree the release would ship, not a fresh resolution of it.
+      - name: Install deps
+        run: npm ci --ignore-scripts
+
+      - name: Test
+        run: npm test
