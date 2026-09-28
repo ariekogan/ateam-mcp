@@ -68,6 +68,26 @@
 - `ateam_delete_skill` and `ateam_delete_connector` no longer say the GitHub
   source is preserved. Both delete it from the repo on dev and main.
 
+### What the tools tell an outside agent (MGAP, 2026-09-27)
+
+- `ateam_spec_search` works without signing in. It posted to a key-gated
+  connector route and answered 401 "Missing API key" to any session that had
+  not signed in; it now calls the Builder's keyless `POST /spec/search`.
+- `ateam_get_spec`, `ateam_get_examples`, `ateam_get_workflows`,
+  `ateam_spec_search` and `ateam_bootstrap` return `served_by`: `prod` or
+  `dev`, the environment whose API answered (the base URL itself for any
+  other host). It is derived from the base the call went to, never configured.
+- `ateam_auth` and the sign-in refusal no longer send the user to fetch a key
+  for the agent. They say to connect through the hosted connector
+  (`https://mcp.ateam-ai.com`) and authorize in the browser; `ateam_auth` is
+  for a local setup. The texts say the key's `adas_<env>_` prefix picks the
+  environment and `url` is only for a host that is neither.
+- `ateam_create_plugin` no longer says to declare the plugin in
+  `solution.ui_plugins[]`: the deploy merges what it discovers. Bootstrap says
+  `platform_connectors` can carry the solution's own connectors
+  (`source: 'solution'`), and that a skill reaches a connector's tools through
+  its own `connectors[]`.
+
 ## 0.4.106 — 2026-09-27
 
 ### HTTP mode

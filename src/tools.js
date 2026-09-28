@@ -13,6 +13,7 @@ import {
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
+  servedBy, KEY_ENVIRONMENTS,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -39,6 +40,40 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_test_skill", "ateam_test_pipeline", "ateam_test_connector", "ateam_test_notification",
   "ateam_verify_surface",
 ]);
+
+// ─── Signing in, and which environment: ONE statement, rendered where read ──
+//
+// MGAP-A1 (interim text) / MGAP-A31. ateam_auth's description (94b9bc0) and the
+// auth gate's refusal (c61e60b) told an agent to have the user "get their API
+// key" and hand it over. Since 9f84856 (2026-07-16) a session the user
+// authorized in the browser through the hosted connector is signed in with no
+// ateam_auth call and no key in the chat; neither text ever said so. Both also
+// taught the environment model bff5934 (2026-09-10) replaced: `url` picks the
+// environment (57007d3), a key looks like adas_<tenant>_<32hex>. Now the key's
+// adas_<env>_ prefix picks it, and `url` is for a host that is neither.
+// The environment list is rendered from KEY_ENVIRONMENTS, the one map of them.
+const HOSTED_CONNECTOR_URL = "https://mcp.ateam-ai.com";
+const KEY_PICKS_ENVIRONMENT =
+  `The key's adas_<env>_ prefix picks the environment (${Object.entries(KEY_ENVIRONMENTS).map(([env, base]) => `adas_${env}_… → ${base}`).join(", ")}).`;
+const SIGN_IN_IN_THE_BROWSER =
+  `Ask the user to connect this MCP through the hosted connector: add ${HOSTED_CONNECTOR_URL} as a remote MCP server (connector) in their client, and authorize it in the browser when it asks. ` +
+  "The session is then signed in to the tenant and environment they chose, and no key passes through this chat.";
+
+// ─── A discovered UI plugin needs no declaration ────────────────────────────
+//
+// MGAP-A29 (+ the connectors[] half of A13). ateam_create_plugin's description
+// (02d4321) and its next_steps (3e7c8c0) said "Then declare it at solution
+// ui_plugins[]". Two months earlier the Builder's Phase 5 had started MERGING
+// what it discovers into solution.ui_plugins[] on every deploy ({...disc,
+// ...prev}, Builder 7ebab07, routes/deploy.js), so the instruction produced a
+// hand-copied second manifest — and a partial one silently replaced the
+// discovered render. One statement, rendered in both places.
+const DISCOVERED_PLUGIN_IS_MERGED =
+  "Nothing to declare: every deploy calls ui.listPlugins + ui.getPlugin on each connector listed in platform_connectors or in a skill's connectors[] " +
+  "(list this connector in the skill that opens the plugin) and MERGES each plugin it finds into solution.ui_plugins[], a shallow merge in which the fields you set yourself win. " +
+  "Add a solution.ui_plugins[] entry only to override surface, roles or uiActions, or for a runtime:'device' connector, which is never introspected; " +
+  "do not restate render, native or stateDomains (a partial render replaces the discovered one whole). " +
+  "A skill opens the plugin with sys.focusUiPlugin — see ateam_get_spec(topic:'widgets').";
 
 // Tools whose top-level `ok` is the ANSWER of a probe that ran, not whether the
 // call worked. Their owners say so: ateam_verify sets ok = "no gaps found";
@@ -879,13 +914,16 @@ export const tools = [
     name: "ateam_auth",
     core: true,
     description:
-      "Authenticate with A-Team. Required before any tenant-aware operation (reading solutions, deploying, testing, etc.). The user can get their API key at https://mcp.ateam-ai.com/get-api-key. Only global endpoints (spec, examples, validate) work without auth. IMPORTANT: Even if environment variables (ADAS_API_KEY) are configured, you MUST call ateam_auth explicitly — env vars alone are not sufficient. For cross-tenant admin operations, use master_key instead of api_key.",
+      "Sign this session in to an A-Team tenant with an API key. A session must be signed in before any tenant-aware operation (reading solutions, deploying, testing, the widget catalog, the design advisor). The docs need no sign-in: ateam_bootstrap, ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search, and validation.\n\n" +
+      `AN AGENT DOES NOT ASK FOR A KEY. ${SIGN_IN_IN_THE_BROWSER} Then this tool is not needed.\n\n` +
+      `This tool is for a local setup where the user supplies their own key. ${KEY_PICKS_ENVIRONMENT} ` +
+      "An ADAS_API_KEY environment variable does NOT sign a session in: a key baked into a shared config could point work at the wrong tenant, so tenant tools refuse until the session signs in. For cross-tenant admin operations, use master_key instead of api_key.",
     inputSchema: {
       type: "object",
       properties: {
         api_key: {
           type: "string",
-          description: "Your A-Team API key (e.g., adas_xxxxx)",
+          description: `The user's A-Team API key. ${KEY_PICKS_ENVIRONMENT}`,
         },
         master_key: {
           type: "string",
@@ -897,7 +935,9 @@ export const tools = [
         },
         url: {
           type: "string",
-          description: "Optional API URL override (e.g., https://dev-api.ateam-ai.com). Use this to target a different environment without restarting the MCP server.",
+          description:
+            "Only for a host that is neither A-Team environment (localhost, a self-hosted deployment), or for an older key that names no environment (adas_<tenant>_<hex>, which otherwise lands on this server's default API). " +
+            "Leave it out for an adas_<env>_ key: the key already picks its environment, and a url that contradicts it is refused.",
         },
       },
     },
@@ -906,7 +946,7 @@ export const tools = [
     name: "ateam_get_spec",
     core: true,
     description:
-      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.\n\nWhen wiring widgets (UI plugins) into a solution, fetch topic='widgets' — that returns the widget spec (catalog model, how_to_use blocks, opener_call shape, persona phrasing rules, binding semantics) so you can declare `ui_plugins` correctly. For the live catalog of widgets actually available in a deployed tenant, use ateam_get_widget_catalog instead.",
+      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec. Needs no sign-in. Every answer carries `served_by`: the environment that answered (prod or dev, the API this session talks to), so two environments' docs are never read as one.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.\n\nWhen wiring widgets (UI plugins) into a solution, fetch topic='widgets' — that returns the widget spec (catalog model, how_to_use blocks, opener_call shape, persona phrasing rules, binding semantics) so you can declare `ui_plugins` correctly. For the live catalog of widgets actually available in a deployed tenant, use ateam_get_widget_catalog instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -998,7 +1038,7 @@ export const tools = [
     name: "ateam_spec_search",
     core: true,
     description:
-      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only.",
+      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod or dev): the environment whose docs were searched.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1657,7 +1697,7 @@ export const tools = [
       "with a render.{mode, iframeUrl?, reactNative?} block. Dropping the scaffold files alone does NOT register it. " +
       "If the connector generates its plugin list from ui-dist/<plugin>/manifest.json, the emitted manifest is picked up automatically; " +
       "if the connector has a HARDCODED list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), you MUST add this plugin there (copy the render block from the manifest.json). " +
-      "Verify after deploy with ateam_get_solution(solution_id, 'connectors_health') or ateam_get_widget_catalog. Then declare it at solution ui_plugins[] so a skill can open it via sys.focusUiPlugin (see ateam_get_spec topic:'widgets').\n\n" +
+      `Verify after deploy with ateam_get_solution(solution_id, 'connectors_health') or ateam_get_widget_catalog. ${DISCOVERED_PLUGIN_IS_MERGED}\n\n` +
       "The scaffold MERGES into the existing connector (server.js + other files preserved) — works on GitHub-backed AND repo-less tenants; merge base is the GitHub repo when connected, else the deployed connector source.",
     inputSchema: {
       type: "object",
@@ -3653,6 +3693,14 @@ function chainTreeOf(resp) {
   };
 }
 
+// A docs answer says which environment gave it (MGAP-A15; api.js servedBy).
+// FIRST, so it is the first thing read, before any section a long answer is
+// cut at. The Builder's docs are JSON objects; anything else passes unchanged.
+function withServedBy(doc, sid) {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return doc;
+  return { served_by: servedBy(sid), ...doc };
+}
+
 // Exported for tests. handleToolCall below is the runtime entry point and stays
 // the only one production code should use; reaching a handler directly lets a
 // test EXECUTE it instead of asserting against this file's source text, which
@@ -3674,10 +3722,15 @@ export const handlers = {
   // to learn from deploy errors which environment it was actually on. The
   // dangerous direction is the mirror image — believing you are on dev.
   ateam_bootstrap: async (_args, sid) => ({
+    served_by: servedBy(sid),
     runtime: {
       ateam_mcp_version: MCP_VERSION,
       base_url: getBaseUrl(sid),
-      _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to (per-session, as set by ateam_auth's `url`). If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
+      // "as set by ateam_auth's `url`" (af5e366) was written 22 minutes before
+      // bff5934 made the KEY pick the environment (MGAP-A31).
+      _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to: the environment its sign-in's key names (adas_<env>_…), a `url` given to ateam_auth for a host that is neither environment, or this server's default before any sign-in. " +
+        "`served_by` (top of this result, and on every ateam_get_spec / ateam_get_examples / ateam_get_workflows / ateam_spec_search result) names that environment: prod or dev, or the base itself for any other host. " +
+        "If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
     },
     platform_positioning: {
       name: "A-Team",
@@ -3694,14 +3747,22 @@ export const handlers = {
       // reading whichever spec topic happened to mention the thing it wanted —
       // and concluded a capability was absent that had shipped. Name the other
       // doors here, at the point where the obligation is stated.
+      //
+      // "neither fails the way the advisor can" (2268b3f) was false for a session
+      // that had not signed in: ateam_spec_search went through the key-gated
+      // connector-call route (b90f423) and answered 401. It now calls the
+      // keyless POST /spec/search (MGAP-A3), and this names the mechanism
+      // instead of promising the outcome. test/spec-search-keyless.test.mjs
+      // drives all three doors with no credentials.
       if_the_advisor_does_not_answer:
-        "It is not the only door and you are NOT stuck. ateam_get_spec(topic:'capabilities') is the question-shaped " +
-        "capability index — every 'can I …?' with a one-word answer and where to read next, no LLM and no tenant " +
-        "required. ateam_get_spec(topic:'device-capabilities') is the GENERATED " +
-        "capability matrix (what the phone can do, per API, with status) and ateam_spec_search({query}) searches the full " +
-        "spec corpus — neither has an LLM in the path, so neither fails the way the advisor can. If the advisor answers " +
+        "It is not the only door and you are NOT stuck. Three doors need NO sign-in, no tenant and no LLM: " +
+        "ateam_get_spec(topic:'capabilities') is the question-shaped capability index — every 'can I …?' with a " +
+        "one-word answer and where to read next; ateam_get_spec(topic:'device-capabilities') is the GENERATED " +
+        "capability matrix (what the phone can do, per API, with status); and ateam_spec_search({query}) searches the " +
+        "full spec corpus. The advisor is different: it runs your tenant's LLM, so it can refuse a session that has not " +
+        "signed in, and it can time out. If the advisor answers " +
         "with `truncated: true`, what you got is CORRECT but INCOMPLETE: use it, and treat a capability's absence as " +
-        "UNKNOWN rather than 'no' — re-ask with a narrower goal, or check the two tools above.",
+        "UNKNOWN rather than 'no' — re-ask with a narrower goal, or check the three doors above.",
     },
     what_is_a_team: {
       definition: "A Team is a structured multi-role AI system composed of Skills, Connectors, Governance contracts, and Managed Runtime deployment.",
@@ -3842,8 +3903,15 @@ export const handlers = {
       security: "https://ateam-ai.com/#security",
       engine: "https://ateam-ai.com/#engine",
     },
+    // 727cae5 wrote this when the array held only platform services. The
+    // solution schema has since let it carry the solution's OWN connectors
+    // (source:"solution"), and plugin discovery walks it (MGAP-A13). "Merged
+    // into every skill's tool catalog" was never the rule the Builder enforces:
+    // a skill reaches a connector's tools through its own connectors[] (Builder
+    // spec platform_connectors.used_by, validation used_by_without_skill_connector).
     platform_connectors: {
-      _note: "Shared infrastructure MCPs available to all solutions. Reference by id in your solution's `platform_connectors` array; tools are automatically merged into every skill's tool catalog (no bridge needed). Do NOT bundle their source in mcp_store — they run as fixed Docker services on ADAS Core.",
+      _note: "Shared infrastructure MCPs available to all solutions. Reference by id in your solution's `platform_connectors` array, and add the id to the connectors[] of each skill that uses it: a skill reaches a connector's tools only through its OWN connectors[], which the deploy auto-imports (no bridge code). Do NOT bundle their source in mcp_store — they run as fixed Docker services on ADAS Core. " +
+        "The same array can also carry a connector THIS SOLUTION owns, as { id, source: 'solution' }: its code lives in connectors/<id>/ of the solution repo and ships in ateam_build_and_run's connectors[]/mcp_store. The 'do not bundle' rule is for platform entries (source omitted or 'platform') only.",
       available: [
         {
           id: "memory-mcp",
@@ -3921,7 +3989,7 @@ export const handlers = {
       ],
       how_to_use: {
         step_1: "Declare in solution: platform_connectors: [{ id: 'memory-mcp', required: true }]",
-        step_2: "Tools become available in the skill's tool catalog automatically — no code to write, no bridge needed",
+        step_2: "Add the id to the connectors[] of each skill that uses it — its tools are then auto-imported into THAT skill's catalog (no code to write, no bridge needed). A skill without it in connectors[] does not see them.",
         step_3: "Reference tools in skill.tools[] with source.type='mcp_bridge', connection_id matching the connector id",
       },
       do_not: [
@@ -3962,8 +4030,12 @@ export const handlers = {
         confirm: "Confirm in plain language before anything that changes the team, then show the result simply: '✅ Added Japanese Tutor to your team.'",
       },
       // ── Where the user's work lands — ALWAYS make this visible. (Backlog finding #6.)
+      // "Derive environment from the authed api url" (dbd38f7) predates bff5934,
+      // since which ateam_auth RETURNS the environment (MGAP-A31). Every
+      // backticked field here must exist in the result it is read from
+      // (test/sign-in-texts.test.mjs).
       environment_transparency: {
-        on_connect: "State it explicitly: 'Connected to <tenant> on <environment> — changes you make deploy here.' Derive environment from the authed api url (dev-api → DEV, api → PROD); show a human label, not a raw host. Never silently operate on an env the user didn't expect.",
+        on_connect: "State it explicitly: 'Connected to <tenant> on <environment> — changes you make deploy here.' READ the environment, do not derive it from a url: ateam_auth returns `environment` (prod or dev; 'unstated' for an older key that names none — then say you cannot confirm it), and a session signed in through the hosted connector (no ateam_auth call) finds it in ateam_bootstrap's `served_by`. Show a human label (PROD / DEV), not a raw host. Never silently operate on an env the user didn't expect.",
         after_deploy: "Confirm WHERE it landed with a link: '✅ Added <thing> to <solution> (tenant <t>, <env>) — view it: <app url>.'",
       },
       // ── Delivering a build. (Backlog findings #2,#7,#8.)
@@ -4213,10 +4285,10 @@ export const handlers = {
     if (search) params.set('search', search);
     const qs = params.toString();
     if (qs) path += `?${qs}`;
-    return get(path, sid);
+    return withServedBy(await get(path, sid), sid);
   },
 
-  ateam_get_workflows: async (_args, sid) => get("/spec/workflows", sid),
+  ateam_get_workflows: async (_args, sid) => withServedBy(await get("/spec/workflows", sid), sid),
 
   ateam_get_examples: async ({ type }, sid) => {
     // An unknown type used to reach get(undefined) and fetch the API root, so a
@@ -4230,7 +4302,7 @@ export const handlers = {
         `Unknown example type "${type}". Available: ${EXAMPLE_TYPES.join(", ")}.`
       );
     }
-    return get(path, sid);
+    return withServedBy(await get(path, sid), sid);
   },
 
   // Design-time capability advisor. Proxies to the Builder's /spec/advisor
@@ -4246,26 +4318,26 @@ export const handlers = {
     return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1, idempotent: true });
   },
 
-  // Semantic search over the full /spec corpus. Reaches the sysSpecSearch-mcp
-  // PLATFORM connector through the proven connector-call path (the same route
-  // ateam_test_connector uses) — so it works wherever the existing tools do, with
-  // no bespoke /spec route to route on prod. Auth: the agent's api-key gates the
-  // Builder route; the Builder calls Core with the internal secret; tenant is
-  // forwarded from the session. solution_id is only for the route path (any).
-  ateam_spec_search: async ({ query, top_k, solution_id }, sid) => {
+  // Semantic search over the full /spec corpus: the Builder's POST /spec/search,
+  // which needs NO key, tenant or LLM (its apiKeyAuth exempts the route, and it
+  // reaches sysSpecSearch-mcp over the docker network).
+  //
+  // 3a23931 called exactly this. b90f423 moved it, with the advisor, onto the
+  // key-gated connector-call route (/deploy/solutions/_/connectors/
+  // sysSpecSearch-mcp/call) to dodge prod /spec 404s; 8e84d1f moved the advisor
+  // back once the relay forwarded /spec, and left this one behind. So a session
+  // that had not signed in got 401 "Missing API key" from the doc search that
+  // bootstrap names as the door that works without the advisor (MGAP-A3).
+  ateam_spec_search: async ({ query, top_k }, sid) => {
     if (!query || typeof query !== "string") throw new Error("query required (a string question)");
-    const sol = solution_id || "_";
     const r = await post(
-      apiPath`/deploy/solutions/${sol}/connectors/sysSpecSearch-mcp/call`,
-      { tool: "sysSpecSearch.search", args: { query, ...(top_k ? { top_k } : {}) } },
+      "/spec/search",
+      { query, ...(top_k ? { top_k } : {}) },
       sid,
       // A search over POST: declared idempotent (api.js mayAutoRetry).
       { timeoutMs: 30_000, retries: 1, idempotent: true },
     );
-    // Unwrap the MCP tool result: { result: { content: [{ type:"text", text }] } }.
-    const text = r?.result?.content?.[0]?.text;
-    if (text) { try { return JSON.parse(text); } catch { return { ok: true, raw: text }; } }
-    return r?.result ?? r;
+    return withServedBy(r, sid);
   },
 
   // ─── Composite: Build & Run ────────────────────────────────────────
@@ -7015,7 +7087,7 @@ export const handlers = {
         `A manifest.json (with the render block) was written to ui-dist/${plugin_name}/manifest.json — this is the source of truth Core reads.`,
         `If this connector was scaffolded by ateam_create_connector, its ui.listPlugins / ui.getPlugin read ui-dist/*/manifest.json automatically — nothing else to register, it renders on the next deploy. ⚠️ ONLY a connector with a HARDCODED plugin list (legacy, e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js) needs this plugin added there by hand — copy the render block from manifest.json.`,
         `Verify with ateam_get_widget_catalog (or ateam_get_solution(solution_id, "connectors_health")) after deploy.`,
-        `Then declare it at solution level (ui_plugins[]) so a skill can open it via sys.focusUiPlugin — see ateam_get_spec(topic:"widgets").`,
+        DISCOVERED_PLUGIN_IS_MERGED,
       ].filter(Boolean),
     };
   },
@@ -7354,7 +7426,10 @@ function summarizeSpecResult(result) {
     : "nothing omitted";
   const out = { ...result };
   let omitted = [];
-  const render = () => JSON.stringify({ _truncation: sentence(omitted), sections: Object.keys(result), ...out }, null, 2);
+  // served_by is not a section of the doc: it says which environment sent it
+  // (withServedBy), and it stays on every shape returned here, index included.
+  const sectionNames = Object.keys(result).filter((k) => k !== "served_by");
+  const render = () => JSON.stringify({ _truncation: sentence(omitted), sections: sectionNames, ...out }, null, 2);
   // Exact length of render(), kept current by entry differences. The final
   // render below is still measured for real before anything is returned.
   let size = render().length;
@@ -7442,19 +7517,19 @@ function summarizeSpecResult(result) {
   // THE BACKSTOP. Every large section is already indexed and it is STILL over
   // (thousands of small sections, say). Return the index alone — still valid
   // JSON, still naming the sections, never a mid-token cut.
-  const names = Object.keys(result);
   const index = {
     _truncation: `This spec document is ${sizeOf(result).toLocaleString()} chars and exceeds the ${MAX_RESPONSE_CHARS.toLocaleString()}-char response cap even with its large sections indexed, so only its index is returned. ${how}`,
+    ...(typeof result.served_by === "string" && { served_by: result.served_by }),
     ...(typeof result.topic === "string" && result.topic.length <= 100 && { topic: result.topic }),
-    section_count: names.length,
-    sections: names.slice(0, MAX_INDEX_NAMES),
-    ...(names.length > MAX_INDEX_NAMES && { sections_note: `${names.length - MAX_INDEX_NAMES} more not listed` }),
+    section_count: sectionNames.length,
+    sections: sectionNames.slice(0, MAX_INDEX_NAMES),
+    ...(sectionNames.length > MAX_INDEX_NAMES && { sections_note: `${sectionNames.length - MAX_INDEX_NAMES} more not listed` }),
   };
   const indexText = JSON.stringify(index, null, 2);
   if (indexText.length <= MAX_RESPONSE_CHARS) return indexText;
   // Only section NAMES long enough to blow the cap on their own get here.
   delete index.sections;
-  index.sections_note = `${names.length} section names, too long to list`;
+  index.sections_note = `${sectionNames.length} section names, too long to list`;
   return JSON.stringify(index, null, 2);
 }
 
@@ -7494,20 +7569,22 @@ export async function handleToolCall(name, args, sessionId) {
     actorId: args?.actor_id,
   });
 
-  // Check auth for tenant-aware operations — requires explicit ateam_auth call.
+  // Check auth for tenant-aware operations — requires an EXPLICIT sign-in:
+  // ateam_auth, or a Bearer the user authorized (http.js seedCredentials).
   // Env vars (ADAS_API_KEY / ADAS_TENANT) are NOT sufficient — they may be
   // baked into MCP config and silently target the wrong tenant.
-  // Only global/public tools (bootstrap, spec, examples, validate) bypass this.
+  // Only global/public tools (bootstrap, spec, examples, workflows, spec_search,
+  // validate) bypass this.
   if (TENANT_TOOLS.has(name) && !isExplicitlyAuthenticated(sessionId)) {
     const hasEnvVars = isAuthenticated(sessionId);
     return {
       content: [{
         type: "text",
         text: [
-          "Authentication required — call ateam_auth first.",
+          `Authentication required — this session is not signed in to a tenant, so ${name} was refused before it ran.`,
           "",
           hasEnvVars
-            ? "Environment variables (ADAS_API_KEY) were detected, but they are not sufficient for tenant-aware operations. You must call ateam_auth explicitly to confirm which tenant you intend to use."
+            ? "An ADAS_API_KEY environment variable was found, but it does not sign a session in: a key baked into a shared config could point work at the wrong tenant, so the session signs in (below) to say which tenant it means."
             // "No authentication found." was TRUE and pointed at the WRONG CAUSE.
             // Auth is held in this process's memory and does NOT survive a
             // restart, so a container rebuild silently logs out every connected
@@ -7517,18 +7594,21 @@ export async function handleToolCall(name, args, sessionId) {
             // and cost a human round-trip to diagnose. State both causes; the
             // second is the likelier one for a session that was working a
             // moment ago.
-            : "No authentication found in this process. TWO CAUSES, and the second is easy to miss:\n" +
-              "  (a) this session never authenticated, or\n" +
-              "  (b) THE MCP SERVER RESTARTED. Auth lives in memory and does not survive a restart, so a\n" +
-              "      container rebuild or redeploy logs out every connected session with no warning.\n" +
-              "If your tools were working minutes ago, it is (b) — nothing is misconfigured, just re-run ateam_auth.",
+            : "No sign-in found in this process. TWO CAUSES, and the second is easy to miss:\n" +
+              "  (a) this session never signed in, or\n" +
+              "  (b) THE MCP SERVER RESTARTED. A sign-in made with ateam_auth lives in memory and does not survive a\n" +
+              "      restart, so a container rebuild or redeploy logs out every such session with no warning.\n" +
+              "If your tools were working minutes ago, it is (b) — nothing is misconfigured: sign in again the same way.",
           "",
-          "Please ask the user to:",
-          "1. Get their API key at: https://mcp.ateam-ai.com/get-api-key",
-          "2. Then call: ateam_auth(api_key: \"<their key>\")",
+          // MGAP-A1 interim: this said "Get their API key at …/get-api-key, then
+          // call ateam_auth(api_key)" (c61e60b) — an agent asking for the key.
+          // The browser sign-in (9f84856) needs none. The device-code sign-in
+          // that replaces both is a separate design.
+          "HOW TO SIGN IN — do not ask the user for a key:",
+          `1. ${SIGN_IN_IN_THE_BROWSER}`,
+          `2. A local setup has no browser sign-in: there the user signs in with their own key through ateam_auth(api_key). ${KEY_PICKS_ENVIRONMENT}`,
           "",
-          "The key format is: adas_<tenant>_<32hex> — the tenant is auto-extracted.",
-          "This prevents accidental operations on the wrong tenant from pre-configured env vars.",
+          "The docs need no sign-in: ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search.",
         ].join("\n"),
       }],
       isError: true,
