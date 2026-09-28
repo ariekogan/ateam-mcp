@@ -24,7 +24,7 @@ if (httpFlag) {
   const { StdioServerTransport } = await import(
     "@modelcontextprotocol/sdk/server/stdio.js"
   );
-  const server = createServer();
+  const server = createServer("stdio", { transport: "stdio" });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

@@ -65,12 +65,28 @@ const sessions = new Map();
  *
  * Outside a tool call (seedCredentials on an incoming request, the sweep, a test
  * calling a handler directly) sessionRecord reads the session store, as before.
+ *
+ * The call also carries the TRANSPORT it arrived on, as stated by whoever built
+ * its server (src/index.js: "stdio", src/http.js: "http"). The session id cannot
+ * say it: "stdio" is only createServer's default id, and an HTTP client picks its
+ * own id (http.js reuses a stale mcp-session-id as given), so it can send
+ * "stdio". See callTransport.
  */
-const toolCall = new AsyncLocalStorage(); // { sessionId, record }
+const toolCall = new AsyncLocalStorage(); // { sessionId, record, transport }
 
-/** Run one tool call as `sessionId` was when it arrived. */
-export function runToolCall(sessionId, fn) {
-  return toolCall.run({ sessionId, record: sessions.get(sessionId) || null }, fn);
+/** Run one tool call as `sessionId` was when it arrived, on the transport its server was built for. */
+export function runToolCall(sessionId, fn, { transport = null } = {}) {
+  return toolCall.run({ sessionId, record: sessions.get(sessionId) || null, transport }, fn);
+}
+
+/**
+ * The transport the current tool call arrived on: "stdio" (a local process the
+ * caller started) or "http" (the hosted server). null outside a tool call, or
+ * when the server was built without saying, and a caller must treat null as
+ * NOT local: only a stated "stdio" may do what the hosted server must not.
+ */
+export function callTransport() {
+  return toolCall.getStore()?.transport ?? null;
 }
 
 /**

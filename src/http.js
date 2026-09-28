@@ -71,7 +71,20 @@ export function startHttpServer(port = 3100) {
     next();
   });
 
-  app.use(express.json());
+  // ─── Request bodies ─────────────────────────────────────────────
+  // A tool call can carry test attachments (src/testAttachments.js): up to 7 MB
+  // of files as base64, about 9.3 MB of JSON. express.json()'s default limit,
+  // 100 KB, unchanged since this transport was added (eabb430) and never chosen
+  // for it, refused any real image or PDF before the tool ran, so the base64
+  // path the hosted server offers could not carry one. An MCP POST is parsed on
+  // its own route, AFTER the auth gate, up to 10 MB: Core's own request limit,
+  // and what the validator and the Builder behind it accept. Nothing is raised
+  // past that, and every other route keeps the default.
+  const MCP_BODY_LIMIT = "10mb";
+  const isMcpPost = (req) => req.method === "POST" && MCP_PATHS.includes(req.path.replace(/(.)\/+$/, "$1"));
+  const defaultJson = express.json();
+  app.use((req, res, next) => (isMcpPost(req) ? next() : defaultJson(req, res, next)));
+  const mcpJson = express.json({ limit: MCP_BODY_LIMIT });
 
   // ─── Fix Accept header for MCP endpoints ──────────────────────────
   // The MCP SDK requires Accept to include BOTH application/json and
@@ -374,7 +387,7 @@ export function startHttpServer(port = 3100) {
           }
         };
 
-        const server = createServer(newSessionId);
+        const server = createServer(newSessionId, { transport: "http" });
         await server.connect(transport);
 
         if (isStaleRecovery) {
@@ -455,7 +468,7 @@ export function startHttpServer(port = 3100) {
   // ONE auth rule for both — see mcpAuthFor above for why the split was removed.
   for (const path of MCP_PATHS) {
     const mcpAuth = mcpAuthFor(path);
-    app.post(path, ...mcpAuth, mcpPost);
+    app.post(path, ...mcpAuth, mcpJson, mcpPost);
     app.get(path, ...mcpAuth, mcpGet);
     app.delete(path, ...mcpAuth, mcpDelete);
   }
@@ -469,9 +482,21 @@ export function startHttpServer(port = 3100) {
   // ─── Error handler ──────────────────────────────────────────────
   app.use((err, req, res, next) => {
     console.error(`[HTTP] ERROR in ${req.method} ${req.originalUrl}:`, err.message || err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Internal server error" });
+    if (res.headersSent) return;
+    // A body over the limit is the caller's to fix, and says so: it was a 500.
+    if (err?.type === "entity.too.large") {
+      res.status(413).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32600,
+          message: `Request body is ${err.length} bytes, over the ${err.limit}-byte limit of this route.` +
+            (isMcpPost(req) ? " Test attachments are capped at 7 MB of files per message." : ""),
+        },
+        id: null,
+      });
+      return;
     }
+    res.status(500).json({ error: "Internal server error" });
   });
 
   // ─── Start ────────────────────────────────────────────────────
