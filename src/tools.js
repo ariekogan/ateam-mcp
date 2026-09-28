@@ -101,6 +101,7 @@ const VERDICT_TOOLS = new Set([
 import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agentDoc.js";
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
+import { ACTOR_ID_TODAY, SERVICE_ACTOR_AT_TOOLS } from "./actorIdToday.js";
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
@@ -1018,7 +1019,7 @@ export const tools = [
     // it times out the run proceeds with no capability guidance at all.
     monitoring: { safe: true, cost: "normal", latency_ms_p95: 25000, output: "bounded" },
     description:
-      "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the /spec topic to read next (via ateam_get_spec) and the tool to wire it. Also returns 'missing' hints (capabilities your goal implies but the design hasn't wired) and lifecycle hints (e.g. connect GitHub when the project will iterate). ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call; consult it as often as you like as the design evolves. If the reply carries `truncated: true`, the answer ran past the length budget and was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search, before concluding the platform lacks something.",
+      "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the /spec topic to read next (via ateam_get_spec) and the tool to wire it. Also returns 'missing' hints (capabilities your goal implies but the design hasn't wired) and lifecycle hints (e.g. connect GitHub when the project will iterate). ADVISORY ONLY — you decide and own the design. REQUIRES SIGN-IN (ateam_auth): it runs your tenant's LLM, so a session without a key is refused. ateam_get_spec needs no key: topic:'capabilities' is the door to read first. Stateless: pass the current design_state each call; consult it as often as you like as the design evolves. If the reply carries `truncated: true`, the answer ran past the length budget and was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search, before concluding the platform lacks something.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1151,8 +1152,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description:
-            "Optional actor ID for conversation continuity. Pass the actor_id from a previous test response to continue the conversation. Omit to auto-generate a test actor (test_<timestamp>_<random>, auto-expires in 24h).",
+          description: `Optional. ${ACTOR_ID_TODAY}`,
         },
       },
       required: ["solution_id", "skill_id", "message"],
@@ -1213,7 +1213,7 @@ export const tools = [
       "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
       "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
       "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true (or pending_question is set — the assistant is waiting on the user). That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
-      "Multi-turn: pass the actor_id from a previous response back in to continue the same thread (e.g. reply to a confirmation prompt). Each call starts a new chain; the same actor_id maintains conversation context.",
+      ACTOR_ID_TODAY,
     inputSchema: {
       type: "object",
       properties: {
@@ -1227,7 +1227,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "Optional: actor ID from a previous response to continue the conversation. Omit for a new conversation.",
+          description: "Optional: the id of an actor that exists in this tenant, to run the call as that actor. The test_<ts>_<rand> id a previous response returned runs the call as _system_service, exactly like omitting it (see actor_id TODAY in this tool's description).",
         },
       },
       required: ["solution_id", "message"],
@@ -1261,7 +1261,13 @@ export const tools = [
     name: "ateam_test_voice",
     core: true,
     description:
-      "Simulate a voice conversation with a deployed solution. Runs the full voice pipeline (session → caller verification → prompt → skill dispatch → response) using text instead of audio. Returns each turn with bot response, verification status, tool calls, and entities. Use this to test voice-enabled solutions end-to-end without making a phone call.",
+      // Says what /spec/voice says (Builder capabilitySpecs.js VOICE_TEST_REACH).
+      // It used to promise "the full voice pipeline … skill dispatch → response,
+      // end-to-end" (32dec97), while every test session's first skill call is
+      // refused by Core (C6), so an agent read a voice-layer pass as a skill pass.
+      "Simulate a voice call to a deployed solution, with text instead of audio. It exercises the VOICE LAYER only: the session, the persona and welcome, and caller verification (a phone_number in the solution's known phones auto-verifies under phone_lookup). " +
+      "It cannot show a skill result today: a test session carries no user login, so Core refuses its first skill call with 401 'Actor not found'. The same refusal hits every caller without a Core user login, a Twilio phone call included; a signed-in web/mobile caller is not affected (known platform defect, Core C6). " +
+      "Returns each turn with the bot response, verification status, tool calls and entities. Test the skill itself with ateam_conversation or ateam_test_skill (same skill runtime, text channel).",
     inputSchema: {
       type: "object",
       properties: {
@@ -3095,6 +3101,11 @@ const TENANT_TOOLS = new Set([
   "ateam_log_progress",
   "ateam_get_progress",
   "ateam_get_lessons",
+  // Runs the TENANT'S LLM (Builder /spec/advisor verifies the key, #81). Left
+  // out, a key-less session reached the Builder and got a 401 that this
+  // process then labelled "your API key may be invalid" — about a key it never
+  // sent — with no auth_gate mark for a proxy to sign in and replay on.
+  "ateam_design_advisor",
 
   // Write operations
   "ateam_build_and_run",
@@ -3217,8 +3228,10 @@ function getActorId(args) {
       "(1) this tool's inputSchema does not DECLARE _adas_actor, so MCP stripped it " +
       "before your handler ran — add it to inputSchema.properties (see toolSchemas() " +
       "below, every data tool must spread ...actor); or " +
-      "(2) the caller is not actor-scoped — ateam_test_connector runs as _system_service, " +
-      "so use ateam_test_skill or a real conversation to exercise per-user tools."
+      "(2) Core had no actor for this call, so it sent none. A test call is NOT this cause: " +
+      "ateam_test_connector, and ateam_test_skill / ateam_conversation without a real actor_id, run as the " +
+      "tenant's shared _system_service actor, and ${SERVICE_ACTOR_AT_TOOLS}. " +
+      "Exercise per-user tools with a real actor's id."
     );
   }
   return id;
@@ -3819,7 +3832,7 @@ export const handlers = {
         // and list promote + build_and_run, so the loop an agent follows most
         // often told it to ship every change.
         { step: 4, action: "Iterate", description: `Change it on \`${BRANCH_WORKFLOW.write_branch}\` and deploy it from \`${BRANCH_WORKFLOW.write_branch}\` to test it, with no promote. Connector code: ateam_github_patch, ONE FILE AT A TIME, then ateam_upload_connector(solution_id, connector_id, github:true). Skill or solution definitions: ateam_patch, which writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call. ${BRANCH_WORKFLOW.iterate_note} NEVER re-pass all connector code inline after first deploy.`, tools: ["ateam_github_patch", "ateam_upload_connector", "ateam_patch", "ateam_redeploy"] },
-        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; what a follow-up inherits, and from which earlier chain, is conversation_flow.actor_id_today). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} Then ateam_build_and_run(solution_id) deploys \`${BRANCH_WORKFLOW.deploy_branch}\`. ${BRANCH_WORKFLOW.the_silent_mistake} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
@@ -3827,16 +3840,16 @@ export const handlers = {
       _important: "ateam_conversation is ASYNC and CHAIN-based. A conversation runs across handoffs + askAnySkill subcalls for possibly minutes — a synchronous wait would hit the 100s edge timeout (524). ALWAYS poll by CHAIN, NEVER by a single job (a job can terminate while the chain is still active).",
       steps: [
         "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id } immediately. The reply is NOT here.",
-        "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true, OR when pending_question is set (the assistant is asking the user something — answer via step 4).",
+        "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true, OR when pending_question is set (the assistant is asking the user something — read step 4 before you answer).",
         "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
-        "4. CONTINUE THE THREAD — reply / next turn: ateam_conversation(solution_id, message, actor_id: <same actor_id>). New chain, same conversation context. Repeat from step 2.",
+        "4. NEXT TURN — ateam_conversation(solution_id, message) again. It starts a new chain. What that chain inherits from an earlier one, and from WHICH one (as _system_service it may be another test thread's), is actor_id_today below. Repeat from step 2.",
       ],
       example: {
         kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "test_x" }',
         poll: 'ateam_chain_status(chain_id: "job_ab12") → { chain_status: "running", chain_done: false } … repeat … → { chain_status: "completed", chain_done: true, result: "…" }',
         full_tree: 'ateam_get_chain(chain_id: "job_ab12") → { chainJobs: [ {jobId, skill, status, relation, depth} … ], executionSteps: [ … ] }',
-        continue: 'ateam_conversation(solution_id: "ada", message: "yes", actor_id: "test_x")',
       },
+      actor_id_today: ACTOR_ID_TODAY,
     },
     // RENDERED FROM BRANCH_WORKFLOW — do not restate the model here.
     branching: {
@@ -4306,8 +4319,11 @@ export const handlers = {
   },
 
   // Design-time capability advisor. Proxies to the Builder's /spec/advisor
-  // (LLM over the curated capability catalog). Public endpoint (auth-exempt),
-  // but we forward the session so a base override is honored.
+  // (LLM over the curated capability catalog). SIGNED-IN ONLY, and TENANT_TOOLS
+  // says so: it runs the tenant's LLM, so the Builder refuses a call with no
+  // verified key (401 SIGN_IN_REQUIRED, Builder #81). This comment used to say
+  // "Public endpoint (auth-exempt)" (5f539fa) — the exemption that let a bare
+  // X-ADAS-TENANT header bill another tenant's LLM.
   ateam_design_advisor: async ({ goal, design_state }, sid) => {
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
     // Direct call to the Builder's /spec/advisor. The session's X-ADAS-TENANT
@@ -4536,15 +4552,21 @@ export const handlers = {
       validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000, idempotent: true });
       phases.push({ phase: "validate", status: "done" });
     } catch (err) {
-      // A DEAD SOCKET IS NOT A FORMAT ERROR. "fetch failed" / ECONNREFUSED /
+      // A DEAD SOCKET IS NOT A FORMAT ERROR. "fetch failed" / ECONNRESET /
       // ETIMEDOUT / socket hang up mean the deploy service was unreachable —
       // telling the agent to go re-read the solution spec sends it to fix
       // something that is not broken, at the cost of several turns. Observed
       // 2026-08-21 (job_aehopl8z): the backend had been restarted mid-run and
       // the agent burned turns on get_spec and spec_search chasing a phantom
       // format problem. The two diagnoses are opposites; pick by the cause.
-      const transport = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|network|aborted/i
-        .test(err.message || "");
+      //
+      // BY THE CAUSE, NOT THE WORDS. f0bb2c2 matched /…|network|aborted/ over
+      // err.message, which carries the response body (formatError), so a 400
+      // whose body said "network" was told to RETRY an unchanged definition,
+      // and a gateway 524 was sent to re-read the spec. isTimeoutError answers
+      // timeout-or-gateway from the status and request()'s mark; a connection
+      // that failed before any answer carries the socket's errno in err.cause.
+      const transport = isTimeoutError(err) || typeof err?.cause?.code === "string";
       return {
         ok: false,
         phase: "validation",
@@ -5733,7 +5755,7 @@ export const handlers = {
             _note: "Conversation started (async). The reply is NOT in this response — poll the CHAIN for it.",
             slim: `ateam_chain_status(chain_id: "${chainId}")  → cheap chip-quick poll; loop ~2s until chain_done===true (whole chain terminal, not just one job). Then read result.`,
             full: `ateam_get_chain(job_id: "${chainId}")  → full tree + per-job detail (heavier; use once, not in a poll loop)`,
-            continue: kickoff?.actor_id ? `ateam_conversation(actor_id: "${kickoff.actor_id}", ...) to continue the thread` : undefined,
+            actor_id: kickoff?.actor_id ? ACTOR_ID_TODAY : undefined,
           }
         : undefined,
     };
@@ -7409,7 +7431,16 @@ const MAX_INDEX_NAMES = 200;
  * Now every check measures the document that will actually be returned.
  */
 function summarizeSpecResult(result) {
-  const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
+  // Through the TOOL: the reader is an MCP client and cannot GET anything, yet
+  // this said "GET /spec/<topic> directly" (360fb78). The Builder (#67) serves a
+  // page too big for one answer with a `_read_it_in_parts` index — small and
+  // first, so it survives the cut below — and returns any part whole for
+  // search:"<id>".
+  const how = "Call ateam_get_spec again with the same topic (and section, if you gave one) plus search:\"<id>\" — " +
+    (result._read_it_in_parts
+      ? "_read_it_in_parts at the top of this page lists the id of every part, and each part comes back WHOLE."
+      : "an entry id named here returns the entries that match it.") +
+    " ateam_spec_search finds the entry you need when you do not know its id.";
   const sizeOf = (v) => JSON.stringify(v ?? null).length;
   // The pretty-printed length of one top-level entry. Swapping a section's
   // value changes the whole document's length by exactly the difference of
@@ -7626,8 +7657,8 @@ export async function handleToolCall(name, args, sessionId) {
   try {
     const result = await handler(args, sessionId);
 
-    // An actor id is BORN here: ateam_conversation/ateam_test_skill mint one and
-    // return it, and the docs tell callers to pass it back for multi-turn. Learn
+    // An actor id is BORN here: ateam_conversation/ateam_test_skill return one
+    // (a real actor when the caller named one; see actorIdToday.js). Learn
     // it on the way out so the follow-up ateam_get_execution_logs /
     // ateam_get_metrics on that very job is not refused for not knowing who ran
     // it — the single most common dead end when debugging a run.
