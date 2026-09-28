@@ -103,8 +103,9 @@ import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
-import { isTimeoutError, jsonBodyOf, jsonVerdictOf } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
+import { createHash, randomUUID } from "node:crypto";
 
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
 // three different things here (the mac1 container, npm, and each developer's local
@@ -130,7 +131,10 @@ export const MCP_VERSION = (() => {
 // returns the final job entry (which is the same shape as the original
 // sync response would have been, plus job metadata). MCP tool wrappers use
 // this so the agent gets a normal response from a long-running tool call —
-// no async API leaks out to agent prompts.
+// no async API leaks out to agent prompts. That keeps THIS process's hop to the
+// Builder under the edge's limit. The caller's hop to a hosted ateam-mcp has
+// the same limit, and polling here does nothing for it: see "The hosted call's
+// budget" below.
 async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000, intervalMs = 2000 } = {}) {
   const start = Date.now();
   let lastStatus = null;
@@ -158,6 +162,170 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
     job_id: jobId,
     hint: 'The job may still be running on the server. Call get(`/deploy/jobs/<job_id>`) directly to check.',
   };
+}
+
+// ─── The hosted call's budget ───────────────────────────────────────
+//
+// A CALL TO THE HOSTED SERVER MUST ANSWER BEFORE THE EDGE DROPS IT. src/http.js
+// answers tools/call with ONE JSON body (enableJsonResponse, 11bd691, for
+// ChatGPT) and sends nothing until the tool returns, and Cloudflare in front of
+// the hosted server drops a proxied request that has been silent for ~100s.
+// ateam_build_and_run runs validate → deploy → connector re-upload → health →
+// GitHub push → agent doc → widget health one after another in this process:
+// ~133s on the Ada Guide first deploy (K15, 2026-09-28). The client got "the
+// server isn't responding", with no result and nothing to ask about, while the
+// run went on and deployed. The Builder hop was never the problem: it answered
+// in 27s, so pollDeployJob's fallback had nothing to do.
+//
+// So a call on any transport but a stated "stdio" (api.js callTransport: null
+// is not local) runs the pipeline as a RUN held here, and waits for it at most
+// HOSTED_CALL_BUDGET_MS. A run not finished by then goes on: it is not stopped,
+// and nothing of it is sent again. The call answers status:"running" with the
+// run's run_id, and ateam_build_and_run(resume:true) waits for THAT run again,
+// under the same budget, and answers with its result. resume never deploys. A
+// call identical to the run in flight joins it, as the Builder's deploy door
+// joins an identical payload (routes/deploy.js payloadHash); any other call
+// starts a run of its own, and the door queues its deploy behind this one.
+//
+// A stdio call is unchanged: the caller's own process holds it as long as the
+// pipeline takes, and nothing is held here.
+//
+// Runs live in this process's memory. A restart forgets them (the deploy is the
+// Builder's and goes on regardless), and resume then says there is no run.
+export const HOSTED_CALL_BUDGET_MS = 75_000;
+
+// How long a finished run can still be resumed: as long as the Builder keeps a
+// finished deploy job (startAsyncDeployJob evicts after 30 minutes).
+const FINISHED_RUN_KEPT_MS = 30 * 60_000;
+
+const buildRuns = new Map();       // run_id → run
+const latestBuildRun = new Map();  // owner → run_id of the last run started for it
+
+/**
+ * WHOSE run: the API this session deploys to, the credentials it deploys with,
+ * and the solution. A run_id from another tenant, another key or another
+ * solution finds nothing. Hashed, so no key sits in a map key.
+ */
+function buildRunOwner(sid, solutionId) {
+  const { tenant, apiKey } = getCredentials(sid);
+  return createHash("sha256")
+    .update([getBaseUrl(sid), tenant || "", apiKey || "", solutionId].join("\n"))
+    .digest("hex");
+}
+
+/** Key-sorted JSON: the same arguments in another order are the same call. */
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().filter((k) => value[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function startBuildRun(owner, solutionId, deployArgs, argsKey, sid) {
+  const run = {
+    run_id: `bar_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`,
+    owner,
+    solution_id: solutionId,
+    args_key: argsKey,
+    started_at: new Date().toISOString(),
+    started_ms: Date.now(),
+    outcome: null, // { value } or { error }, once the pipeline has settled
+  };
+  // Settles, never rejects: every caller waiting on it reads `outcome`.
+  run.done = runBuildAndRun(deployArgs, sid).then(
+    (value) => { run.outcome = { value }; },
+    (error) => { run.outcome = { error }; },
+  ).then(() => {
+    setTimeout(() => {
+      buildRuns.delete(run.run_id);
+      if (latestBuildRun.get(owner) === run.run_id) latestBuildRun.delete(owner);
+    }, FINISHED_RUN_KEPT_MS).unref?.();
+  });
+  buildRuns.set(run.run_id, run);
+  latestBuildRun.set(owner, run.run_id);
+  return run;
+}
+
+/** The run's own answer, if it has one within what is left of this call's budget; else "running". */
+async function answerWithinBudget(run, callStartMs) {
+  if (!run.outcome) {
+    let timer;
+    const outOfBudget = new Promise((resolve) => {
+      timer = setTimeout(resolve, Math.max(0, HOSTED_CALL_BUDGET_MS - (Date.now() - callStartMs)));
+    });
+    await Promise.race([run.done, outOfBudget]);
+    clearTimeout(timer);
+  }
+  if (!run.outcome) return stillRunning(run);
+  if (run.outcome.error) throw run.outcome.error;
+  return run.outcome.value;
+}
+
+function stillRunning(run) {
+  const secs = Math.round((Date.now() - run.started_ms) / 1000);
+  const resume = `ateam_build_and_run({ solution_id: "${run.solution_id}", resume: true, run_id: "${run.run_id}" })`;
+  return {
+    // No verdict yet: neither a success nor a failure.
+    ok: null,
+    status: "running",
+    solution_id: run.solution_id,
+    run_id: run.run_id,
+    started_at: run.started_at,
+    running_for_s: secs,
+    message:
+      `The deploy of "${run.solution_id}" is still running (${secs}s so far). This call answers now because a hosted ` +
+      `connection is cut off after about 100s without an answer. The run was not stopped, and nothing of it is sent again.`,
+    _next:
+      `${resume} waits for THIS run again (up to ${HOSTED_CALL_BUDGET_MS / 1000}s) and answers with its result, and it deploys nothing. ` +
+      "ateam_build_and_run without resume:true is a new deploy, unless its arguments are identical to this run's: then it joins this run.",
+  };
+}
+
+function noRunToResume(solutionId, runId) {
+  const which = runId ? ` with run_id "${runId}"` : "";
+  return {
+    ok: false,
+    code: "NO_RUN_TO_RESUME",
+    ...(solutionId && { solution_id: solutionId }),
+    ...(runId && { run_id: runId }),
+    error:
+      `There is no ateam_build_and_run of "${solutionId || "?"}"${which} to resume on this server. A run can be resumed for ` +
+      `${FINISHED_RUN_KEPT_MS / 60_000} minutes after it finishes, only with the credentials that started it, and only until this ` +
+      "server restarts. A stdio call is never resumed: it answers when its run is done.",
+    _next: solutionId
+      ? `This call deployed nothing. Before you deploy again, see what is deployed: ateam_get_solution(solution_id: "${solutionId}", view: "status").`
+      : "Pass the solution_id of the run to resume, and the run_id its answer gave.",
+  };
+}
+
+/**
+ * ateam_build_and_run: the pipeline (runBuildAndRun), on stdio as it always
+ * ran; on any other transport within HOSTED_CALL_BUDGET_MS. resume:true answers
+ * from a run already started, and never deploys.
+ */
+async function buildRunWithinBudget(args, sid) {
+  const callStartMs = Date.now();
+  const { resume, run_id: runId, ...deployArgs } = args || {};
+  const solutionId = deployArgs.solution?.id || deployArgs.solution_id;
+  if (resume === true || resume === "true") {
+    if (!solutionId) return noRunToResume(null, runId);
+    const owner = buildRunOwner(sid, solutionId);
+    const run = buildRuns.get(runId || latestBuildRun.get(owner));
+    if (!run || run.owner !== owner) return noRunToResume(solutionId, runId);
+    return answerWithinBudget(run, callStartMs);
+  }
+  // With no solution id the pipeline answers its pre_check at once.
+  if (callTransport() === "stdio" || !solutionId) return runBuildAndRun(deployArgs, sid);
+
+  const owner = buildRunOwner(sid, solutionId);
+  const argsKey = createHash("sha256").update(stableJson(deployArgs)).digest("hex");
+  const inFlight = buildRuns.get(latestBuildRun.get(owner));
+  const run = inFlight && !inFlight.outcome && inFlight.args_key === argsKey
+    ? inFlight
+    : startBuildRun(owner, solutionId, deployArgs, argsKey, sid);
+  return answerWithinBudget(run, callStartMs);
 }
 
 // ─── The redeploy verdict ───────────────────────────────────────────
@@ -1060,6 +1228,8 @@ export const tools = [
     core: true,
     description:
       "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → on a FIRST deploy (no repo yet) creates the GitHub repo and pushes to it.\n\n" +
+      `OVER A HOSTED CONNECTION (HTTP), which is cut off after ~100s without an answer, the call answers within ${HOSTED_CALL_BUDGET_MS / 1000}s. A run not finished by then answers status:"running" with a run_id and goes on: nothing is stopped or sent again. ` +
+      "ateam_build_and_run(solution_id, resume:true, run_id) then answers with THAT run's result (waiting up to the same time again) and deploys nothing. A local (stdio) connection waits for the whole run.\n\n" +
       "🌳 DEV/PROD WORKFLOW:\n" +
       "  1. Edit files → ateam_github_patch (writes to `dev` branch by default)\n" +
       "  2. (Optional) Preview what's about to ship → ateam_github_diff\n" +
@@ -1105,6 +1275,14 @@ export const tools = [
         test_skill_id: {
           type: "string",
           description: "Optional: which skill to test (defaults to the first skill).",
+        },
+        resume: {
+          type: "boolean",
+          description: "Optional: true answers with the result of a run already started (one that answered status:\"running\") instead of deploying. Needs solution_id; every other deploy argument is ignored. Waits for the run up to the hosted call's budget again.",
+        },
+        run_id: {
+          type: "string",
+          description: "Optional, with resume:true: the run_id a status:\"running\" answer gave, so the answer is THAT run's. Omitted: the last run started for this solution with these credentials.",
         },
       },
       required: [],
@@ -3706,6 +3884,546 @@ function withServedBy(doc, sid) {
   return { served_by: servedBy(sid), ...doc };
 }
 
+// ─── Composite: Build & Run — the pipeline ────────────────────────────
+// Validates → Deploys → Health-checks → Optionally tests
+// One call replaces: validate_solution + deploy_solution + get_solution(health)
+//
+// ateam_build_and_run runs it: for as long as it takes on stdio, and within
+// HOSTED_CALL_BUDGET_MS over the hosted transport (buildRunWithinBudget).
+async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, skills, connectors, mcp_store, github, test_message, test_skill_id }, sid) {
+  let solution = solutionArg;
+  // If only solution_id passed (no full solution), we'll pull from GitHub
+  const solutionId = solution?.id || solIdArg;
+  if (!solutionId) {
+    return { ok: false, phase: "pre_check", error: "Provide either solution (object) or solution_id (string)." };
+  }
+  // An id no path can carry is refused before anything is sent: deployed, it
+  // would be a solution no later tool call could address.
+  pathSeg(solutionId);
+  const phases = [];
+
+  // Guard: reject large mcp_store — agent should use github_patch instead
+  if (mcp_store) {
+    const totalSize = Object.values(mcp_store).reduce((sum, files) => {
+      return sum + (Array.isArray(files) ? files.reduce((s, f) => s + (f.content?.length || 0), 0) : 0);
+    }, 0);
+    if (totalSize > 200_000) {
+      return {
+        ok: false,
+        phase: "pre_check",
+        error: `mcp_store is too large (${Math.round(totalSize / 1024)}KB). Max ~200KB inline.`,
+        message: "Connector code is too large to pass inline. Write files individually to GitHub, then deploy from there.",
+        _fix: [
+          "1. Write each file: ateam_github_patch(solution_id, path: 'connectors/<id>/server.js', content: '...')",
+          "2. Repeat for package.json, UI assets, etc.",
+          "3. Deploy: ateam_build_and_run(solution, skills) — will auto-pull from GitHub",
+        ],
+      };
+    }
+  }
+
+  // Phase 0: Auto-detect GitHub repo — if no mcp_store passed and repo exists, pull bundle from GitHub
+  let effectiveMcpStore = mcp_store;
+  let effectiveSkills = skills;
+  // WHAT THE CALLER WROTE, captured before Phase 0 fills the gaps from the repo.
+  // `connectors` is reassigned below when it is synthesized from mcp_store keys,
+  // so it has to be read here.
+  const inline = {
+    solution: Boolean(solutionArg),
+    skills: Array.isArray(skills) && skills.length > 0,
+    connectors: Array.isArray(connectors) && connectors.length > 0,
+  };
+  // Set only when Phase 0 actually read the bundle. `github` alone does not say
+  // that: a caller may pass github:true together with mcp_store, and then
+  // nothing is pulled.
+  let pulledMcpStore = false;
+  if (!mcp_store) {
+    try {
+      const ghStatus = await get(apiPath`/deploy/solutions/${solutionId}/github/status`, sid);
+      // repo_url only says a REPO EXISTS. It has never said the repo carries
+      // this solution's connector source, and treating the two as the same
+      // claim is how a connector with nothing in the repo used to slip
+      // through Phase 0 and then vanish from connectors[] below. The real
+      // per-connector answer comes from pull-bundle, and it is acted on
+      // there — this stays a cheap "is GitHub worth asking at all?" gate.
+      if (ghStatus?.repo_url) {
+        github = true;
+      }
+    } catch { /* no repo — first deploy, mcp_store expected */ }
+  }
+  if (github && !mcp_store) {
+    try {
+      // NAME THE BRANCH. build_and_run deploys the SHIPPED state — that is
+      // the whole dev → promote → main design, and why the Builder refuses
+      // this deploy with MAIN_BEHIND_DEV until you promote. This call used
+      // to send {} and lean on the Builder's default, which was `main` until
+      // Builder 873558e changed it to `dev`: from then on this deployed
+      // UNSHIPPED dev while every doc, the guard and deployed_from_branch
+      // all still said main. The Builder now refuses a branch-less read
+      // (BRANCH_REQUIRED), so the intent has to be stated here, from the
+      // one owner of the branch story.
+      const pullResult = await post(
+        apiPath`/deploy/solutions/${solutionId}/github/pull-bundle`,
+        { branch: BRANCH_WORKFLOW.deploy_branch },
+        sid,
+        // A read over POST (it bundles the repo, writes nothing): declared
+        // idempotent, so one lost answer does not fail the whole deploy.
+        { timeoutMs: 60_000, idempotent: true },
+      );
+      if (!pullResult.ok) {
+        return {
+          ok: false,
+          phase: "github_pull",
+          error: pullResult.error || "Failed to pull bundle from GitHub",
+          hint: pullResult.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
+          message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+        };
+      }
+      effectiveMcpStore = pullResult.mcp_store || {};
+      pulledMcpStore = true;
+      // Use solution from GitHub if not passed inline
+      if (!solution && pullResult.solution) {
+        solution = pullResult.solution;
+      }
+      // Use skills from GitHub if not passed inline
+      if (!effectiveSkills?.length && pullResult.skills?.length) {
+        effectiveSkills = pullResult.skills;
+      }
+      // Synthesize connectors[] metadata from mcp_store keys if not passed inline.
+      // The pull-bundle endpoint returns mcp_store (files) and solution.platform_connectors
+      // (declarations) but not a top-level connectors[] array. The validator/deploy
+      // pipeline expects one, so build it from the mcp_store we just pulled.
+      //
+      // ROBUSTNESS: mcp_store is normally keyed by CONNECTOR ID, but a bad/older
+      // pull-bundle can key it by the full `connectors/<id>/<file>` path — in
+      // which case the old `map(id => ...)` registered ONE connector PER FILE with
+      // the path as its id (observed 2026-08-15: db.connectors got
+      // connectors/expense-tracker-mcp/server.js etc. as rows). Collapse either
+      // shape to the connector id and dedupe, so a mis-keyed mcp_store can never
+      // manufacture file-path connectors. (Core also rejects "/"-bearing ids at
+      // its boundary as defense-in-depth.)
+      //
+      // B5 — A CONNECTOR WITH NO SOURCE IN THE REPO MUST NOT VANISH.
+      // Synthesizing purely from mcp_store keys means a declared connector the
+      // repo does not carry is simply ABSENT from connectors[], so nothing
+      // validates it, nothing reports it, and the deploy proceeds as though it
+      // were never part of the solution. Phase 0 made this likelier by
+      // treating "the repo exists" (repo_url) as "the repo has the source" —
+      // two different claims.
+      //
+      // pull-bundle now answers per connector, so union those ids in. A
+      // connector listed here still deploys when its authored source lives in
+      // the Builder's store; what it can no longer do is disappear.
+      const missingSource = Array.isArray(pullResult.connectors_missing_source)
+        ? pullResult.connectors_missing_source : [];
+      const unreadable = Array.isArray(pullResult.connectors_unreadable)
+        ? pullResult.connectors_unreadable : [];
+      if (!connectors?.length && (Object.keys(effectiveMcpStore).length > 0 || missingSource.length > 0)) {
+        const connIds = [...new Set([
+          ...Object.keys(effectiveMcpStore).map((k) => {
+            const m = String(k).match(/^connectors\/([^/]+)\//);
+            return m ? m[1] : k;
+          }),
+          ...missingSource.map((c) => (typeof c === "string" ? c : c?.id)).filter(Boolean),
+        ])];
+        connectors = connIds.map((id) => ({
+          id,
+          name: id,
+          transport: "stdio",
+        }));
+      }
+      phases.push({
+        phase: "github_pull",
+        status: "done",
+        skills_found: pullResult.skills_found || 0,
+        connectors_found: pullResult.connectors_found || 0,
+        files_loaded: pullResult.files_loaded || 0,
+        connectors_synthesized: connectors?.length || 0,
+        // Named, not swallowed. The repo existing said nothing about these.
+        ...(missingSource.length > 0 && {
+          connectors_missing_source: missingSource,
+          note: "These connectors are declared but the repo carries no source for them. They are still deployed if the Builder holds their authored source; if it does not, validation refuses and ateam_get_connector_source / ateam_recover_connector_source tell you which.",
+        }),
+        ...(unreadable.length > 0 && { connectors_unreadable: unreadable }),
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        phase: "github_pull",
+        error: err.message,
+        message: "Failed to pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+      };
+    }
+  }
+
+  // Guard: solution required (either inline or from GitHub)
+  if (!solution) {
+    return {
+      ok: false,
+      phase: "pre_check",
+      error: "No solution provided and none found in GitHub repo.",
+      message: "Pass solution inline or ensure solution.json exists in the GitHub repo.",
+    };
+  }
+
+  // Guard: skills required (either inline or from GitHub)
+  if (!effectiveSkills?.length) {
+    return {
+      ok: false,
+      phase: "pre_check",
+      error: "No skills provided and none found in GitHub repo.",
+      message: "Pass skills inline or ensure they exist in the GitHub repo (skills/{id}/skill.json).",
+    };
+  }
+
+  // Phase 1: Validate
+  let validation;
+  try {
+    validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000, idempotent: true });
+    phases.push({ phase: "validate", status: "done" });
+  } catch (err) {
+    // A DEAD SOCKET IS NOT A FORMAT ERROR. "fetch failed" / ECONNREFUSED /
+    // ETIMEDOUT / socket hang up mean the deploy service was unreachable —
+    // telling the agent to go re-read the solution spec sends it to fix
+    // something that is not broken, at the cost of several turns. Observed
+    // 2026-08-21 (job_aehopl8z): the backend had been restarted mid-run and
+    // the agent burned turns on get_spec and spec_search chasing a phantom
+    // format problem. The two diagnoses are opposites; pick by the cause.
+    const transport = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|network|aborted/i
+      .test(err.message || "");
+    return {
+      ok: false,
+      phase: "validation",
+      error: err.message,
+      retryable: transport,
+      message: transport
+        ? "The deploy service was UNREACHABLE — this is a transport failure, not a problem with your solution. Do NOT re-read the spec or change your definition. Wait a few seconds and RETRY the same call; if it keeps failing, the backend is down or was restarted mid-run."
+        : "Validation call failed. Check your solution/skill format against the spec (ateam_get_spec topic='solution').",
+    };
+  }
+
+  // Check for blocking errors
+  const errors = validation.errors || validation.validation?.errors || [];
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      phase: "validation",
+      errors,
+      warnings: validation.warnings || validation.validation?.warnings || [],
+      message: `Validation found ${errors.length} error(s). Fix them and try again.`,
+    };
+  }
+
+  // Phase 2: Deploy
+  //
+  // pulled_from_github NAMES THE PARTS THAT ARE THE REPO'S CONTENT, and it
+  // must be exact. The Builder (#50) saves those parts into its store as a
+  // MIRROR: FS-only, never written back; it records a sync baseline instead
+  // (which side changed is decided from that, not from updated_at). An
+  // inline solution or skills it writes to `dev`, where an inline edit
+  // belongs. (Inline connector CODE is a different, older story: on a repo
+  // that exists, no deploy writes it to GitHub at all. Use ateam_github_write
+  // for code.) And its MAIN_BEHIND_DEV guard checks only the files the named
+  // parts were read from.
+  //
+  //   solution   pulled, and the caller passed no connectors[] of its own:
+  //              the Builder import adds new connector ids to
+  //              solution.platform_connectors, so an inline connectors[] is
+  //              an edit to solution.json.
+  //   skills     pulled.
+  //   mcp_store  pulled (Phase 0 pulls exactly when no mcp_store was passed).
+  //
+  // A LIST, NOT A FLAG. A flag for "all of it" (github:true, the previous cut
+  // of this change) left build_and_run(solution) with two wrong answers:
+  // mirror everything and the inline solution never reaches GitHub, or mirror
+  // nothing and the pulled skills are written back to dev, so the next
+  // identical call is refused because of its own write. It is also a name
+  // the Builders running today do not know. github:true is one they do, and
+  // their async hop turns it into a completeness check that refuses any
+  // connector whose source lives only in the Builder store.
+  //
+  // Sent on EVERY deploy, [] when nothing was pulled, so a Builder can tell
+  // "pulled nothing" from "a client that does not say".
+  //
+  // skip_github_push is NOT that statement. It follows the `github` argument,
+  // which is also set together with an inline mcp_store, when nothing is
+  // pulled. It is sent exactly as before (99bba7e), for the Builders that
+  // read it.
+  const pulledFromGithub = pulledMcpStore
+    ? [
+        ...(!inline.solution && !inline.connectors ? ["solution"] : []),
+        ...(!inline.skills ? ["skills"] : []),
+        "mcp_store",
+      ]
+    : [];
+  const deployBody = {
+    solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
+    ...(github && { skip_github_push: true }),
+    pulled_from_github: pulledFromGithub,
+  };
+  let deploy;
+  try {
+    // Try sync first (fast for small solutions)
+    deploy = await post("/deploy/solution", deployBody, sid, { timeoutMs: 120_000 });
+    phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
+  } catch (err) {
+    // A VERDICT IS NOT A TIMEOUT. isTimeoutError counts every 502, so a 502
+    // whose body named what failed was re-POSTed in async mode. Only a
+    // failure with no verdict may move to the async door.
+    if (!isTimeoutError(err) || jsonVerdictOf(err.body)) {
+      return { ok: false, phase: "deployment", phases, error: err.message, validation_warnings: validation.warnings || [] };
+    }
+
+    // Timeout → retry with async mode + polling
+    phases.push({ phase: "deploy", status: "async_retry" });
+    try {
+      // The SAME body. The async door must not learn less about where the
+      // payload came from than the sync one did.
+      const asyncResult = await post("/deploy/solution", { ...deployBody, async: true }, sid, { timeoutMs: 15_000 });
+
+      if (asyncResult.job_id) {
+        // Poll for completion (up to 10 min)
+        const jobId = asyncResult.job_id;
+        // Built once, before the loop: see pollDeployJob.
+        const jobPath = apiPath`/deploy/jobs/${jobId}`;
+        const maxWait = 600_000;
+        const pollInterval = 5_000;
+        const start = Date.now();
+        while (Date.now() - start < maxWait) {
+          await new Promise(r => setTimeout(r, pollInterval));
+          try {
+            const job = await get(jobPath, sid);
+            if (job.status === 'done' || job.status === 'failed') {
+              deploy = job;
+              phases.push({ phase: "deploy", status: job.status });
+              break;
+            }
+          } catch (err) {
+            // #4 Silent-catch audit: poll errors are usually transient
+            // (network blip, restart). Logging at debug level so they
+            // don't drown the console but ARE visible if you bump the
+            // log level after a stuck deploy.
+            if (process.env.MCP_DEBUG_POLLS) console.warn(`[ateam_build_and_run] poll ${jobId} error (will retry): ${err.message}`);
+          }
+        }
+        if (!deploy) {
+          return { ok: false, phase: "deployment", phases, error: "Async deploy timed out after 10 minutes", validation_warnings: validation.warnings || [],
+            hint: "Deploy is too large even for async mode. Use incremental tools instead: ateam_patch(solution_id, target:'skill', skill_id, updates) for skill changes, ateam_upload_connector(solution_id, connector_id, github:true) for connector code changes." };
+        }
+      }
+    } catch (asyncErr) {
+      return { ok: false, phase: "deployment", phases, error: `Sync timed out, async fallback failed: ${asyncErr.message}`, validation_warnings: validation.warnings || [],
+        hint: "Deploy timed out. Use incremental tools: ateam_patch for skill changes, ateam_upload_connector for connector changes. These deploy one component at a time and never timeout." };
+    }
+  }
+
+  if (!deploy.ok) {
+    return {
+      ok: false,
+      phase: "deployment",
+      phases,
+      deploy,
+      validation_warnings: validation.warnings || [],
+      message: "Deployment returned an error. See deploy details above.",
+    };
+  }
+
+  // Phase 2.5: Restart connectors that have source code (upload triggers stop+start)
+  //
+  // A SECOND UPLOAD, AND STILL THE ONLY ONE FOR SOME CHANGES. The deploy above
+  // has already written every connector in mcp_store to the Builder's slot and
+  // uploaded it (the deploy door's preSyncConnectors), so on a first deploy this
+  // sends Core the same code again (~34s of K15's 133s). But pre-sync skips a
+  // connector that is up when its hash matches, and that hash covers only the
+  // launch file, package.json and rn-bundle/* (Builder exportDeploy.js
+  // _computeConnectorSourceHash, c88b12e). A change anywhere else in a running
+  // connector (rn-src/*.tsx, the only RN source the spec teaches, or a module
+  // server.js imports) is skipped there and Core keeps the old code. The upload
+  // route this calls hashes every file, so this phase is what delivers that
+  // change. Delete it when pre-sync hashes every file it uploads.
+  //
+  // A runtime:"device" connector is SKIPPED. It has authored source — the RN
+  // bundle (rn-src/, package.json, the esbuild config) — so it looks like an
+  // ordinary connector to a loop that only asks "does it have files?". But
+  // there is no server process to restart: the bundle ships to the phone.
+  // Uploading it here 409s on the merge and then health marked the connector
+  // "error", failing a deploy whose connector was working as designed.
+  //
+  // Classified from the DECLARED connectors[], which the caller authored —
+  // not by asking Core. Same ownership rule the Builder now follows.
+  const deviceConnectorIds = new Set(
+    (connectors || [])
+      .filter((c) => c && typeof c === "object" && c.runtime === "device" && c.id)
+      .map((c) => c.id),
+  );
+  if (effectiveMcpStore && Object.keys(effectiveMcpStore).length > 0) {
+    const connectorResults = [];
+    for (const [connId, files] of Object.entries(effectiveMcpStore)) {
+      if (!Array.isArray(files) || files.length === 0) continue;
+      if (deviceConnectorIds.has(connId)) {
+        connectorResults.push({ id: connId, ok: true, tools: 0, skipped: "device_runtime" });
+        continue;
+      }
+      try {
+        // THE MERGE BASE IS THE BRANCH THESE FILES CAME FROM. The upload
+        // merges `files` over the connector's GitHub state at `ref` (default
+        // `dev`), laid over the files Core already runs. With the default,
+        // files that exist only on dev rode into a run that says it deploys
+        // main. ref:main keeps those out. It does NOT remove a file that is
+        // already running in Core (the deployed copy is the floor of the
+        // merge), e.g. one a dev iteration uploaded earlier. An inline
+        // mcp_store keeps the default: those files are the caller's
+        // iteration, and dev is where iteration lives.
+        const uploadResult = await post(
+          apiPath`/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
+          { files, ...(pulledMcpStore && { ref: BRANCH_WORKFLOW.deploy_branch }) },
+          sid,
+          { timeoutMs: 120_000 },
+        );
+        connectorResults.push({ id: connId, ok: true, tools: uploadResult.tools || 0 });
+      } catch (err) {
+        connectorResults.push({ id: connId, ok: false, error: err.message });
+      }
+    }
+    phases.push({
+      phase: "connector_restart",
+      status: connectorResults.every(r => r.ok) ? "done" : "partial",
+      connectors: connectorResults,
+    });
+  }
+
+  // Phase 3: Health check (with brief wait for propagation)
+  let health;
+  try {
+    await sleep(2000);
+    health = await get(apiPath`/deploy/solutions/${solutionId}/health`, sid);
+    phases.push({ phase: "health", status: "done" });
+  } catch (err) {
+    health = { error: err.message };
+    phases.push({ phase: "health", status: "error", error: err.message });
+  }
+
+  // Phase 4: Warm test (optional)
+  let test_result;
+  if (test_message) {
+    const skillId = test_skill_id || effectiveSkills?.[0]?.id;
+    if (skillId) {
+      try {
+        test_result = await post(
+          apiPath`/deploy/solutions/${solutionId}/skills/${skillId}/test`,
+          { message: test_message },
+          sid,
+          { timeoutMs: 90_000 },
+        );
+        phases.push({ phase: "test", status: "done", skill_id: skillId });
+      } catch (err) {
+        test_result = { error: err.message };
+        phases.push({ phase: "test", status: "error", error: err.message });
+      }
+    }
+  }
+
+  // Phase 5: GitHub push — only when NOT deployed from GitHub
+  let github_result;
+  if (github) {
+    // "Deployed from GitHub" only when something WAS pulled: github:true with
+    // an inline mcp_store pulls nothing and skips the push all the same.
+    github_result = pulledMcpStore
+      ? { skipped: true, reason: 'Deployed from GitHub — push-back skipped.' }
+      : { skipped: true, reason: 'github:true was passed with inline code — nothing was pulled, and the push was skipped.' };
+    phases.push({ phase: "github", status: "skipped", reason: pulledMcpStore ? "pulled_from_github" : "github_flag_inline_payload" });
+  } else {
+    try {
+      github_result = await post(
+        apiPath`/deploy/solutions/${solutionId}/github/push`,
+        { push_to_github: true, message: `Deploy: ${solution.name || solutionId}` },
+        sid,
+        { timeoutMs: 60_000 },
+      );
+      phases.push({
+        phase: "github",
+        status: github_result.skipped ? "skipped" : "done",
+        ...(github_result.repo_url && { repo_url: github_result.repo_url }),
+      });
+    } catch (err) {
+      github_result = { error: err.message };
+      phases.push({ phase: "github", status: "error", error: err.message });
+    }
+  }
+
+  // Auto-seed / refresh the agent onboarding doc. Non-fatal — any failure
+  // here is swallowed so it can't break a successful deploy. The tool is
+  // idempotent: if the rendered doc is byte-identical to what's in the
+  // repo, it returns unchanged:true and writes no commit.
+  let agent_doc_result = null;
+  try {
+    agent_doc_result = await handlers.ateam_write_agent_doc({ solution_id: solutionId }, sid);
+    phases.push({
+      phase: "agent_doc",
+      status: agent_doc_result?.unchanged ? "unchanged" : "done",
+      created: agent_doc_result?.created || false,
+      preserved_notes: agent_doc_result?.preserved_notes || false,
+    });
+  } catch (err) {
+    agent_doc_result = { error: err.message };
+    phases.push({ phase: "agent_doc", status: "skipped", reason: err.message });
+  }
+
+  // Phase 6: Widget health — if the solution declares UI plugins, verify each
+  // one actually renders (Core discovered it + it has a render block). Catches
+  // the silent "declared but non-rendering" widget at deploy time.
+  let widget_health = null;
+  try {
+    widget_health = await verifyWidgetHealth(solutionId, sid);
+    if (widget_health) {
+      phases.push({ phase: "widget_health", status: widget_health.ok ? "done" : "warn", checked: widget_health.checked });
+    }
+  } catch { /* advisory — never fail a successful deploy on the health check */ }
+
+  // Is there a branch story to tell at all? A pull or a landed push proves a
+  // repo; otherwise ask the one probe that knows, rather than guessing from a
+  // failed or skipped push — mirroring ateam_patch's local split.
+  // Something was PULLED — not merely `github` set, which an inline mcp_store
+  // can carry while nothing is read from the repo.
+  const pulledFromRepo = pulledMcpStore;
+  const githubConnected = (pulledFromRepo || github_result?.branch)
+    ? true
+    : await probeGithubConnected(solutionId, sid);
+  const branches = describeDeployBranches({
+    pulledFromRepo, githubResult: github_result, githubConnected, widgetHealth: widget_health,
+  });
+
+  return {
+    ok: true,
+    solution_id: solutionId,
+    // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts —
+    // and for a tenant with no repo, neither exists. describeDeployBranches
+    // decides all three.
+    ...(branches.deployed_from_branch && { deployed_from_branch: branches.deployed_from_branch }),
+    ...(branches.pushed_to_branch && { pushed_to_branch: branches.pushed_to_branch }),
+    phases,
+    deploy: {
+      skills_deployed: deploy.import?.skills || [],
+      connectors: deploy.import?.connectors || 0,
+      ...(deploy.deploy_warnings?.length > 0 && { warnings: deploy.deploy_warnings }),
+      ...(deploy.auto_expanded_skills?.length > 0 && { auto_expanded: deploy.auto_expanded_skills }),
+    },
+    health,
+    ...(widget_health && { widget_health }),
+    ...(test_result && { test_result }),
+    // The GitHub outcome is reported WHATEVER it was. Filtering out the error
+    // case left a failed push visible only inside `phases` — which nothing
+    // reads — while _status went on claiming the push succeeded.
+    ...(github_result && { github: github_result }),
+    ...(agent_doc_result && !agent_doc_result.error && { agent_doc: agent_doc_result }),
+    ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
+    // _status must describe WHAT HAPPENED — it once asserted "pushed to main"
+    // unconditionally, keyed only on widget_health. See describeDeployBranches.
+    _status: branches._status,
+    _next: branches._next,
+  };
+}
+
 // Exported for tests. handleToolCall below is the runtime entry point and stays
 // the only one production code should use; reaching a handler directly lets a
 // test EXECUTE it instead of asserting against this file's source text, which
@@ -4346,530 +5064,11 @@ export const handlers = {
   },
 
   // ─── Composite: Build & Run ────────────────────────────────────────
-  // Validates → Deploys → Health-checks → Optionally tests
-  // One call replaces: validate_solution + deploy_solution + get_solution(health)
+  // The pipeline is runBuildAndRun. Over the hosted transport the call waits
+  // for it at most HOSTED_CALL_BUDGET_MS; resume:true waits for the same run
+  // again and never deploys (see "The hosted call's budget").
 
-  ateam_build_and_run: async ({ solution_id: solIdArg, solution: solutionArg, skills, connectors, mcp_store, github, test_message, test_skill_id }, sid) => {
-    let solution = solutionArg;
-    // If only solution_id passed (no full solution), we'll pull from GitHub
-    const solutionId = solution?.id || solIdArg;
-    if (!solutionId) {
-      return { ok: false, phase: "pre_check", error: "Provide either solution (object) or solution_id (string)." };
-    }
-    // An id no path can carry is refused before anything is sent: deployed, it
-    // would be a solution no later tool call could address.
-    pathSeg(solutionId);
-    const phases = [];
-
-    // Guard: reject large mcp_store — agent should use github_patch instead
-    if (mcp_store) {
-      const totalSize = Object.values(mcp_store).reduce((sum, files) => {
-        return sum + (Array.isArray(files) ? files.reduce((s, f) => s + (f.content?.length || 0), 0) : 0);
-      }, 0);
-      if (totalSize > 200_000) {
-        return {
-          ok: false,
-          phase: "pre_check",
-          error: `mcp_store is too large (${Math.round(totalSize / 1024)}KB). Max ~200KB inline.`,
-          message: "Connector code is too large to pass inline. Write files individually to GitHub, then deploy from there.",
-          _fix: [
-            "1. Write each file: ateam_github_patch(solution_id, path: 'connectors/<id>/server.js', content: '...')",
-            "2. Repeat for package.json, UI assets, etc.",
-            "3. Deploy: ateam_build_and_run(solution, skills) — will auto-pull from GitHub",
-          ],
-        };
-      }
-    }
-
-    // Phase 0: Auto-detect GitHub repo — if no mcp_store passed and repo exists, pull bundle from GitHub
-    let effectiveMcpStore = mcp_store;
-    let effectiveSkills = skills;
-    // WHAT THE CALLER WROTE, captured before Phase 0 fills the gaps from the repo.
-    // `connectors` is reassigned below when it is synthesized from mcp_store keys,
-    // so it has to be read here.
-    const inline = {
-      solution: Boolean(solutionArg),
-      skills: Array.isArray(skills) && skills.length > 0,
-      connectors: Array.isArray(connectors) && connectors.length > 0,
-    };
-    // Set only when Phase 0 actually read the bundle. `github` alone does not say
-    // that: a caller may pass github:true together with mcp_store, and then
-    // nothing is pulled.
-    let pulledMcpStore = false;
-    if (!mcp_store) {
-      try {
-        const ghStatus = await get(apiPath`/deploy/solutions/${solutionId}/github/status`, sid);
-        // repo_url only says a REPO EXISTS. It has never said the repo carries
-        // this solution's connector source, and treating the two as the same
-        // claim is how a connector with nothing in the repo used to slip
-        // through Phase 0 and then vanish from connectors[] below. The real
-        // per-connector answer comes from pull-bundle, and it is acted on
-        // there — this stays a cheap "is GitHub worth asking at all?" gate.
-        if (ghStatus?.repo_url) {
-          github = true;
-        }
-      } catch { /* no repo — first deploy, mcp_store expected */ }
-    }
-    if (github && !mcp_store) {
-      try {
-        // NAME THE BRANCH. build_and_run deploys the SHIPPED state — that is
-        // the whole dev → promote → main design, and why the Builder refuses
-        // this deploy with MAIN_BEHIND_DEV until you promote. This call used
-        // to send {} and lean on the Builder's default, which was `main` until
-        // Builder 873558e changed it to `dev`: from then on this deployed
-        // UNSHIPPED dev while every doc, the guard and deployed_from_branch
-        // all still said main. The Builder now refuses a branch-less read
-        // (BRANCH_REQUIRED), so the intent has to be stated here, from the
-        // one owner of the branch story.
-        const pullResult = await post(
-          apiPath`/deploy/solutions/${solutionId}/github/pull-bundle`,
-          { branch: BRANCH_WORKFLOW.deploy_branch },
-          sid,
-          // A read over POST (it bundles the repo, writes nothing): declared
-          // idempotent, so one lost answer does not fail the whole deploy.
-          { timeoutMs: 60_000, idempotent: true },
-        );
-        if (!pullResult.ok) {
-          return {
-            ok: false,
-            phase: "github_pull",
-            error: pullResult.error || "Failed to pull bundle from GitHub",
-            hint: pullResult.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
-            message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
-          };
-        }
-        effectiveMcpStore = pullResult.mcp_store || {};
-        pulledMcpStore = true;
-        // Use solution from GitHub if not passed inline
-        if (!solution && pullResult.solution) {
-          solution = pullResult.solution;
-        }
-        // Use skills from GitHub if not passed inline
-        if (!effectiveSkills?.length && pullResult.skills?.length) {
-          effectiveSkills = pullResult.skills;
-        }
-        // Synthesize connectors[] metadata from mcp_store keys if not passed inline.
-        // The pull-bundle endpoint returns mcp_store (files) and solution.platform_connectors
-        // (declarations) but not a top-level connectors[] array. The validator/deploy
-        // pipeline expects one, so build it from the mcp_store we just pulled.
-        //
-        // ROBUSTNESS: mcp_store is normally keyed by CONNECTOR ID, but a bad/older
-        // pull-bundle can key it by the full `connectors/<id>/<file>` path — in
-        // which case the old `map(id => ...)` registered ONE connector PER FILE with
-        // the path as its id (observed 2026-08-15: db.connectors got
-        // connectors/expense-tracker-mcp/server.js etc. as rows). Collapse either
-        // shape to the connector id and dedupe, so a mis-keyed mcp_store can never
-        // manufacture file-path connectors. (Core also rejects "/"-bearing ids at
-        // its boundary as defense-in-depth.)
-        //
-        // B5 — A CONNECTOR WITH NO SOURCE IN THE REPO MUST NOT VANISH.
-        // Synthesizing purely from mcp_store keys means a declared connector the
-        // repo does not carry is simply ABSENT from connectors[], so nothing
-        // validates it, nothing reports it, and the deploy proceeds as though it
-        // were never part of the solution. Phase 0 made this likelier by
-        // treating "the repo exists" (repo_url) as "the repo has the source" —
-        // two different claims.
-        //
-        // pull-bundle now answers per connector, so union those ids in. A
-        // connector listed here still deploys when its authored source lives in
-        // the Builder's store; what it can no longer do is disappear.
-        const missingSource = Array.isArray(pullResult.connectors_missing_source)
-          ? pullResult.connectors_missing_source : [];
-        const unreadable = Array.isArray(pullResult.connectors_unreadable)
-          ? pullResult.connectors_unreadable : [];
-        if (!connectors?.length && (Object.keys(effectiveMcpStore).length > 0 || missingSource.length > 0)) {
-          const connIds = [...new Set([
-            ...Object.keys(effectiveMcpStore).map((k) => {
-              const m = String(k).match(/^connectors\/([^/]+)\//);
-              return m ? m[1] : k;
-            }),
-            ...missingSource.map((c) => (typeof c === "string" ? c : c?.id)).filter(Boolean),
-          ])];
-          connectors = connIds.map((id) => ({
-            id,
-            name: id,
-            transport: "stdio",
-          }));
-        }
-        phases.push({
-          phase: "github_pull",
-          status: "done",
-          skills_found: pullResult.skills_found || 0,
-          connectors_found: pullResult.connectors_found || 0,
-          files_loaded: pullResult.files_loaded || 0,
-          connectors_synthesized: connectors?.length || 0,
-          // Named, not swallowed. The repo existing said nothing about these.
-          ...(missingSource.length > 0 && {
-            connectors_missing_source: missingSource,
-            note: "These connectors are declared but the repo carries no source for them. They are still deployed if the Builder holds their authored source; if it does not, validation refuses and ateam_get_connector_source / ateam_recover_connector_source tell you which.",
-          }),
-          ...(unreadable.length > 0 && { connectors_unreadable: unreadable }),
-        });
-      } catch (err) {
-        return {
-          ok: false,
-          phase: "github_pull",
-          error: err.message,
-          message: "Failed to pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
-        };
-      }
-    }
-
-    // Guard: solution required (either inline or from GitHub)
-    if (!solution) {
-      return {
-        ok: false,
-        phase: "pre_check",
-        error: "No solution provided and none found in GitHub repo.",
-        message: "Pass solution inline or ensure solution.json exists in the GitHub repo.",
-      };
-    }
-
-    // Guard: skills required (either inline or from GitHub)
-    if (!effectiveSkills?.length) {
-      return {
-        ok: false,
-        phase: "pre_check",
-        error: "No skills provided and none found in GitHub repo.",
-        message: "Pass skills inline or ensure they exist in the GitHub repo (skills/{id}/skill.json).",
-      };
-    }
-
-    // Phase 1: Validate
-    let validation;
-    try {
-      validation = await post("/validate/solution", { solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore }, sid, { timeoutMs: 120_000, idempotent: true });
-      phases.push({ phase: "validate", status: "done" });
-    } catch (err) {
-      // A DEAD SOCKET IS NOT A FORMAT ERROR. "fetch failed" / ECONNREFUSED /
-      // ETIMEDOUT / socket hang up mean the deploy service was unreachable —
-      // telling the agent to go re-read the solution spec sends it to fix
-      // something that is not broken, at the cost of several turns. Observed
-      // 2026-08-21 (job_aehopl8z): the backend had been restarted mid-run and
-      // the agent burned turns on get_spec and spec_search chasing a phantom
-      // format problem. The two diagnoses are opposites; pick by the cause.
-      const transport = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|network|aborted/i
-        .test(err.message || "");
-      return {
-        ok: false,
-        phase: "validation",
-        error: err.message,
-        retryable: transport,
-        message: transport
-          ? "The deploy service was UNREACHABLE — this is a transport failure, not a problem with your solution. Do NOT re-read the spec or change your definition. Wait a few seconds and RETRY the same call; if it keeps failing, the backend is down or was restarted mid-run."
-          : "Validation call failed. Check your solution/skill format against the spec (ateam_get_spec topic='solution').",
-      };
-    }
-
-    // Check for blocking errors
-    const errors = validation.errors || validation.validation?.errors || [];
-    if (errors.length > 0) {
-      return {
-        ok: false,
-        phase: "validation",
-        errors,
-        warnings: validation.warnings || validation.validation?.warnings || [],
-        message: `Validation found ${errors.length} error(s). Fix them and try again.`,
-      };
-    }
-
-    // Phase 2: Deploy
-    //
-    // pulled_from_github NAMES THE PARTS THAT ARE THE REPO'S CONTENT, and it
-    // must be exact. The Builder (#50) saves those parts into its store as a
-    // MIRROR: FS-only, never written back; it records a sync baseline instead
-    // (which side changed is decided from that, not from updated_at). An
-    // inline solution or skills it writes to `dev`, where an inline edit
-    // belongs. (Inline connector CODE is a different, older story: on a repo
-    // that exists, no deploy writes it to GitHub at all. Use ateam_github_write
-    // for code.) And its MAIN_BEHIND_DEV guard checks only the files the named
-    // parts were read from.
-    //
-    //   solution   pulled, and the caller passed no connectors[] of its own:
-    //              the Builder import adds new connector ids to
-    //              solution.platform_connectors, so an inline connectors[] is
-    //              an edit to solution.json.
-    //   skills     pulled.
-    //   mcp_store  pulled (Phase 0 pulls exactly when no mcp_store was passed).
-    //
-    // A LIST, NOT A FLAG. A flag for "all of it" (github:true, the previous cut
-    // of this change) left build_and_run(solution) with two wrong answers:
-    // mirror everything and the inline solution never reaches GitHub, or mirror
-    // nothing and the pulled skills are written back to dev, so the next
-    // identical call is refused because of its own write. It is also a name
-    // the Builders running today do not know. github:true is one they do, and
-    // their async hop turns it into a completeness check that refuses any
-    // connector whose source lives only in the Builder store.
-    //
-    // Sent on EVERY deploy, [] when nothing was pulled, so a Builder can tell
-    // "pulled nothing" from "a client that does not say".
-    //
-    // skip_github_push is NOT that statement. It follows the `github` argument,
-    // which is also set together with an inline mcp_store, when nothing is
-    // pulled. It is sent exactly as before (99bba7e), for the Builders that
-    // read it.
-    const pulledFromGithub = pulledMcpStore
-      ? [
-          ...(!inline.solution && !inline.connectors ? ["solution"] : []),
-          ...(!inline.skills ? ["skills"] : []),
-          "mcp_store",
-        ]
-      : [];
-    const deployBody = {
-      solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
-      ...(github && { skip_github_push: true }),
-      pulled_from_github: pulledFromGithub,
-    };
-    let deploy;
-    try {
-      // Try sync first (fast for small solutions)
-      deploy = await post("/deploy/solution", deployBody, sid, { timeoutMs: 120_000 });
-      phases.push({ phase: "deploy", status: deploy.ok ? "done" : "failed" });
-    } catch (err) {
-      // A VERDICT IS NOT A TIMEOUT. isTimeoutError counts every 502, so a 502
-      // whose body named what failed was re-POSTed in async mode. Only a
-      // failure with no verdict may move to the async door.
-      if (!isTimeoutError(err) || jsonVerdictOf(err.body)) {
-        return { ok: false, phase: "deployment", phases, error: err.message, validation_warnings: validation.warnings || [] };
-      }
-
-      // Timeout → retry with async mode + polling
-      phases.push({ phase: "deploy", status: "async_retry" });
-      try {
-        // The SAME body. The async door must not learn less about where the
-        // payload came from than the sync one did.
-        const asyncResult = await post("/deploy/solution", { ...deployBody, async: true }, sid, { timeoutMs: 15_000 });
-
-        if (asyncResult.job_id) {
-          // Poll for completion (up to 10 min)
-          const jobId = asyncResult.job_id;
-          // Built once, before the loop: see pollDeployJob.
-          const jobPath = apiPath`/deploy/jobs/${jobId}`;
-          const maxWait = 600_000;
-          const pollInterval = 5_000;
-          const start = Date.now();
-          while (Date.now() - start < maxWait) {
-            await new Promise(r => setTimeout(r, pollInterval));
-            try {
-              const job = await get(jobPath, sid);
-              if (job.status === 'done' || job.status === 'failed') {
-                deploy = job;
-                phases.push({ phase: "deploy", status: job.status });
-                break;
-              }
-            } catch (err) {
-              // #4 Silent-catch audit: poll errors are usually transient
-              // (network blip, restart). Logging at debug level so they
-              // don't drown the console but ARE visible if you bump the
-              // log level after a stuck deploy.
-              if (process.env.MCP_DEBUG_POLLS) console.warn(`[ateam_build_and_run] poll ${jobId} error (will retry): ${err.message}`);
-            }
-          }
-          if (!deploy) {
-            return { ok: false, phase: "deployment", phases, error: "Async deploy timed out after 10 minutes", validation_warnings: validation.warnings || [],
-              hint: "Deploy is too large even for async mode. Use incremental tools instead: ateam_patch(solution_id, target:'skill', skill_id, updates) for skill changes, ateam_upload_connector(solution_id, connector_id, github:true) for connector code changes." };
-          }
-        }
-      } catch (asyncErr) {
-        return { ok: false, phase: "deployment", phases, error: `Sync timed out, async fallback failed: ${asyncErr.message}`, validation_warnings: validation.warnings || [],
-          hint: "Deploy timed out. Use incremental tools: ateam_patch for skill changes, ateam_upload_connector for connector changes. These deploy one component at a time and never timeout." };
-      }
-    }
-
-    if (!deploy.ok) {
-      return {
-        ok: false,
-        phase: "deployment",
-        phases,
-        deploy,
-        validation_warnings: validation.warnings || [],
-        message: "Deployment returned an error. See deploy details above.",
-      };
-    }
-
-    // Phase 2.5: Restart connectors that have source code (upload triggers stop+start)
-    //
-    // A runtime:"device" connector is SKIPPED. It has authored source — the RN
-    // bundle (rn-src/, package.json, the esbuild config) — so it looks like an
-    // ordinary connector to a loop that only asks "does it have files?". But
-    // there is no server process to restart: the bundle ships to the phone.
-    // Uploading it here 409s on the merge and then health marked the connector
-    // "error", failing a deploy whose connector was working as designed.
-    //
-    // Classified from the DECLARED connectors[], which the caller authored —
-    // not by asking Core. Same ownership rule the Builder now follows.
-    const deviceConnectorIds = new Set(
-      (connectors || [])
-        .filter((c) => c && typeof c === "object" && c.runtime === "device" && c.id)
-        .map((c) => c.id),
-    );
-    if (effectiveMcpStore && Object.keys(effectiveMcpStore).length > 0) {
-      const connectorResults = [];
-      for (const [connId, files] of Object.entries(effectiveMcpStore)) {
-        if (!Array.isArray(files) || files.length === 0) continue;
-        if (deviceConnectorIds.has(connId)) {
-          connectorResults.push({ id: connId, ok: true, tools: 0, skipped: "device_runtime" });
-          continue;
-        }
-        try {
-          // THE MERGE BASE IS THE BRANCH THESE FILES CAME FROM. The upload
-          // merges `files` over the connector's GitHub state at `ref` (default
-          // `dev`), laid over the files Core already runs. With the default,
-          // files that exist only on dev rode into a run that says it deploys
-          // main. ref:main keeps those out. It does NOT remove a file that is
-          // already running in Core (the deployed copy is the floor of the
-          // merge), e.g. one a dev iteration uploaded earlier. An inline
-          // mcp_store keeps the default: those files are the caller's
-          // iteration, and dev is where iteration lives.
-          const uploadResult = await post(
-            apiPath`/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
-            { files, ...(pulledMcpStore && { ref: BRANCH_WORKFLOW.deploy_branch }) },
-            sid,
-            { timeoutMs: 120_000 },
-          );
-          connectorResults.push({ id: connId, ok: true, tools: uploadResult.tools || 0 });
-        } catch (err) {
-          connectorResults.push({ id: connId, ok: false, error: err.message });
-        }
-      }
-      phases.push({
-        phase: "connector_restart",
-        status: connectorResults.every(r => r.ok) ? "done" : "partial",
-        connectors: connectorResults,
-      });
-    }
-
-    // Phase 3: Health check (with brief wait for propagation)
-    let health;
-    try {
-      await sleep(2000);
-      health = await get(apiPath`/deploy/solutions/${solutionId}/health`, sid);
-      phases.push({ phase: "health", status: "done" });
-    } catch (err) {
-      health = { error: err.message };
-      phases.push({ phase: "health", status: "error", error: err.message });
-    }
-
-    // Phase 4: Warm test (optional)
-    let test_result;
-    if (test_message) {
-      const skillId = test_skill_id || effectiveSkills?.[0]?.id;
-      if (skillId) {
-        try {
-          test_result = await post(
-            apiPath`/deploy/solutions/${solutionId}/skills/${skillId}/test`,
-            { message: test_message },
-            sid,
-            { timeoutMs: 90_000 },
-          );
-          phases.push({ phase: "test", status: "done", skill_id: skillId });
-        } catch (err) {
-          test_result = { error: err.message };
-          phases.push({ phase: "test", status: "error", error: err.message });
-        }
-      }
-    }
-
-    // Phase 5: GitHub push — only when NOT deployed from GitHub
-    let github_result;
-    if (github) {
-      // "Deployed from GitHub" only when something WAS pulled: github:true with
-      // an inline mcp_store pulls nothing and skips the push all the same.
-      github_result = pulledMcpStore
-        ? { skipped: true, reason: 'Deployed from GitHub — push-back skipped.' }
-        : { skipped: true, reason: 'github:true was passed with inline code — nothing was pulled, and the push was skipped.' };
-      phases.push({ phase: "github", status: "skipped", reason: pulledMcpStore ? "pulled_from_github" : "github_flag_inline_payload" });
-    } else {
-      try {
-        github_result = await post(
-          apiPath`/deploy/solutions/${solutionId}/github/push`,
-          { push_to_github: true, message: `Deploy: ${solution.name || solutionId}` },
-          sid,
-          { timeoutMs: 60_000 },
-        );
-        phases.push({
-          phase: "github",
-          status: github_result.skipped ? "skipped" : "done",
-          ...(github_result.repo_url && { repo_url: github_result.repo_url }),
-        });
-      } catch (err) {
-        github_result = { error: err.message };
-        phases.push({ phase: "github", status: "error", error: err.message });
-      }
-    }
-
-    // Auto-seed / refresh the agent onboarding doc. Non-fatal — any failure
-    // here is swallowed so it can't break a successful deploy. The tool is
-    // idempotent: if the rendered doc is byte-identical to what's in the
-    // repo, it returns unchanged:true and writes no commit.
-    let agent_doc_result = null;
-    try {
-      agent_doc_result = await handlers.ateam_write_agent_doc({ solution_id: solutionId }, sid);
-      phases.push({
-        phase: "agent_doc",
-        status: agent_doc_result?.unchanged ? "unchanged" : "done",
-        created: agent_doc_result?.created || false,
-        preserved_notes: agent_doc_result?.preserved_notes || false,
-      });
-    } catch (err) {
-      agent_doc_result = { error: err.message };
-      phases.push({ phase: "agent_doc", status: "skipped", reason: err.message });
-    }
-
-    // Phase 6: Widget health — if the solution declares UI plugins, verify each
-    // one actually renders (Core discovered it + it has a render block). Catches
-    // the silent "declared but non-rendering" widget at deploy time.
-    let widget_health = null;
-    try {
-      widget_health = await verifyWidgetHealth(solutionId, sid);
-      if (widget_health) {
-        phases.push({ phase: "widget_health", status: widget_health.ok ? "done" : "warn", checked: widget_health.checked });
-      }
-    } catch { /* advisory — never fail a successful deploy on the health check */ }
-
-    // Is there a branch story to tell at all? A pull or a landed push proves a
-    // repo; otherwise ask the one probe that knows, rather than guessing from a
-    // failed or skipped push — mirroring ateam_patch's local split.
-    // Something was PULLED — not merely `github` set, which an inline mcp_store
-    // can carry while nothing is read from the repo.
-    const pulledFromRepo = pulledMcpStore;
-    const githubConnected = (pulledFromRepo || github_result?.branch)
-      ? true
-      : await probeGithubConnected(solutionId, sid);
-    const branches = describeDeployBranches({
-      pulledFromRepo, githubResult: github_result, githubConnected, widgetHealth: widget_health,
-    });
-
-    return {
-      ok: true,
-      solution_id: solutionId,
-      // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts —
-      // and for a tenant with no repo, neither exists. describeDeployBranches
-      // decides all three.
-      ...(branches.deployed_from_branch && { deployed_from_branch: branches.deployed_from_branch }),
-      ...(branches.pushed_to_branch && { pushed_to_branch: branches.pushed_to_branch }),
-      phases,
-      deploy: {
-        skills_deployed: deploy.import?.skills || [],
-        connectors: deploy.import?.connectors || 0,
-        ...(deploy.deploy_warnings?.length > 0 && { warnings: deploy.deploy_warnings }),
-        ...(deploy.auto_expanded_skills?.length > 0 && { auto_expanded: deploy.auto_expanded_skills }),
-      },
-      health,
-      ...(widget_health && { widget_health }),
-      ...(test_result && { test_result }),
-      // The GitHub outcome is reported WHATEVER it was. Filtering out the error
-      // case left a failed push visible only inside `phases` — which nothing
-      // reads — while _status went on claiming the push succeeded.
-      ...(github_result && { github: github_result }),
-      ...(agent_doc_result && !agent_doc_result.error && { agent_doc: agent_doc_result }),
-      ...(validation.warnings?.length > 0 && { validation_warnings: validation.warnings }),
-      // _status must describe WHAT HAPPENED — it once asserted "pushed to main"
-      // unconditionally, keyed only on widget_health. See describeDeployBranches.
-      _status: branches._status,
-      _next: branches._next,
-    };
-  },
+  ateam_build_and_run: async (args, sid) => buildRunWithinBudget(args, sid),
 
   // ─── Composite: Patch ──────────────────────────────────────────────
   // Updates → Redeploys → Optionally tests
