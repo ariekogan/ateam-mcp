@@ -16,8 +16,12 @@ import { runToolCall } from "./api.js";
 /**
  * @param {string} sessionId — identifier for credential isolation.
  *   HTTP transport passes the MCP session UUID; stdio uses "stdio".
+ * @param {{ transport?: "stdio" | "http" }} [opts] — the transport this server
+ *   is connected to, stated by its caller (src/index.js, src/http.js). Every
+ *   tool call carries it (api.js callTransport). Not derived from sessionId: an
+ *   HTTP client chooses its own session id, "stdio" included.
  */
-export function createServer(sessionId = "stdio") {
+export function createServer(sessionId = "stdio", { transport = null } = {}) {
   const server = new Server(
     // Read the REAL version from package.json. This was hardcoded "0.3.0" while
     // the package shipped 0.4.x — so the MCP handshake advertised a version that
@@ -45,7 +49,7 @@ export function createServer(sessionId = "stdio") {
   // runToolCall in api.js.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    return runToolCall(sessionId, () => handleToolCall(name, args, sessionId));
+    return runToolCall(sessionId, () => handleToolCall(name, args, sessionId), { transport });
   });
 
   return server;

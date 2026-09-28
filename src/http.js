@@ -374,7 +374,7 @@ export function startHttpServer(port = 3100) {
           }
         };
 
-        const server = createServer(newSessionId);
+        const server = createServer(newSessionId, { transport: "http" });
         await server.connect(transport);
 
         if (isStaleRecovery) {

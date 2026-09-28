@@ -102,6 +102,7 @@ import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agent
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
+import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 
@@ -1117,7 +1118,8 @@ export const tools = [
       "Wait modes (wait_for):\n" +
       "  • 'root' (default, back-compat) — wait until the message's root job completes, return single-job result. Fast, ignores any sub-skills the root delegated to via askAnySkill.\n" +
       "  • 'chain' — wait until EVERY job in the chain (root + handoffs + askAnySkill subcalls, recursively) reaches a terminal state, then return the full chain tree. Use when testing multi-skill flows (orchestrator → workers, builders → sub-builders, etc.). The response.chain field carries chainJobs[] with parentJobId/relation/depth and executionSteps[] with tool-nesting (opId/parentOpId/_toolDepth).\n\n" +
-      "Legacy: wait:false is equivalent to wait_for:'never' — returns job_id immediately for polling via ateam_test_status. wait:true is the same as the default wait_for:'root'.",
+      "Legacy: wait:false is equivalent to wait_for:'never' — returns job_id immediately for polling via ateam_test_status. wait:true is the same as the default wait_for:'root'.\n\n" +
+      "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1154,6 +1156,7 @@ export const tools = [
           description:
             "Optional actor ID for conversation continuity. Pass the actor_id from a previous test response to continue the conversation. Omit to auto-generate a test actor (test_<timestamp>_<random>, auto-expires in 24h).",
         },
+        attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
       required: ["solution_id", "skill_id", "message"],
     },
@@ -1213,7 +1216,8 @@ export const tools = [
       "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
       "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
       "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true (or pending_question is set — the assistant is waiting on the user). That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
-      "Multi-turn: pass the actor_id from a previous response back in to continue the same thread (e.g. reply to a confirmation prompt). Each call starts a new chain; the same actor_id maintains conversation context.",
+      "Multi-turn: pass the actor_id from a previous response back in to continue the same thread (e.g. reply to a confirmation prompt). Each call starts a new chain; the same actor_id maintains conversation context.\n\n" +
+      "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1229,6 +1233,7 @@ export const tools = [
           type: "string",
           description: "Optional: actor ID from a previous response to continue the conversation. Omit for a new conversation.",
         },
+        attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
       required: ["solution_id", "message"],
     },
@@ -5713,13 +5718,15 @@ export const handlers = {
     return get(apiPath`/deploy/solutions/${solution_id}/logs${rawQuery(qsStr)}`, sid);
   },
 
-  ateam_conversation: async ({ solution_id, message, actor_id, wait, timeout_ms }, sid) => {
+  ateam_conversation: async ({ solution_id, message, actor_id, attachments, wait, timeout_ms }, sid) => {
     // ALWAYS async on the wire. A conversation can run for minutes (auto-route
     // → worker → sub-skills), and a synchronous hold would blow past the 100s
     // Cloudflare edge limit → 524. So we kick off, return the chain id (job_id)
     // immediately, and the caller polls a SLIM status. `wait`/`timeout_ms` are
     // accepted for back-compat but no longer hold the HTTP request open.
-    const body = { message, async: true, ...(actor_id ? { actor_id } : {}) };
+    // Files go as dev-app sends them (src/testAttachments.js), checked before any request.
+    const files = await prepareTestAttachments(attachments);
+    const body = { message, async: true, ...(actor_id ? { actor_id } : {}), ...(files ? { attachments: files } : {}) };
     const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs: 15_000 });
     // The CHAIN id — not a single job id — is the conversation's identity and
     // what you poll. The Builder returns it as chain_id (falls back to the
@@ -5796,7 +5803,7 @@ export const handlers = {
     }
   },
 
-  ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id }, sid) => {
+  ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id, attachments }, sid) => {
     // Resolve wait mode. Priority: wait_for (new explicit form) > wait (legacy).
     // wait:false  → "never"   (return job_id, no polling)
     // wait:true   → "root"    (poll root job to completion — current default)
@@ -5812,7 +5819,9 @@ export const handlers = {
     // every job is terminal; when wait_for:"never" we return the job_id and
     // caller polls themselves.
     const isWireAsync = resolvedWait !== "root";
-    const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}) };
+    // Files go as dev-app sends them (src/testAttachments.js), checked before any request.
+    const files = await prepareTestAttachments(attachments);
+    const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}), ...(files ? { attachments: files } : {}) };
     const kickoffTimeoutMs = isWireAsync ? 15_000 : 90_000;
     const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs: kickoffTimeoutMs });
 
