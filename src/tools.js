@@ -103,6 +103,8 @@ import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
+// Who a test job runs as: ONE statement (the Builder's /spec wording), rendered where it is read.
+import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "./testRunsAs.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -1297,7 +1299,8 @@ export const tools = [
       "  • 'root' (default, back-compat) — wait until the message's root job completes, return single-job result. Fast, ignores any sub-skills the root delegated to via askAnySkill.\n" +
       "  • 'chain' — wait until EVERY job in the chain (root + handoffs + askAnySkill subcalls, recursively) reaches a terminal state, then return the full chain tree. Use when testing multi-skill flows (orchestrator → workers, builders → sub-builders, etc.). The response.chain field carries chainJobs[] with parentJobId/relation/depth and executionSteps[] with tool-nesting (opId/parentOpId/_toolDepth).\n\n" +
       "Legacy: wait:false is equivalent to wait_for:'never' — returns job_id immediately for polling via ateam_test_status. wait:true is the same as the default wait_for:'root'.\n\n" +
-      "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
+      "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).\n\n" +
+      "Who it runs as: see actor_id. The reply carries ran_as (with wait_for:'chain', inside response.kickoff) beside actor_id. " + RAN_AS_IN_REPLY,
     inputSchema: {
       type: "object",
       properties: {
@@ -1332,7 +1335,7 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional actor ID for conversation continuity. Pass the actor_id from a previous test response to continue the conversation. Omit to auto-generate a test actor (test_<timestamp>_<random>, auto-expires in 24h).",
+            "Optional: the conversation thread. Pass the actor_id from a previous test response to continue that thread. " + TEST_RUNS_AS,
         },
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
@@ -1344,7 +1347,7 @@ export const tools = [
     core: true,
     description:
       "Fire a REAL notification at an existing actor in a deployed solution — for end-to-end testing of the system-initiated notification path (telegram/push/app channels).\n\n" +
-      "Unlike ateam_test_skill (synthetic test actor with no channels) and ateam_conversation (user-initiated thread), this calls the /api/internal/notify-user path that PCM and other sibling services use — so the actor's real enabled channels actually receive the message.\n\n" +
+      "Unlike ateam_test_skill and ateam_conversation (a test turn answered in the tool result; who it runs as: their actor_id), this calls the /api/internal/notify-user path that PCM and other sibling services use — so the actor's real enabled channels actually receive the message.\n\n" +
       "Use for:\n" +
       "  • Channel fan-out smoke (does telegram/push/app actually receive it?)\n" +
       "  • Delivery-result verification (per-channel ok/failed in the response).\n\n" +
@@ -1394,7 +1397,7 @@ export const tools = [
       "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
       "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
       "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true (or pending_question is set — the assistant is waiting on the user). That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
-      "Multi-turn: pass the actor_id from a previous response back in to continue the same thread (e.g. reply to a confirmation prompt). Each call starts a new chain; the same actor_id maintains conversation context.\n\n" +
+      "Multi-turn: each call starts a new chain; pass the reply's actor_id (the thread) back in to continue that thread (e.g. reply to a confirmation prompt). Who the job runs as: see actor_id. " + RAN_AS_IN_REPLY + "\n\n" +
       "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
     inputSchema: {
       type: "object",
@@ -1409,7 +1412,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "Optional: actor ID from a previous response to continue the conversation. Omit for a new conversation.",
+          description: "Optional: the conversation thread — the actor_id from a previous response, to continue it. " + TEST_RUNS_AS,
         },
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
@@ -1444,7 +1447,8 @@ export const tools = [
     name: "ateam_test_voice",
     core: true,
     description:
-      "Simulate a voice conversation with a deployed solution. Runs the full voice pipeline (session → caller verification → prompt → skill dispatch → response) using text instead of audio. Returns each turn with bot response, verification status, tool calls, and entities. Use this to test voice-enabled solutions end-to-end without making a phone call.",
+      "Simulate a voice conversation with a deployed solution, using text instead of audio and no phone call. Returns each turn with bot response, verification status, tool calls, and entities; the reply's identity (auth_method, actor_id, note) is the voice backend's own report, and ran_as repeats its actor_id.\n\n" +
+      TEST_RUNS_AS,
     inputSchema: {
       type: "object",
       properties: {
@@ -2180,7 +2184,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Use the same actor_id you passed to ateam_conversation.",
+          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Usually the session already holds it. Otherwise pass the ran_as of the ateam_conversation / ateam_test_skill reply that started the job, not the actor_id you passed (that names the thread). " + RAN_AS_IN_REPLY,
         },
         limit: {
           type: "number",
@@ -3401,7 +3405,7 @@ function getActorId(args) {
       "before your handler ran — add it to inputSchema.properties (see toolSchemas() " +
       "below, every data tool must spread ...actor); or " +
       "(2) the caller is not actor-scoped — ateam_test_connector runs as _system_service, " +
-      "so use ateam_test_skill or a real conversation to exercise per-user tools."
+      "so exercise per-user tools with ateam_test_skill or ateam_conversation. ${TEST_RUNS_AS}"
     );
   }
   return id;
@@ -4542,23 +4546,24 @@ export const handlers = {
         // and list promote + build_and_run, so the loop an agent follows most
         // often told it to ship every change.
         { step: 4, action: "Iterate", description: `Change it on \`${BRANCH_WORKFLOW.write_branch}\` and deploy it from \`${BRANCH_WORKFLOW.write_branch}\` to test it, with no promote. Connector code: ateam_github_patch, ONE FILE AT A TIME, then ateam_upload_connector(solution_id, connector_id, github:true). Skill or solution definitions: ateam_patch, which writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call. ${BRANCH_WORKFLOW.iterate_note} NEVER re-pass all connector code inline after first deploy.`, tools: ["ateam_github_patch", "ateam_upload_connector", "ateam_patch", "ateam_redeploy"] },
-        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id, the thread; who it runs as: conversation_flow.who_it_runs_as). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} Then ateam_build_and_run(solution_id) deploys \`${BRANCH_WORKFLOW.deploy_branch}\`. ${BRANCH_WORKFLOW.the_silent_mistake} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
     conversation_flow: {
       _important: "ateam_conversation is ASYNC and CHAIN-based. A conversation runs across handoffs + askAnySkill subcalls for possibly minutes — a synchronous wait would hit the 100s edge timeout (524). ALWAYS poll by CHAIN, NEVER by a single job (a job can terminate while the chain is still active).",
       steps: [
-        "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id } immediately. The reply is NOT here.",
+        "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id, ran_as } immediately (what actor_id and ran_as are: who_it_runs_as below). The reply is NOT here.",
         "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true, OR when pending_question is set (the assistant is asking the user something — answer via step 4).",
         "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
-        "4. CONTINUE THE THREAD — reply / next turn: ateam_conversation(solution_id, message, actor_id: <same actor_id>). New chain, same conversation context. Repeat from step 2.",
+        "4. CONTINUE THE THREAD — reply / next turn: ateam_conversation(solution_id, message, actor_id: <the reply's actor_id>). New chain, same thread. Repeat from step 2.",
       ],
+      who_it_runs_as: TEST_RUNS_AS,
       example: {
-        kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "test_x" }',
+        kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "usr_you", ran_as: "usr_you" }  (a key no person minted: actor_id "test_x", ran_as null)',
         poll: 'ateam_chain_status(chain_id: "job_ab12") → { chain_status: "running", chain_done: false } … repeat … → { chain_status: "completed", chain_done: true, result: "…" }',
         full_tree: 'ateam_get_chain(chain_id: "job_ab12") → { chainJobs: [ {jobId, skill, status, relation, depth} … ], executionSteps: [ … ] }',
-        continue: 'ateam_conversation(solution_id: "ada", message: "yes", actor_id: "test_x")',
+        continue: 'ateam_conversation(solution_id: "ada", message: "yes", actor_id: "usr_you")',
       },
     },
     // RENDERED FROM BRANCH_WORKFLOW — do not restate the model here.
@@ -5940,6 +5945,9 @@ export const handlers = {
             slim: `ateam_chain_status(chain_id: "${chainId}")  → cheap chip-quick poll; loop ~2s until chain_done===true (whole chain terminal, not just one job). Then read result.`,
             full: `ateam_get_chain(job_id: "${chainId}")  → full tree + per-job detail (heavier; use once, not in a poll loop)`,
             continue: kickoff?.actor_id ? `ateam_conversation(actor_id: "${kickoff.actor_id}", ...) to continue the thread` : undefined,
+            // The Builder's ran_as rides in ...kickoff above; name it, so an agent
+            // reads WHO the job ran as and not only the thread.
+            who_it_ran_as: RAN_AS_IN_REPLY,
           }
         : undefined,
     };
@@ -7834,11 +7842,14 @@ export async function handleToolCall(name, args, sessionId) {
   try {
     const result = await handler(args, sessionId);
 
-    // An actor id is BORN here: ateam_conversation/ateam_test_skill mint one and
-    // return it, and the docs tell callers to pass it back for multi-turn. Learn
-    // it on the way out so the follow-up ateam_get_execution_logs /
-    // ateam_get_metrics on that very job is not refused for not knowing who ran
-    // it — the single most common dead end when debugging a run.
+    // An actor id comes back here: ateam_conversation/ateam_test_skill return
+    // the thread as actor_id, and the docs tell callers to pass it back for
+    // multi-turn. With a person on the key the thread IS that person, the actor
+    // the job ran as (ran_as, testRunsAs.js); a key no person minted gets a
+    // test_ thread key, which api.js drops. Learn it on the way out so the
+    // follow-up ateam_get_execution_logs / ateam_get_metrics on that very job
+    // is not refused for not knowing who ran it — the single most common dead
+    // end when debugging a run.
     //
     // ONLY FROM TOOLS THAT ACTUALLY MINT ONE. This used to accept `actor_id` off
     // ANY tool's result, so a single unrelated payload carrying that field
