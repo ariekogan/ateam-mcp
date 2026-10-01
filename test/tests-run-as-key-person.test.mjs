@@ -18,9 +18,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "../src/testRunsAs.js";
@@ -112,18 +110,15 @@ test("the tenant CLAUDE.md states it", () => {
   assertStatesIt("CLAUDE.md pitfalls", doc);
 });
 
-// A stand-in Builder: records uploads, answers a conversation kickoff with ran_as.
+// A stand-in Builder: answers a conversation kickoff with ran_as.
 const SID = "sess-runs-as";
 let server;
-const uploads = [];
 before(async () => {
   server = createServer((req, res) => {
-    let raw = "";
-    req.on("data", (c) => { raw += c; });
+    req.resume();   // the body is not read: only the path decides the reply
     req.on("end", () => {
       const path = req.url.split("?")[0];
       let reply = { ok: true };
-      if (path.endsWith("/upload")) uploads.push(JSON.parse(raw));
       if (path.endsWith("/test")) reply = { ok: true, job_id: "job_1", chain_id: "job_1", actor_id: "usr_person", ran_as: "usr_person", status: "running" };
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(reply));
@@ -142,27 +137,10 @@ test("ateam_conversation's result keeps the Builder's ran_as and names it in _po
   assert.equal(out._poll.who_it_ran_as, RAN_AS_IN_REPLY, "_poll does not name ran_as");
 });
 
-test("the scaffolded connector's missing-actor error states it, and the file still runs", async () => {
-  const r = await handleToolCall("ateam_create_connector", { solution_id: "walkmate", connector_id: "walk-mcp" }, SID);
-  assert.ok(!r.isError, r.content[0].text.slice(0, 300));
-  const serverJs = uploads.at(-1).files.find((f) => f.path === "server.js").content;
-  assertCurrent("scaffolded server.js", serverJs);
-
-  // RUN it: the text sits in a double-quoted string of generated code, so it
-  // must still parse, and the error a caller sees must carry the statement.
-  const dir = mkdtempSync(join(tmpdir(), "runs-as-"));
-  try {
-    const file = join(dir, "server.mjs");
-    writeFileSync(file, serverJs);
-    const call = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "walk-mcp.echo", arguments: { message: "x" } } });
-    const run = spawnSync(process.execPath, [file], { input: call + "\n", encoding: "utf8", timeout: 10_000 });
-    assert.equal(run.status, 0, `generated server.js did not run: ${run.stderr}`);
-    const reply = JSON.parse(run.stdout.trim().split("\n")[0]);
-    assert.ok(reply.error?.message.includes(TEST_RUNS_AS), `the missing-actor error does not state it: ${reply.error?.message}`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+// The scaffolded connector's own missing-actor error (getActorId, which named
+// TEST_RUNS_AS) is gone with the raw JSON-RPC scaffold: a defineConnector
+// connector refuses a call with no caller in the runtime (MISSING_CALLER).
+// test/scaffold-connector.test.mjs runs the new scaffold.
 
 // ONE copy of the fact: its distinctive words appear in no other source file.
 test("the statement is written once, in src/testRunsAs.js", () => {
