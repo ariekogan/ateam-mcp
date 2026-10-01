@@ -2717,8 +2717,8 @@ export const tools = [
       "Edit a file in the solution's GitHub repo and commit — ONE file per call. Modes:\n" +
       "1. FULL FILE: provide `content` — replaces entire file (good for new files or small files)\n" +
       "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
-      "3. DELETE A STRAY: `delete: true` — removes a connector file written OUTSIDE connectors/<connector-id>/ (a root server.js, package.json or ui-dist/…), which Core never deploys. Only such a file: anything else is refused (DELETE_ONLY_STRAY_CONNECTOR_FILES). It is removed from the working branch (`dev`) only, in one commit — production changes only through ateam_github_promote, like every other edit; git history keeps it. Move what it holds into connectors/<connector-id>/ first if it is still needed — the CONNECTOR_FILE_OUTSIDE_CONNECTOR refusal says how the two copies differ.\n" +
-      "Connector files belong under connectors/<connector-id>/; a write anywhere else is refused (CONNECTOR_FILE_OUTSIDE_CONNECTOR).\n" +
+      "3. DELETE A STRAY: `delete: true` — removes a stray connector file, of either kind: one at the repo root, OUTSIDE connectors/<connector-id>/ (a root server.js, package.json or ui-dist/…), or a copy NESTED under a connector's own prefix (connectors/<connector-id>/connectors/<connector-id>/…). Core runs neither. Only such a file: anything else is refused (DELETE_ONLY_STRAY_CONNECTOR_FILES). It is removed from the working branch (`dev`) only, in one commit — production changes only through ateam_github_promote, like every other edit; git history keeps it. Move what it holds into connectors/<connector-id>/ first if it is still needed — the CONNECTOR_FILE_OUTSIDE_CONNECTOR or CONNECTOR_PATH_NESTED refusal says how the two copies differ and, when the stray is on the branch, names the delete call.\n" +
+      "Connector files belong under connectors/<connector-id>/; a write anywhere else is refused (CONNECTOR_FILE_OUTSIDE_CONNECTOR), and so is one to a nested copy, connectors/<connector-id>/connectors/<connector-id>/… (CONNECTOR_PATH_NESTED).\n" +
       "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
       "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
       "After one, run ateam_github_sync_from_main so `dev` has it too. Until `dev` holds the same content, the Builder's copy of that file is `main` content `dev` does not have: " +
@@ -2756,7 +2756,7 @@ export const tools = [
         },
         delete: {
           type: "boolean",
-          description: "Mode 3: true removes `path` — ONLY a stray connector file outside connectors/<connector-id>/ (root server.js, package.json, package-lock.json, ui-dist/…, plugins/…, rn-bundle/…). Takes no content or search. Deletes on the working branch (`dev`) only; a ref naming another branch is refused (DELETE_WORKING_BRANCH_ONLY) — promote carries the removal to main.",
+          description: "Mode 3: true removes `path` — ONLY a stray connector file: one at the repo root, outside connectors/<connector-id>/ (root server.js, package.json, package-lock.json, ui-dist/…, plugins/…, rn-bundle/…), or a copy nested under a connector's own prefix (connectors/<connector-id>/connectors/<connector-id>/…). Takes no content or search. Deletes on the working branch (`dev`) only; a ref naming another branch is refused (DELETE_WORKING_BRANCH_ONLY) — promote carries the removal to main.",
         },
         ref: {
           type: "string",
