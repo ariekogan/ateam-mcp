@@ -29,8 +29,12 @@ export const PUBLIC_TOOLS = new Set([
   "ateam_get_examples",
   "ateam_get_workflows",
   "ateam_spec_search",
-  // Static validation: the validator lets /validate/* through as a check with
-  // no tenant (its apiKeyAuth), and the payload is the caller's own JSON.
+  // Validation. Signed out, the call carries no key (api.js getCredentials has
+  // no environment fallback any more), and the validator runs /validate/* as its
+  // static check with no tenant (its apiKeyAuth). Signed in, it carries the
+  // session's own key, and the Builder may read that workspace and use its LLM.
+  // Before #38 a signed-out session sent ADAS_API_KEY from the environment, so
+  // the Builder read that key's tenant and billed an LLM call to it.
   "ateam_validate_skill",
   "ateam_validate_solution",
 ]);

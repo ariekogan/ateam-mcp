@@ -62,6 +62,8 @@ const stub = async (url) => {
   if (u.pathname === "/deploy/solutions/ateam-mcp-test" && u.search.includes("force=true")) return json(404, BUILDER_NOT_FOUND);
   // A body of JSON null: what the minimal views' own "not found" branch reads.
   if (u.pathname.startsWith("/deploy/solutions/empty-sol")) return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+  // An empty body: request() names the server it came from.
+  if (u.pathname.startsWith("/deploy/solutions/empty-body")) return new Response("", { status: 200 });
   return json(200, { solutions: [] });
 };
 before(() => { globalThis.fetch = stub; });
@@ -186,6 +188,37 @@ test("401: a signed-in session is told its key was refused; one that never signe
   assert.doesNotMatch(signedOut, /signed in with/, "a session that never signed in was told its sign-in key was refused");
 });
 
+// Review round 2 (R2-3): request() must hand formatError THIS session's
+// sign-in context. Without it every refusal is told the hosted steps, so a
+// local process hearing "IT MAY BE IN ANOTHER WORKSPACE" was told to
+// Disconnect a connector it does not have.
+test("a stdio session's not-in-this-workspace refusal gives the stdio switch steps (request passes the context)", async () => {
+  const sid = "sess-sw-stdio-404";
+  await runToolCall(sid, () => signIn(sid, PROD_KEY), { transport: "stdio" });
+  const r = await runToolCall(sid, () => handleToolCall("ateam_show_solution_minimal", { solution_id: "ateam-mcp-test" }, sid), { transport: "stdio" });
+  const text = r.content[0].text;
+  assert.ok(text.includes(render("notInThisWorkspace", { audience: "stdio", signedIn: true, tenant: "acme", environment: "prod" })), `stdio refusal:\n${text}`);
+  assert.doesNotMatch(text, /Disconnect/, "a local process was told to disconnect a connector");
+});
+
+// Review round 2 (R2-3): the stdio refusal text itself.
+test("a stdio session's auth-gate refusal: why it is not signed in, and the local sign-in", async () => {
+  const sid = "sess-sw-stdio-gate";
+  const r = await runToolCall(sid, () => handleToolCall("ateam_list_solutions", {}, sid), { transport: "stdio" });
+  const text = r.content[0].text;
+  assert.equal(r.structuredContent?.stage, "auth_gate");
+  assert.ok(text.includes(render("connectSteps", { audience: "stdio" })), `stdio gate:\n${text}`);
+  assert.match(text, /IT RESTARTED|ADAS_API_KEY is set in this process's environment/, "the gate does not say why a local process is signed out");
+  assert.ok(!text.includes(render("connectSteps", { audience: "hosted" })), "a local process was told to sign in through the hosted connector");
+});
+
+test("a self-hosted url is named as the environment, not folded into 'unstated'", async () => {
+  const SELF = "http://127.0.0.1:9";
+  const authed = await signIn("sess-sw-self", { api_key: LEGACY_KEY, url: SELF });
+  assert.equal(authed.environment, SELF);
+  assert.ok((await bootstrap("sess-sw-self")).session.startsWith(`You are signed in to workspace "acme" (${SELF}).`));
+});
+
 // ─── 3. One statement ───────────────────────────────────────────────────────
 
 test("the verified links, pinned (the one place they are written twice, on purpose)", () => {
@@ -242,9 +275,19 @@ test("no served text names a dev host or a dev key, and a dev session is given n
   if (oauth.generateAuthPage) served.push(["the sign-in page", oauth.generateAuthPage("p", { name: "Claude", host: "claude.ai" })]);
   // A session on the dev API is told where it is, with no dev link — and no
   // production link for its key either: its key is in its own environment's app.
-  await signIn("sess-sw-guard-dev", DEV_KEY);
-  const devOpening = (await bootstrap("sess-sw-guard-dev")).session ?? "";
-  served.push(["bootstrap's opening, signed in with a dev key", devOpening]);
+  // ...and is served no dev host in any DATA field either (review round 2):
+  // ateam_auth's result, bootstrap's runtime.base_url, _where, error targets.
+  const devAuth = await signIn("sess-sw-guard-dev", DEV_KEY);
+  served.push(["ateam_auth's result for a dev key", JSON.stringify(devAuth)]);
+  const devBoot = await bootstrap("sess-sw-guard-dev");
+  served.push(["bootstrap for a dev session", JSON.stringify(devBoot)]);
+  served.push(["_where for a dev session", JSON.stringify(api.getWhere("sess-sw-guard-dev"))]);
+  const dev404 = (await handleToolCall("ateam_show_solution_minimal", { solution_id: "ateam-mcp-test" }, "sess-sw-guard-dev")).content[0].text;
+  const devEmpty = (await handleToolCall("ateam_show_solution_minimal", { solution_id: "empty-body" }, "sess-sw-guard-dev")).content[0].text;
+  assert.match(dev404, /returned 404/, "the 404 branch was not reached");
+  assert.match(devEmpty, /empty body/, "the empty-body branch was not reached");
+  served.push(["a dev session's 404", dev404], ["a dev session's empty answer", devEmpty]);
+  const devOpening = devBoot.session ?? "";
   assert.ok(!devOpening.includes(steps.KEY_PAGE_URL ?? "https://app.ateam-ai.com"), "a dev session was sent to the production app for its key");
   assert.match(devOpening, /your environment's own A-Team app/);
   for (const [where, text] of served) {
@@ -275,6 +318,6 @@ test("(control) a dev key still reaches the dev API — routing unchanged", asyn
   assert.equal(getBaseUrl("sess-sw-dev"), KEY_ENVIRONMENTS.dev);
   assert.equal(servedBy("sess-sw-dev"), "dev");
   const boot = await bootstrap("sess-sw-dev");
-  assert.equal(boot.runtime.base_url, KEY_ENVIRONMENTS.dev);
   assert.equal(boot.served_by, "dev");
+  assert.equal(boot.runtime.base_url, api.shownBase?.(KEY_ENVIRONMENTS.dev), "the routing moved, or the host is served");
 });

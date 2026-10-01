@@ -25,7 +25,13 @@
   accepted it, and a new sign-in on the A-Team page drops it.
 - An agent never asks for a key in the chat and never uses one pasted there.
 - `ateam_auth`'s `environment` and the opening give one answer (`unstated` for
-  a key that names none). `/get-api-key` redirects to the key page.
+  a key that names none, the url itself for a self-hosted API). `/get-api-key`
+  redirects to the key page.
+- An `ADAS_API_KEY` in the environment is never sent: a signed-out session's
+  public tools (validation) went out with it, and the Builder read and billed
+  that key's tenant. A refused `ateam_auth` leaves the session exactly as it was.
+- A session on a non-production A-Team API is shown it by name ("the dev API"),
+  never by host, in `base_url`, `_where` and error messages.
 
 ### Security
 

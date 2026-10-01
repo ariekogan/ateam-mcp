@@ -19,7 +19,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { parseApiKey, baseUrlForKeyEnv, envForBaseUrl, getBaseUrl, KEY_ENVIRONMENTS } from "../src/api.js";
+import { parseApiKey, baseUrlForKeyEnv, envForBaseUrl, getBaseUrl, shownBase, KEY_ENVIRONMENTS } from "../src/api.js";
 import { handlers } from "../src/tools.js";
 
 const HEX = "0123456789abcdef0123456789abcdef";
@@ -164,12 +164,14 @@ describe("the session reports one environment, everywhere", () => {
       const auth = await handlers.ateam_auth({ api_key: DEV_KEY }, sid);
       assert.equal(auth.ok, true);
       assert.equal(auth.environment, "dev");
-      assert.equal(auth.base_url, DEV);
+      // Shown by name, not host, since #38 (public text names no non-production host).
+      assert.equal(getBaseUrl(sid), DEV);
+      assert.equal(auth.base_url, shownBase(DEV));
 
       const boot = await handlers.ateam_bootstrap({}, sid);
       assert.equal(boot.runtime.base_url, auth.base_url,
         "bootstrap and auth disagree about which API this session talks to");
-      assert.equal(boot.runtime.base_url, getBaseUrl(sid));
+      assert.equal(boot.runtime.base_url, shownBase(getBaseUrl(sid)));
     } finally { global.fetch = origFetch; }
   });
 });

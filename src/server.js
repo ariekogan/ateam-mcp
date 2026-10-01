@@ -14,14 +14,6 @@ import { tools, coreTools, handleToolCall, MCP_VERSION, openingFor } from "./too
 import { runToolCall } from "./api.js";
 
 /**
- * @param {string} sessionId — identifier for credential isolation.
- *   HTTP transport passes the MCP session UUID; stdio uses "stdio".
- * @param {{ transport?: "stdio" | "http" }} [opts] — the transport this server
- *   is connected to, stated by its caller (src/index.js, src/http.js). Every
- *   tool call carries it (api.js callTransport). Not derived from sessionId: an
- *   HTTP client chooses its own session id, "stdio" included.
- */
-/**
  * The MCP `instructions` for a session, built when its server is created: on
  * HTTP after the bearer or the platform secret seeded the session (http.js
  * seedCredentials runs before createServer), so a browser-authorized session
@@ -42,6 +34,14 @@ function serverInstructions(sessionId, transport) {
   ].join("\n\n");
 }
 
+/**
+ * @param {string} sessionId — identifier for credential isolation.
+ *   HTTP transport passes the MCP session UUID; stdio uses "stdio".
+ * @param {{ transport?: "stdio" | "http" }} [opts] — the transport this server
+ *   is connected to, stated by its caller (src/index.js, src/http.js). Every
+ *   tool call carries it (api.js callTransport). Not derived from sessionId: an
+ *   HTTP client chooses its own session id, "stdio" included.
+ */
 export function createServer(sessionId = "stdio", { transport = null } = {}) {
   const server = new Server(
     // Read the REAL version from package.json. This was hardcoded "0.3.0" while

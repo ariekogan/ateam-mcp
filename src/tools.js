@@ -10,10 +10,10 @@
 
 import {
   get, post, patch, del,
-  setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
+  setSessionCredentials, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
-  servedBy, KEY_ENVIRONMENTS, signInContext, sessionEnvironment,
+  servedBy, KEY_ENVIRONMENTS, signInContext, sessionEnvironment, beginSignIn, shownBase, envApiKeyPresent,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -1114,7 +1114,7 @@ export const tools = [
         },
         tenant: {
           type: "string",
-          description: "Tenant (workspace) name, e.g. acme. Optional with api_key if format is adas_<tenant>_<hex>. REQUIRED with master_key.",
+          description: "Tenant (workspace) name, e.g. acme. Leave it out with api_key: the key names its own workspace (ateam_auth asks the API when the key does not spell it out). REQUIRED with master_key.",
         },
         url: {
           type: "string",
@@ -4402,7 +4402,7 @@ export const handlers = {
     served_by: servedBy(sid),
     runtime: {
       ateam_mcp_version: MCP_VERSION,
-      base_url: getBaseUrl(sid),
+      base_url: shownBase(getBaseUrl(sid)),
       // "as set by ateam_auth's `url`" (af5e366) was written 22 minutes before
       // bff5934 made the KEY pick the environment (MGAP-A31).
       _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to: the environment its sign-in's key names (adas_<env>_…), a `url` given to ateam_auth for a host that is neither environment, or this server's default before any sign-in. " +
@@ -4766,11 +4766,13 @@ export const handlers = {
         return { ok: false, message: "Master key requires a tenant parameter. Specify which tenant to operate on." };
       }
       const apiUrl = url ? url.replace(/\/+$/, "") : undefined;
+      // A refused key leaves the session exactly as it was (api.js beginSignIn).
+      const refused = beginSignIn(sessionId);
       setSessionCredentials(sessionId, { tenant, apiKey: null, apiUrl, explicit: true, masterKey: master_key });
       // Verify by listing solutions
       try {
         const result = await get("/deploy/solutions", sessionId);
-        const urlNote = apiUrl ? ` (via ${apiUrl})` : "";
+        const urlNote = apiUrl ? ` (via ${shownBase(apiUrl)})` : "";
         return {
           ok: true,
           tenant,
@@ -4778,6 +4780,7 @@ export const handlers = {
           message: `Master key authenticated to tenant "${tenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found. Use tenant parameter on any tool to switch tenants without re-auth.`,
         };
       } catch (err) {
+        refused();
         return { ok: false, tenant, message: `Master key auth failed: ${err.message}` };
       }
     }
@@ -4810,7 +4813,7 @@ export const handlers = {
       if (urlEnv && urlEnv !== keyEnv) {
         return {
           ok: false,
-          message: `Refusing to authenticate: this key names the "${keyEnv}" environment, but url points at "${urlEnv}" (${explicitUrl}). One of them is wrong, and guessing which would mean operating on the wrong system. Drop the url argument to use the key's own environment, or use a key for "${urlEnv}".`,
+          message: `Refusing to authenticate: this key names the "${keyEnv}" environment, but url points at "${urlEnv}" (${shownBase(explicitUrl)}). One of them is wrong, and guessing which would mean operating on the wrong system. Drop the url argument to use the key's own environment, or use a key for "${urlEnv}".`,
         };
       }
     }
@@ -4843,7 +4846,7 @@ export const handlers = {
           ok: false,
           message:
             `This key does not name its tenant — the tenant is sealed inside it and only the server can read it — ` +
-            `and ${base} could not tell me who you are: ${err.message} ` +
+            `and ${shownBase(base)} could not tell me who you are: ${err.message} ` +
             `Nothing was authenticated: acting on a guessed tenant is the one failure this must never have. ` +
             `If that host is an older deployment without /auth/whoami, upgrade it or pass tenant: "<name>" explicitly.`,
         };
@@ -4856,6 +4859,9 @@ export const handlers = {
       };
     }
 
+    // A refused key leaves the session exactly as it was (api.js beginSignIn):
+    // it stayed on the refused key, and its opening said it was signed in.
+    const refused = beginSignIn(sessionId);
     setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true });
     // Verify the key works by listing solutions
     try {
@@ -4866,7 +4872,7 @@ export const handlers = {
       // SESSION_TTL — a reconnect or a new chat stayed on it. A new sign-in on
       // the A-Team page drops it (oauth.js exchangeAuthorizationCode).
       setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl });
-      const urlNote = apiUrl ? ` (via ${apiUrl})` : "";
+      const urlNote = apiUrl ? ` (via ${shownBase(apiUrl)})` : "";
       const environment = sessionEnvironment(sessionId);
       return {
         ok: true,
@@ -4887,9 +4893,9 @@ export const handlers = {
         // `session` opening too: they disagreed for this very key.
         environment,
         ...(environment === "unstated" && !explicitUrl && {
-          environment_note: `This key does not name an environment, so the process default was used (${getBaseUrl(sessionId)}). Recreate it as adas_<env>_<tenant>_<hex> to make the environment explicit — until then nothing here can confirm which system you are on.`,
+          environment_note: `This key does not name an environment, so the process default was used (${shownBase(getBaseUrl(sessionId))}). Recreate it as adas_<env>_<tenant>_<hex> to make the environment explicit — until then nothing here can confirm which system you are on.`,
         }),
-        base_url: getBaseUrl(sessionId),
+        base_url: shownBase(getBaseUrl(sessionId)),
         message: `Authenticated to tenant "${resolvedTenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found.`,
       };
     } catch (err) {
@@ -4899,6 +4905,8 @@ export const handlers = {
       // say to retry with that API's base as url — instead of a generic
       // "invalid/unconfigured key". The text names no host but prod's.
       const base = getBaseUrl(sessionId) || "";
+      // Read the base the key was tried at, THEN put the session back.
+      refused();
       const parsedKey = parseApiKey(api_key);
       const wellFormedKey = parsedKey.isValid;
       const triedProd = /(?:^|\/\/)api\.ateam-ai\.com/.test(base);
@@ -4935,7 +4943,7 @@ export const handlers = {
         // It ended "get a valid API key at …/get-api-key" (c61e60b). The
         // upstream error already carries what to do (formatError's 401/403
         // hints render the shared steps).
-        message: `Authentication failed: ${err.message} (tried ${base || "the default base"}).`,
+        message: `Authentication failed: ${err.message} (tried ${base ? shownBase(base) : "the default base"}).`,
       };
     }
   },
@@ -6093,7 +6101,9 @@ export const handlers = {
     const tenant = creds?.tenant;
     const apiKey = creds?.apiKey;
     if (!tenant || !apiKey) {
-      throw new Error("No api_key in session — call ateam_auth(api_key: \"adas_<tenant>_<hex>\") first. ateam_test_notification requires a tenant API key (master_key auth is not supported for this tool).");
+      // It said `call ateam_auth(api_key: "adas_<tenant>_<hex>") first`
+      // (e65a5d9): an agent typing a key, in a retired format.
+      throw new Error("This session holds no workspace API key: ateam_test_notification needs a session signed in with a workspace's key (a master key is not supported for this tool). ateam_bootstrap's `session` field says how this session signs in.");
     }
 
     const coreUrl = process.env.ADAS_CORE_URL || "http://adas-backend:4000";
@@ -7720,6 +7730,42 @@ function summarizeSpecResult(result) {
 
 // ─── Dispatcher ─────────────────────────────────────────────────────
 
+/**
+ * WHY THIS SESSION IS NOT SIGNED IN — the gate's diagnosis, for how the session
+ * is connected (signInContext). One paragraph for every transport used to name
+ * ADAS_API_KEY and "the MCP server restarted" to the platform and to hosted
+ * sessions alike, where neither is the cause.
+ *
+ * "No authentication found." was TRUE and pointed at the WRONG CAUSE: a sign-in
+ * made with ateam_auth lives in memory and does not survive a restart, so a
+ * rebuild silently logged out every such session and the message read like a
+ * first-time setup problem (2026-08-21: a Builder deploy logged out a live
+ * session mid-work). So where a restart can be the cause, both are stated.
+ */
+function whyNotSignedIn(ctx) {
+  if (ctx.audience === "platform") {
+    // The platform signs each workspace in before its calls: a refusal here is
+    // a call that arrived first, and it replays on stage auth_gate (below).
+    return "The A-Team platform had not signed a workspace in on this session when the call arrived.";
+  }
+  if (ctx.audience === "stdio") {
+    return [
+      envApiKeyPresent()
+        ? "An ADAS_API_KEY is set in this process's environment, but it does not sign a session in and is never sent: a key baked into a shared config could point work at the wrong workspace. This process signs in with ateam_auth (below)."
+        : "No sign-in in this local process. TWO CAUSES, and the second is easy to miss:\n" +
+          "  (a) it never signed in, or\n" +
+          "  (b) IT RESTARTED. A sign-in made with ateam_auth lives in this process's memory, so when the client restarts\n" +
+          "      the process, the sign-in is gone.\n" +
+          "If your tools were working minutes ago, it is (b) — nothing is misconfigured: sign in again the same way.",
+    ].join("");
+  }
+  return "This connection carries no workspace sign-in. TWO CAUSES:\n" +
+    "  (a) the client connected without completing the A-Team sign-in, or with a key the API could not resolve, or\n" +
+    "  (b) the session was signed in with ateam_auth, and THE MCP SERVER RESTARTED: that sign-in lives in memory and\n" +
+    "      does not survive a redeploy. A sign-in made on the A-Team page does.\n" +
+    "Either way, the user signs in again (below).";
+}
+
 export async function handleToolCall(name, args, sessionId) {
   const handler = handlers[name];
   if (!handler) {
@@ -7758,7 +7804,6 @@ export async function handleToolCall(name, args, sessionId) {
   // eb5e007) that fifteen later tools never joined, so they ran on that env
   // fallback — promote, rollback and repo writes among them.
   if (!PUBLIC_TOOLS.has(name) && !isExplicitlyAuthenticated(sessionId)) {
-    const hasEnvVars = isAuthenticated(sessionId);
     const ctx = signInContext(sessionId);
     return {
       content: [{
@@ -7766,27 +7811,7 @@ export async function handleToolCall(name, args, sessionId) {
         text: [
           `Authentication required — this session is not signed in to a workspace (tenant), so ${name} was refused before it ran.`,
           "",
-          ctx.audience === "platform"
-            // The platform signs each workspace in before its calls: a refusal
-            // here is a call that arrived first, and it replays on stage
-            // auth_gate (below). No user step applies.
-            ? "The A-Team platform had not signed a workspace in on this session when the call arrived."
-            : hasEnvVars
-            ? "An ADAS_API_KEY environment variable was found, but it does not sign a session in: a key baked into a shared config could point work at the wrong workspace, so the session signs in (below) to say which workspace it means."
-            // "No authentication found." was TRUE and pointed at the WRONG CAUSE.
-            // Auth is held in this process's memory and does NOT survive a
-            // restart, so a container rebuild silently logs out every connected
-            // session — and the message read like a first-time setup problem,
-            // sending the reader to go get an API key they already had.
-            // 2026-08-21: a Builder deploy logged out a live session mid-work
-            // and cost a human round-trip to diagnose. State both causes; the
-            // second is the likelier one for a session that was working a
-            // moment ago.
-            : "No sign-in found in this process. TWO CAUSES, and the second is easy to miss:\n" +
-              "  (a) this session never signed in, or\n" +
-              "  (b) THE MCP SERVER RESTARTED. A sign-in made with ateam_auth lives in memory and does not survive a\n" +
-              "      restart, so a container rebuild or redeploy logs out every such session with no warning.\n" +
-              "If your tools were working minutes ago, it is (b) — nothing is misconfigured: sign in again the same way.",
+          whyNotSignedIn(ctx),
           "",
           // The steps are signInSteps.js's, word for word, for how this
           // session is connected. c61e60b said "Get their API key at

@@ -12,8 +12,8 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { bindSessionBearer, getAuthOverride } from "../src/api.js";
-import { handleToolCall } from "../src/tools.js";
+import { bindSessionBearer, getAuthOverride, getCredentials, getBaseUrl, isExplicitlyAuthenticated, runToolCall } from "../src/api.js";
+import { handleToolCall, openingFor } from "../src/tools.js";
 import { mountOAuth } from "../src/oauth.js";
 
 const HEX = "0".repeat(32);
@@ -53,4 +53,32 @@ test("a new sign-in on the A-Team page drops the bearer's override", async () =>
   const tokens = await provider.exchangeAuthorizationCode(client, "code-1");
   assert.equal(tokens.access_token, BEARER);
   assert.equal(getAuthOverride(BEARER), null, "the new sign-in kept the workspace an earlier ateam_auth had moved this bearer to");
+});
+
+// Review round 2 (R2-2): the session's OWN record. ateam_auth wrote the new
+// key into the session before checking it, and left it there when the API
+// refused it: a stdio session stayed on the refused key, and its opening said
+// it was signed in to that key's workspace.
+const stdio = (sid, fn) => runToolCall(sid, fn, { transport: "stdio" });
+const state = (sid) => ({ creds: getCredentials(sid), base: getBaseUrl(sid), signedIn: isExplicitlyAuthenticated(sid), opening: openingFor(sid, { transport: "stdio" }) });
+
+test("a refused key leaves a signed-in session exactly as it was", async () => {
+  answer(200, { solutions: [] });
+  await stdio("sess-own-in", () => handleToolCall("ateam_auth", { api_key: BEARER }, "sess-own-in"));
+  const before = state("sess-own-in");
+  assert.equal(before.creds.tenant, "home");
+  answer(401, { error: "Invalid or rotated key" });
+  const r = JSON.parse((await stdio("sess-own-in", () => handleToolCall("ateam_auth", { api_key: OTHER }, "sess-own-in"))).content[0].text);
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.deepEqual(state("sess-own-in"), before, "the refused key changed the session");
+});
+
+test("a refused key leaves a session that never signed in signed out", async () => {
+  const before = state("sess-own-out");
+  assert.equal(before.signedIn, false);
+  answer(401, { error: "Invalid or rotated key" });
+  await stdio("sess-own-out", () => handleToolCall("ateam_auth", { api_key: OTHER }, "sess-own-out"));
+  const after = state("sess-own-out");
+  assert.equal(after.signedIn, false, `the refused key signed the session in; it now opens: ${after.opening.split("\n")[0]}`);
+  assert.deepEqual(after, before);
 });

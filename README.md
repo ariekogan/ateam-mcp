@@ -117,13 +117,11 @@ cd ateam-mcp
 # Install
 npm install
 
-# Configure
-cp .env.example .env
-# Edit .env with your ADAS tenant and API key
-
-# Run
+# Run (a local stdio process)
 npm start
 ```
+
+A local process signs in with `ateam_auth`, given a workspace key the agent reads from a file outside the chat; an `ADAS_API_KEY` in the environment does not sign it in and is never sent. `ADAS_API_URL` in its environment points it at a self-hosted API. Most people use the hosted connector instead (above).
 
 ## Architecture
 

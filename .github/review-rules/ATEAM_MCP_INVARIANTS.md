@@ -112,10 +112,18 @@
 
 ## 5. Tenant-scoped tools: explicit-auth gated, never default the tenant (BLOCKING)
 
-- Every tool touching tenant data MUST be in `TENANT_TOOLS` and requires EXPLICIT
-  `ateam_auth`/bearer — ambient env (`ADAS_API_KEY`/`ADAS_TENANT`) is deliberately
-  NOT sufficient (`isExplicitlyAuthenticated`). A new tenant-touching tool omitted
-  from `TENANT_TOOLS` bypasses the gate ⇒ BLOCKING.
+- The auth gate DENIES BY DEFAULT: every tool requires an EXPLICIT sign-in
+  (`ateam_auth` or a bearer — `isExplicitlyAuthenticated`) unless it is in
+  `PUBLIC_TOOLS` (`src/publicTools.js`), the one list, each entry with its reason.
+  Adding a tool to `PUBLIC_TOOLS` that reads or writes a workspace, or a second
+  hand-kept list of public/tenant tools, ⇒ BLOCKING. (`TENANT_TOOLS`, the old
+  opt-in list, missed fifteen tools and was deleted in #38.)
+- Ambient env (`ADAS_API_KEY`/`ADAS_TENANT`) is NOT a sign-in and is never SENT:
+  `getCredentials` reads only the session's record. Re-introducing an env-key
+  fallback for requests ⇒ BLOCKING (`envApiKeyPresent()` exists only for the
+  refusal text).
+- Sign-in and switch steps live in `src/signInSteps.js` and are rendered from
+  it; restating them elsewhere ⇒ BLOCKING (test/sign-in-and-switch.test.mjs).
 - Credential resolution + `headers()` (`src/api.js`) must **throw** when the tenant
   can't be resolved — NEVER re-introduce a `|| "main"`/`|| "default"` fallback
   (High-sev bug). Keep the exact forward-header names (`X-ADAS-TENANT` + `X-API-KEY`,

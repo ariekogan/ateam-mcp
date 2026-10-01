@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 
 // The env fallback the gate must not honour, set before api.js reads it.
 process.env.ADAS_API_KEY = `adas_prod_acme_${"0".repeat(32)}`;
-const { isAuthenticated, isExplicitlyAuthenticated, runToolCall } = await import("../src/api.js");
+const { isExplicitlyAuthenticated, runToolCall } = await import("../src/api.js");
 const { tools, handlers, handleToolCall } = await import("../src/tools.js");
 const { PUBLIC_TOOLS } = await import("../src/publicTools.js").catch(() => ({}));
 
@@ -48,7 +48,7 @@ test("signed out, with ADAS_API_KEY in the environment: every tool not on the pu
     const sid = `sess-gate-${name}`;
     sent.length = 0;
     const r = await runToolCall(sid, () => handleToolCall(name, { ...ARGS }, sid), { transport: "stdio" });
-    assert.ok(isAuthenticated(sid) && !isExplicitlyAuthenticated(sid), "the env-key fallback is not in place, so this proves nothing");
+    assert.ok(process.env.ADAS_API_KEY && !isExplicitlyAuthenticated(sid), "no env key, or the session is signed in: this proves nothing");
     if (r.structuredContent?.stage !== "auth_gate" || sent.length > 0) ran.push(`${name}${sent.length ? ` (sent ${sent.length} request(s))` : ""}`);
   }
   assert.deepEqual(ran, [], `ran signed out, on the env key:\n${ran.join("\n")}`);
@@ -68,4 +68,25 @@ test("signed out, bootstrap does not list the env key's workspace", async () => 
   const boot = JSON.parse((await runToolCall("sess-gate-boot", () => handleToolCall("ateam_bootstrap", {}, "sess-gate-boot"), { transport: "stdio" })).content[0].text);
   assert.equal(boot.tenant_onboarding, undefined, "bootstrap read the env key's solutions for a session that is not signed in");
   assert.ok(!sent.some((u) => u.includes("/deploy/solutions")), `it asked: ${sent.join(", ")}`);
+});
+
+// Review round 2 (R2-1): a public tool must not carry the environment's key.
+// getCredentials fell back to ADAS_API_KEY for a session with no record, so a
+// signed-out ateam_validate_solution went out with it: the Builder verified the
+// key, read that tenant's state and billed an LLM call to it.
+test("signed out, a public tool sends no key — not the one in the environment", async () => {
+  const seen = [];
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    seen.push({ url: String(url), headers: Object.fromEntries(Object.entries(init.headers || {}).map(([k, v]) => [k.toLowerCase(), v])) });
+    return new Response(JSON.stringify({ ok: true, valid: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await runToolCall("sess-gate-validate", () => handleToolCall("ateam_validate_solution", { solution: { id: "x" }, skills: [] }, "sess-gate-validate"), { transport: "stdio" });
+  } finally { globalThis.fetch = prev; }
+  assert.ok(seen.length > 0, "the validate call sent nothing, so this proves nothing");
+  for (const r of seen) {
+    assert.equal(r.headers["x-api-key"], undefined, `${r.url} carried the environment's key`);
+    assert.equal(r.headers["x-adas-tenant"], undefined, `${r.url} carried a tenant`);
+  }
 });
