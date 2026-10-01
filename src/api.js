@@ -1200,6 +1200,23 @@ export function formatError(method, path, status, body, baseUrl, { read = method
       `calling from and the topic has not been deployed here yet. Retrying will not change either.`;
   }
 
+  // A 404 FROM A DEPLOYMENT WITHOUT THE TRIGGER PROBE IS NOT A WRONG ID.
+  //
+  // ateam_get_solution(view:"triggers") reads GET /deploy/solutions/:id/skills/
+  // :sk/triggers, which the Builder serves from BUILDER-10 on. A backend older
+  // than the tool answers Express's own HTML "Cannot GET …" page; the route's
+  // genuine not-found is JSON ({"error":"Skill not found"}). The table gave both
+  // "check the solution_id or skill_id", so "this deployment cannot check a
+  // schedule" read exactly like a typo — and a builder could go on to report
+  // the schedule as set up. Same trap as /spec above; same answer: name the
+  // environment.
+  if (status === 404 && /^\/deploy\/solutions\/[^/]+\/skills\/[^/]+\/triggers$/.test(String(path || "")) && jsonBodyOf(body) === null) {
+    hints[404] =
+      `Not a solution_id or skill_id problem — the A-Team API at ${shown || "this URL"} does not serve the trigger ` +
+      `probe yet (the Builder route behind view:"triggers" is not deployed there). Nothing was checked: do NOT report ` +
+      `the schedule as registered or as running. Retrying will not change it.`;
+  }
+
   // The body as TEXT — ONE normalization for every check below. request()
   // passes the text it read; anything else (a direct caller) is serialized.
   // This function had grown three copies of this line (the 5xx check, the

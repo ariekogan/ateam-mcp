@@ -1155,7 +1155,7 @@ export const tools = [
           type: "string",
           enum: ["capabilities", "realizations", "overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "host-contract", "platform-connectors", "platform-truth", "sdk", "workflows", "monitoring"],
           description:
-            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'mobile-connector' = building functional connectors (background services) for ateam-mobile that use device capabilities through the Native Bridge SDK. 'actor-storage' = per-actor storage (production): a per-(tenant, actor, skill) SQLite database served by the actorstore-mcp platform connector — read this instead of hand-rolling per-user isolation in a connector. 'consumer-roles' = role-based access for your solution's END-USERS: you declare the config, the platform resolves and enforces one RoleProfile per request (roles decide WHO may act; actor-storage decides WHOSE data they touch). 'triggers' = the ONLY way a skill acts proactively — on a schedule or an event, with no user message; read before designing anything that must happen by itself. 'sub-agent' = sub-agents are a TOOL CALL (sys.callAiWithTools with a curated toolNames set), not a definition-level construct; caveats stated inline. 'voice' = the voice channel: phone (Twilio) and web/mobile callers reach the SAME skill runtime as chat — what you control (solution.voice, routing.voice.default_skill, a per-skill voice block, ateam_test_voice) and what you do not. 'voice-native' = the exception to that model: a `voice_native` block puts a skill inside the live audio loop (persona layer, one server skill tool, plus local device tools), with the boundaries that come with it. 'platform-connectors' = the built-in platform connectors (memory, browser, gmail, whatsapp, …) with their LIVE tool schemas and the inter-connector calling pattern — read before writing a connector that duplicates one. 'sdk' = the @ateam/sdk runtime API reference (platform, context, memory, progress, log, llm) for custom connector and skill code. 'host-contract' = the normative boundary between a host shell (mobile app, web shell, kiosk, watch) and the solutions it renders: ownership matrix, forbidden host behaviours, host capability allow-list — read when reviewing a host or designing a portable solution. 'platform-truth' = does this deployment's published sys.* tools and platform connectors agree with what the RUNNING Core exposes (including planner visibility)? Answers agrees:null when Core cannot be reached, never silence. 'workflows' = the Builder's step-by-step state machines for building skills and solutions (the same document ateam_get_workflows returns). 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
+            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'mobile-connector' = building functional connectors (background services) for ateam-mobile that use device capabilities through the Native Bridge SDK. 'actor-storage' = per-actor storage (production): a per-(tenant, actor, skill) SQLite database served by the actorstore-mcp platform connector — read this instead of hand-rolling per-user isolation in a connector. 'consumer-roles' = role-based access for your solution's END-USERS: you declare the config, the platform resolves and enforces one RoleProfile per request (roles decide WHO may act; actor-storage decides WHOSE data they touch). 'triggers' = the ONLY way a skill acts proactively — on a schedule or an event, with no user message; read before designing anything that must happen by itself, decision_guide first: any time word in a requirement (every day, at 8, weekly) is a trigger, and it is done only when ateam_get_solution(view:'triggers') shows it registered:true with a next run and system_halted:false — not reachable yet (Core reports no system_halted today, and the trigger switch is OFF), so report what that result's done_rule says. 'sub-agent' = sub-agents are a TOOL CALL (sys.callAiWithTools with a curated toolNames set), not a definition-level construct; caveats stated inline. 'voice' = the voice channel: phone (Twilio) and web/mobile callers reach the SAME skill runtime as chat — what you control (solution.voice, routing.voice.default_skill, a per-skill voice block, ateam_test_voice) and what you do not. 'voice-native' = the exception to that model: a `voice_native` block puts a skill inside the live audio loop (persona layer, one server skill tool, plus local device tools), with the boundaries that come with it. 'platform-connectors' = the built-in platform connectors (memory, browser, gmail, whatsapp, …) with their LIVE tool schemas and the inter-connector calling pattern — read before writing a connector that duplicates one. 'sdk' = the @ateam/sdk runtime API reference (platform, context, memory, progress, log, llm) for custom connector and skill code. 'host-contract' = the normative boundary between a host shell (mobile app, web shell, kiosk, watch) and the solutions it renders: ownership matrix, forbidden host behaviours, host capability allow-list — read when reviewing a host or designing a portable solution. 'platform-truth' = does this deployment's published sys.* tools and platform connectors agree with what the RUNNING Core exposes (including planner visibility)? Answers agrees:null when Core cannot be reached, never silence. 'workflows' = the Builder's step-by-step state machines for building skills and solutions (the same document ateam_get_workflows returns). 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
         section: {
           type: "string",
@@ -1612,9 +1612,9 @@ export const tools = [
         },
         view: {
           type: "string",
-          enum: ["definition", "skills", "health", "status", "export", "validate", "connectors_health"],
+          enum: ["definition", "skills", "health", "status", "export", "validate", "connectors_health", "triggers"],
           description:
-            "What to read: 'definition' = full solution def, 'skills' = list skills, 'health' = live health check, 'status' = deploy status, 'export' = exportable bundle, 'validate' = re-validate from stored state, 'connectors_health' = connector status",
+            "What to read: 'definition' = full solution def, 'skills' = list skills, 'health' = live health check, 'status' = deploy status, 'export' = exportable bundle, 'validate' = re-validate from stored state, 'connectors_health' = connector status, 'triggers' = every trigger each skill defines and every trigger Core has registered, each marked registered:true/false (null for an event trigger, with registered_source), with Core's state (pause, last run, next run) plus system_halted, the platform-wide trigger switch — a schedule is done only when it shows registered:true with a next run and system_halted:false. Not reachable yet: Core does not report system_halted or a next run today, and the platform trigger switch is OFF on both environments (2026-10-01) — so report what the result's done_rule says, never that the schedule will run (with skill_id: that skill only)",
         },
         skill_id: {
           type: "string",
@@ -4369,6 +4369,47 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   };
 }
 
+/**
+ * ateam_get_solution(view:"triggers"): is each schedule REGISTERED, and will it
+ * fire? Read per skill from the Builder's probe of Core's trigger registry
+ * (GET /deploy/solutions/:id/skills/:sk/triggers → Core cp.triggers_api). Until
+ * 2026-10-01 nothing a builder could call showed the registry or the halt, so
+ * "the schedule is set up" was never checked against anything.
+ *
+ * system_halted is one platform-wide switch, so the skills' answers are one
+ * answer. It is Core's value when Core reports it; until then it is null with
+ * system_halted_source "not reported by Core yet" — named, never a guessed false.
+ */
+const TRIGGERS_NOT_REPORTED = "not reported by Core yet";
+const TRIGGERS_NOTHING_ASKED = "no skill to check — Core was not asked";
+
+async function solutionTriggers(solution_id, skill_id, sid) {
+  const skillIds = skill_id
+    ? [skill_id]
+    : ((await get(apiPath`/deploy/solutions/${solution_id}/skills`, sid))?.skills || []).map((s) => s.id).filter(Boolean);
+  const perSkill = [];
+  for (const id of skillIds) {
+    perSkill.push({ skill_id: id, answer: await get(apiPath`/deploy/solutions/${solution_id}/skills/${id}/triggers`, sid) });
+  }
+  const reported = perSkill.map((p) => p.answer?.system_halted).find((v) => typeof v === "boolean");
+  const first = (key) => perSkill.map((p) => p.answer?.[key]).find((v) => v != null) ?? null;
+  // Each skill says whether ITS registered triggers carried next_run_at; one
+  // skill with none must not speak for one whose rows did.
+  const nextRunFromCore = perSkill.some((p) => p.answer?.next_run_at_source === "core");
+  const unasked = perSkill.length === 0;
+  return {
+    ok: true,
+    solution_id,
+    system_halted: typeof reported === "boolean" ? reported : null,
+    system_halted_source: typeof reported === "boolean" ? "core" : unasked ? TRIGGERS_NOTHING_ASKED : TRIGGERS_NOT_REPORTED,
+    halt: first("halt"),
+    next_run_at_source: nextRunFromCore ? "core" : unasked ? TRIGGERS_NOTHING_ASKED : TRIGGERS_NOT_REPORTED,
+    done_rule: first("done_rule"),
+    triggers: perSkill.flatMap((p) => (p.answer?.triggers || []).map((t) => ({ skill_id: p.skill_id, ...t }))),
+    skills_checked: perSkill.map((p) => p.skill_id),
+  };
+}
+
 // Exported for tests. handleToolCall below is the runtime entry point and stays
 // the only one production code should use; reaching a handler directly lets a
 // test EXECUTE it instead of asserting against this file's source text, which
@@ -5810,6 +5851,10 @@ export const handlers = {
   ateam_get_solution: async ({ solution_id, view, skill_id, section, offset, limit }, sid) => {
     const base = apiPath`/deploy/solutions/${solution_id}`;
     const paged = (offset != null || limit != null);
+    if (view === "triggers") {
+      const result = await solutionTriggers(solution_id, skill_id, sid);
+      return paged ? _pageJson(result, offset, limit) : result;
+    }
     if (skill_id) {
       const r = await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
       // OPEN-8: a single skill def can be 50KB+ and truncate at the output cap.
