@@ -18,7 +18,7 @@
 
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_TYPES } from './exampleTypes.js';
-import { TEST_RUNS_AS } from './testRunsAs.js';
+import { TEST_RUNS_AS, KEY_PERSON } from './testRunsAs.js';
 
 export const AGENT_DOC_SENTINEL = "<!-- SOLUTION-SPECIFIC NOTES BELOW — not auto-regenerated -->";
 
@@ -309,7 +309,10 @@ function buildToolTable() {
 
 function buildUniversalPitfalls() {
   return [
-    "- **`ateam_test_connector` runs as `_system_service`.** Core strips user-provided `_adas_actor` when you call via the test harness. Use it for connector-level bugs; for per-user flows use `ateam_test_skill` / `ateam_conversation`. " + TEST_RUNS_AS,
+    // It said "`ateam_test_connector` runs as `_system_service`" (e75feac,
+    // 2026-04-21) — inferred, never observed. PRE-1 (2026-10-01) observed it
+    // run as the key's person, like every other test.
+    "- **`ateam_test_connector` proves a tool's plumbing, never a step that waits for a person.** It calls one connector tool directly — no skill, no guardrails, no user turn — as " + KEY_PERSON + ". Use it for connector-level bugs; test a confirmation, an approval or a value only the user knows with `ateam_conversation`, multi-turn, you playing the person. " + TEST_RUNS_AS,
     "- **`.ateam/export.json` is auto-generated.** Never hand-edit. Deploys read it, so stale copies silently break things.",
     "- **Prefer `ateam_patch` over `github_patch` + a deploy** for skill-definition edits. One call that writes `dev` and redeploys what it patched; check its `redeploy` phase, which reports a failed redeploy (the edit is kept).",
     "- **Always refetch dynamic ids.** Corpus ids, job ids, actor ids change. Call `docs.corpus.list` / `ateam_list_solutions` / etc. in the current job — don't reuse ids from memory or previous sessions.",

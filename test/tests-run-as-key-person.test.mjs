@@ -40,6 +40,7 @@ test("TEST_RUNS_AS says what the Builder's /spec says", () => {
     /a different actor_id is not honoured/,
     /key no person minted[^.]*runs as before/,
     /ran_as is the actor the job ran as/,
+    /ran_as is the actor the job ran as: the person whose key started the test — the person you are talking to — or null for an anonymous run/,
     /ateam_test_voice\) runs as the person only once the voice backend verifies the API key/,
     /Core follow-up/,
     /until then it is anonymous/,
@@ -144,7 +145,7 @@ test("ateam_conversation's result keeps the Builder's ran_as and names it in _po
 
 // ONE copy of the fact: its distinctive words appear in no other source file.
 test("the statement is written once, in src/testRunsAs.js", () => {
-  const phrases = ["runs AS THE PERSON that key belongs to", "is the actor the job ran as"];
+  const phrases = ["runs AS THE PERSON that key belongs to", "is the actor the job ran as", "the person whose key started the test"];
   for (const f of readdirSync(SRC).filter((n) => n.endsWith(".js") && n !== "testRunsAs.js")) {
     const text = readFileSync(join(SRC, f), "utf8");
     for (const p of phrases) assert.ok(!text.includes(p), `src/${f} restates "${p}" — render TEST_RUNS_AS instead`);

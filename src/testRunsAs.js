@@ -1,8 +1,9 @@
 /**
  * WHO A TEST RUNS AS — ONE statement, rendered into every ateam-mcp surface
  * that says who a test job runs as: ateam_test_skill's and ateam_conversation's
- * actor_id, ateam_test_voice, bootstrap's conversation_flow, the tenant
- * CLAUDE.md (agentDoc.js) and the scaffolded connector's missing-actor error.
+ * actor_id, ateam_test_voice, ateam_test_connector (KEY_PERSON), bootstrap's
+ * conversation_flow, the tenant CLAUDE.md (agentDoc.js) and the scaffolded
+ * connector's missing-actor error.
  * Its own module because agentDoc.js cannot import tools.js (tools.js imports
  * agentDoc.js).
  *
@@ -31,11 +32,26 @@
  */
 
 /**
+ * WHO THAT PERSON IS, in the words CORE approved after PRE-1 (2026-10-01).
+ *
+ * PRE-1 ran live, on the external hosted path and from inside an in-app
+ * builder run: a test started with a key runs as the person the key belongs
+ * to — ran_as, the actor_id and Core's jobs.actorId all named that person on
+ * turn 1, on turn 2, and on ateam_test_connector (no NO_INDIVIDUAL_USER). The
+ * in-app builder still read its own admin's id in ran_as as a synthetic test
+ * id, because "the person" did not say WHICH person. This does, with no name
+ * or email lookup. Rendered in ran_as below and in ateam_test_connector's
+ * description.
+ */
+export const KEY_PERSON =
+  "the person whose key started the test — the person you are talking to";
+
+/**
  * The reply field. Part of TEST_RUNS_AS below (not a second wording of it), and
  * rendered alone where an ateam-mcp result or description names the field.
  */
 export const RAN_AS_IN_REPLY =
-  "Every reply's ran_as is the actor the job ran as — the person, or null for an anonymous run.";
+  "Every reply's ran_as is the actor the job ran as: " + KEY_PERSON + " — or null for an anonymous run.";
 
 /**
  * A KEY WHOSE PERSON IS GONE (Builder #117, Core 9f32bac37): Core's
