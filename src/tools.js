@@ -2263,14 +2263,17 @@ export const tools = [
     core: true,
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
-      "Scaffold a new MCP connector with server.js + package.json + README: a defineConnector skeleton " +
+      "Scaffold a NEW MCP connector with server.js + package.json + README: a defineConnector skeleton " +
       "(@ateam-ai/sdk/serve): you write handlers; caller identity arrives as ctx. " +
       "Where its data goes: " + STORAGE_DECISION_AT + ". " +
       "You then fill in the tool implementations. " +
       "Set ui_capable=true to include ui.listPlugins / ui.getPlugin stubs " +
       "(plugin source files added separately via ateam_create_plugin). " +
       "After scaffolding, the files are uploaded to Core via the same path " +
-      "as ateam_upload_connector.",
+      "as ateam_upload_connector. " +
+      "Create never replaces: an id that already exists in this solution (authored source, or code Core runs) " +
+      "is refused with CONNECTOR_EXISTS and nothing is uploaded — change it with ateam_upload_connector. " +
+      "If whether it exists cannot be read, the create is refused too.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2337,13 +2340,11 @@ export const tools = [
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
       "Upload connector code to Core and restart it. Then the skills that import this connector's tools are redeployed when they need it — a redeploy of the WHOLE skill as the Builder holds it, so its other connectors' tools and any saved edit not yet deployed go live too. The reply's skill_tools says, per skill and per connector, what changed in what Core runs; stages.skills is its verdict. A tools[] you wrote yourself is never changed. The rule: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools.when_the_connector_changes.\n\n" +
-      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To replace the whole connector, pass replace:true.\n\n" +
       "Modes:\n" +
-      "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
-      "  • github:true + files:[]        — GitHub state at `ref` as BASE, your files overlay on top (incoming wins).\n" +
-      "  • files:[] (no github)          — default MERGE: your files over the GitHub state at `ref`, which is itself laid over the files Core ALREADY runs for this connector. So a file that exists only in the deployed copy SURVIVES this mode. Refuses if no base exists at all (no silent nuke).\n" +
-      "  • files:[] + replace:true       — full replace. Wipes connector dir + writes only the provided files. Use deliberately.\n\n" +
-      "Multi-file connectors (server.js, UI HTML, RN bundle, package files): pass each file as content_base64 (one escape-safe base64 line) instead of content. This is the CANONICAL agent path for a full connector; do NOT hand-roll `curl` against the raw endpoint (that skips connector registration / PAT provisioning).",
+      "  • github:true — deploy connectors/<id>/ from the repo at `ref` (default 'dev'); add files:[] to overlay yours on it.\n" +
+      "  • files:[] — MERGE (default): your files over the repo at `ref`, over the files Core ALREADY runs, so a file you leave out is kept. Refused when there is no base at all.\n" +
+      "  • files:[] + replace:true — the connector becomes EXACTLY these files. Every other file is DELETED from Core, from the Builder's source and from the repo's working branch (dev) — never from main; a promote carries it there. The reply names each (dropped, authored.removed, repo.deleted). github:true + replace:true leaves the repo as it is.\n\n" +
+      "Multi-file connectors: pass each file as content_base64 (single-line, escape-safe) instead of content. This is the canonical path for a full connector — do not curl the raw endpoint (it skips connector registration and PAT provisioning).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2374,11 +2375,11 @@ export const tools = [
             },
             required: ["path"],
           },
-          description: "Files to upload — each needs 'path' plus ONE of content (inline string) or content_base64 (escape-safe base64; preferred for multi-file connectors). By default merges with the GitHub state at `ref`. Set replace:true to wipe the connector dir and write only these files.",
+          description: "Files to upload — each needs 'path' plus ONE of content (inline string) or content_base64 (escape-safe base64; preferred for multi-file connectors). By default merges with the GitHub state at `ref`. With replace:true the connector becomes exactly these files (see replace).",
         },
         replace: {
           type: "boolean",
-          description: "Opt into FULL REPLACE: wipe the connector dir and write only the provided `files`. Default: false (= merge with GitHub state at `ref`). Use with intent — sending an incomplete file set with replace:true will break the connector.",
+          description: "FULL REPLACE: the connector becomes exactly `files`. Every other file is deleted from Core, from the Builder's source and from the repo's working branch (dev); main is never touched (a promote carries it). With github:true the repo is left as it is. Default: false (= merge). An incomplete file set with replace:true deletes the rest of the connector.",
         },
         force: {
           type: "boolean",
@@ -3789,6 +3790,21 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // ═══════════════════════════════════════════════════════════════════
 // Phase 7 strip: connector + plugin scaffolds
 // ───────────────────────────────────────────────────────────────────
+/** ateam_create_connector's refusal for an id that already exists: what to use instead. */
+function connectorExists(solutionId, connectorId, why) {
+  return {
+    ok: false,
+    code: "CONNECTOR_EXISTS",
+    connector_id: connectorId,
+    error: `Connector "${connectorId}" already exists (${why}) — use ateam_upload_connector to change it. ` +
+      "ateam_create_connector makes a NEW connector and never replaces one. Nothing was created or uploaded.",
+    use: [
+      `ateam_get_connector_source(solution_id:'${solutionId}', connector_id:'${connectorId}') — read what it holds`,
+      `ateam_github_patch, then ateam_upload_connector(solution_id:'${solutionId}', connector_id:'${connectorId}', github:true) — change it`,
+    ],
+  };
+}
+
 // Pure client-side templates. ateam_create_connector / ateam_create_plugin
 // produce file contents + push them via the existing /deploy/.../upload
 // endpoint. The author writes only the unique tool implementations and
@@ -7766,16 +7782,35 @@ export const handlers = {
     if (!/^[a-z][a-z0-9-]*$/.test(connector_id)) {
       throw new Error("connector_id must be lowercase letters/digits/dashes only");
     }
+    // CREATE NEVER DESTROYS (CORE). The upload below is replace:true, which
+    // deletes every file the scaffold lacks — from Core, from the Builder's
+    // source and from the repo's working branch (Builder #121, #123). 575e993
+    // sent it assuming the id was new and never checked, so create on an
+    // existing id replaced that connector with a skeleton. So ask first, with
+    // the read ateam_get_connector_source makes: the Builder's authored source
+    // (its store, then GitHub), and `deployed_in_core` when there is none.
+    // Only its 404 AUTHORED_SOURCE_MISSING with nothing deployed is "new".
+    // Any other answer — a failure included — refuses: never create blind.
+    try {
+      await get(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
+      return connectorExists(solution_id, connector_id, "it has authored source");
+    } catch (err) {
+      const parsed = jsonBodyOf(err.body);
+      if (!(err.status === 404 && parsed?.code === "AUTHORED_SOURCE_MISSING")) {
+        err.message = `ateam_create_connector refused: could not tell whether connector "${connector_id}" already exists (${err.message}). Nothing was created or uploaded.`;
+        throw err;
+      }
+      if (parsed.deployed_in_core === true) return connectorExists(solution_id, connector_id, "Core is running it");
+    }
     const files = _scaffoldConnectorFiles({
       connectorId: connector_id,
       displayName: name || connector_id,
       uiCapable: !!ui_capable,
     });
-    // replace:true — this is a NEW connector: the scaffold IS the complete file
-    // set, and there's nothing to merge against (no GitHub base, nothing
-    // deployed yet). Without it the upload route's merge-protection 409s a
-    // brand-new connector on a repo-less tenant ("no existing base to merge").
-    // Partial uploads (ateam_create_plugin) still merge; a full create replaces.
+    // replace:true — this is a NEW connector (checked above): the scaffold IS
+    // the complete file set, and there's nothing to merge against. Without it
+    // the upload route's merge-protection 409s a brand-new connector on a
+    // repo-less tenant ("no existing base to merge").
     const result = await post(
       apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
       { files, replace: true },
