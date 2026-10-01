@@ -72,8 +72,12 @@ test('every text that says when a schedule is done says registered:true — the 
     assert.match(text, /done only when/, `${where} no longer states the done rule`);
     assert.match(text, /registered:true with a next run and system_halted:false/,
       `${where}: "listed" is not "registered" — a trigger only in skill.json is listed with registered:false`);
-    assert.match(text, /[Nn]ot reachable yet/, `${where}: done cannot be met today (no system_halted from Core, switch OFF) — say so`);
+    assert.match(text, /[Aa]nything less is not done/, `${where}: say what happens short of done`);
     assert.match(text, /done_rule/, `${where}: name what to report instead — the result's done_rule`);
+    // No live-environment claim: it goes stale the moment Core reports the
+    // switch and the next run (CORE-7) or the halt is lifted (CORE-8). The
+    // result's named nulls say what Core did not report; the schema must not.
+    assert.doesNotMatch(text, /switch is OFF|\b20\d\d-\d\d-\d\d\b|today/, `${where}: a dated or live-state claim in a static description`);
   }
 });
 
