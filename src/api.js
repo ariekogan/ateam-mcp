@@ -1212,7 +1212,7 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // environment.
   if (status === 404 && /^\/deploy\/solutions\/[^/]+\/skills\/[^/]+\/triggers$/.test(String(path || "")) && jsonBodyOf(body) === null) {
     hints[404] =
-      `Not a solution_id or skill_id problem — the A-Team API at ${baseUrl || "this URL"} does not serve the trigger ` +
+      `Not a solution_id or skill_id problem — the A-Team API at ${shown || "this URL"} does not serve the trigger ` +
       `probe yet (the Builder route behind view:"triggers" is not deployed there). Nothing was checked: do NOT report ` +
       `the schedule as registered or as running. Retrying will not change it.`;
   }

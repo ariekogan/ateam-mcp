@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { setSessionCredentials } from '../src/api.js';
+import { setSessionCredentials, formatError, KEY_ENVIRONMENTS } from '../src/api.js';
 import * as TOOLS from '../src/tools.js';
 
 const SID = 'sess-solution-view-triggers';
@@ -36,7 +36,8 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 setSessionCredentials(SID, { apiKey: 'adas_tenanta_00000000000000000000000000000000', apiUrl: `http://127.0.0.1:${server.address().port}`, explicit: true });
 test.after(() => server.close());
 
-const DONE = 'Done means ateam_get_solution(view:"triggers") lists the trigger with a next run AND system_halted:false.';
+// Builder #114's decision_guide.done, as the Builder serves it.
+const DONE = 'Done means ateam_get_solution(view:"triggers") shows the trigger registered:true, with a next run, AND system_halted:false. system_halted:true: tell the user the schedule is saved but the platform trigger switch is OFF, so it will not run. system_halted:null: Core did not say — report that. Never report that a schedule will run on anything less.';
 const probe = (over = {}) => ({
   ok: true, skillSlug: 'x', system_halted: null, system_halted_source: 'not reported by Core yet', halt: null,
   next_run_at_source: 'not reported by Core yet', done_rule: DONE, triggers: [], ...over,
@@ -60,7 +61,7 @@ async function view(args, extra = {}) {
 test('"triggers" is an offered view, and says what done means', () => {
   const def = TOOLS.tools.find((t) => t.name === 'ateam_get_solution');
   assert.ok(def.inputSchema.properties.view.enum.includes('triggers'), 'view:"triggers" is not offered');
-  assert.match(def.inputSchema.properties.view.description, /'triggers' = .*registered:true\/false.*system_halted/);
+  assert.match(def.inputSchema.properties.view.description, /'triggers' = .*registered:true\/false \(null for an event trigger, with registered_source\).*system_halted/);
 });
 
 test('every text that says when a schedule is done says registered:true — the view also lists defined-only triggers', () => {
@@ -71,6 +72,8 @@ test('every text that says when a schedule is done says registered:true — the 
     assert.match(text, /done only when/, `${where} no longer states the done rule`);
     assert.match(text, /registered:true with a next run and system_halted:false/,
       `${where}: "listed" is not "registered" — a trigger only in skill.json is listed with registered:false`);
+    assert.match(text, /[Nn]ot reachable yet/, `${where}: done cannot be met today (no system_halted from Core, switch OFF) — say so`);
+    assert.match(text, /done_rule/, `${where}: name what to report instead — the result's done_rule`);
   }
 });
 
@@ -166,4 +169,15 @@ test('no skills: the sources say nothing was asked — not that Core was silent'
   assert.equal(out.system_halted, null);
   assert.match(out.system_halted_source, /no skill to check/);
   assert.match(out.next_run_at_source, /no skill to check/);
+});
+
+test('the missing-probe hint names no non-production host — shownBase, as every served hint (97f0a42)', () => {
+  const html = '<!DOCTYPE html><html><body><pre>Cannot GET /deploy/solutions/sol/skills/inbox/triggers</pre></body></html>';
+  const msg = formatError('GET', '/deploy/solutions/sol/skills/inbox/triggers', 404, html, KEY_ENVIRONMENTS.dev);
+  const hint = msg.slice(msg.indexOf('Hint:'));
+  assert.match(hint, /does not serve the trigger probe yet/, 'the hint under test did not fire — the assertion below would be vacuous');
+  assert.ok(!hint.includes(new URL(KEY_ENVIRONMENTS.dev).host), `the hint names the dev host: ${hint}`);
+  assert.match(hint, /the dev API/);
+  // Production is named as itself.
+  assert.match(formatError('GET', '/deploy/solutions/sol/skills/inbox/triggers', 404, html, KEY_ENVIRONMENTS.prod), new RegExp(KEY_ENVIRONMENTS.prod.replace(/[.]/g, '\\.')));
 });
