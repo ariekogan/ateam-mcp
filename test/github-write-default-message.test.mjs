@@ -110,6 +110,31 @@ test("ateam_github_patch delete:true reaches the Builder — declared, so MCP do
   assert.equal(bodies[0].path, "server.js");
 });
 
+// Builder #119 (CORE low on #111): the Builder's CONNECTOR_PATH_NESTED refusal
+// names `delete: true` for a nested copy on the branch, and the route now
+// removes one. This text said a delete removes only a file OUTSIDE
+// connectors/<connector-id>/, so an agent holding that refusal read the call
+// it names as one that would be refused.
+test("ateam_github_patch delete:true — the text names both strays: a root file and a nested copy, working branch only", async () => {
+  const t = listed.find((x) => x.name === "ateam_github_patch");
+  const nested = /connectors\/<connector-id>\/connectors\/<connector-id>\//;
+  // The mode-3 line itself: the description names the nested path elsewhere too
+  // (the write refusal), which must not stand in for what a delete removes.
+  const mode3 = t.description.split("\n").find((l) => l.startsWith("3. DELETE A STRAY"));
+  assert.ok(mode3, "the description lost its mode-3 line");
+  for (const [where, text] of [["mode 3", mode3], ["delete", t.inputSchema.properties.delete.description]]) {
+    assert.match(text, nested, `${where}: the nested copy is not named as deletable`);
+    assert.match(text, /repo root/, `${where}: the root stray is not named`);
+    assert.match(text, /working branch \(`dev`\) only/, `${where}: the working-branch rule is gone`);
+  }
+  assert.match(t.description, /CONNECTOR_PATH_NESTED/, "the refusal that names the nested delete is not named");
+  bodies.length = 0;
+  const path = "connectors/invoice-mcp/connectors/invoice-mcp/server.js";
+  const r = await handleToolCall("ateam_github_patch", { solution_id: "s", path, delete: true }, SID);
+  assert.ok(!r.isError, r.content?.[0]?.text);
+  assert.deepEqual([bodies[0].path, bodies[0].delete], [path, true], "the nested delete did not reach the Builder as sent");
+});
+
 test("ateam_get_connector_source passes nested_copies through — manifest and single-file answers (CORE B111-4)", async () => {
   const manifest = JSON.parse((await handleToolCall("ateam_get_connector_source", { solution_id: "s", connector_id: "invoice-mcp" }, SID)).content[0].text);
   assert.deepEqual(manifest.nested_copies, SOURCE.nested_copies, "the manifest dropped nested_copies");
