@@ -2662,9 +2662,11 @@ export const tools = [
     name: "ateam_github_patch",
     core: true,
     description:
-      "Edit a file in the solution's GitHub repo and commit. Two modes:\n" +
+      "Edit a file in the solution's GitHub repo and commit — ONE file per call. Modes:\n" +
       "1. FULL FILE: provide `content` — replaces entire file (good for new files or small files)\n" +
       "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
+      "3. DELETE A STRAY: `delete: true` — removes a connector file written OUTSIDE connectors/<connector-id>/ (a root server.js, package.json or ui-dist/…), which Core never deploys. Only such a file: anything else is refused (DELETE_ONLY_STRAY_CONNECTOR_FILES). It is removed from production and dev, one commit each; git history keeps it. Move what it holds into connectors/<connector-id>/ first if it is still needed — the CONNECTOR_FILE_OUTSIDE_CONNECTOR refusal says how the two copies differ.\n" +
+      "Connector files belong under connectors/<connector-id>/; a write anywhere else is refused (CONNECTOR_FILE_OUTSIDE_CONNECTOR).\n" +
       "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
       "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
       "After one, run ateam_github_sync_from_main so `dev` has it too. Until `dev` holds the same content, the Builder's copy of that file is `main` content `dev` does not have: " +
@@ -2698,7 +2700,11 @@ export const tools = [
         },
         message: {
           type: "string",
-          description: "Optional commit message (default: 'Update <path>'; search/replace mode: 'Edit <path> (N replacements)')",
+          description: "Optional commit message (default: 'Update <path>'; search/replace mode: 'Edit <path> (N replacements)'; delete: 'Delete <path>')",
+        },
+        delete: {
+          type: "boolean",
+          description: "Mode 3: true removes `path` — ONLY a stray connector file outside connectors/<connector-id>/ (root server.js, package.json, package-lock.json, ui-dist/…, plugins/…, rn-bundle/…). Takes no content or search. Ignores ref: a delete covers production and dev.",
         },
         ref: {
           type: "string",
@@ -6507,6 +6513,14 @@ export const handlers = {
       provenance: data?.provenance,
       ...(data?.scheme && { scheme: data.scheme }),
       authored_source_of_record: data?.authored_source_of_record !== false,
+      // A copy nested under the connector's own repo prefix (connectors/<id>/…
+      // inside connector <id>) is left out of `files` by the Builder and named
+      // here — it rides every answer, so an agent sees why a path it was given
+      // is not in the manifest (CORE review B111-4).
+      ...(Array.isArray(data?.nested_copies) && data.nested_copies.length > 0 && {
+        nested_copies: data.nested_copies,
+        ...(data.nested_copies_note && { nested_copies_note: data.nested_copies_note }),
+      }),
     };
     // A whole connector's source easily exceeds the ~50KB tool-output ceiling and
     // truncates (you couldn't read the file you needed). So: no `path` → return a
@@ -6905,9 +6919,10 @@ export const handlers = {
       : result;
   },
 
-  ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref, branch }, sid) =>
-    // `branch` is an alias for `ref` — see ateam_github_read.
-    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch }, sid),
+  ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref, branch, delete: del }, sid) =>
+    // `branch` is an alias for `ref` — see ateam_github_read. `delete` (mode 3)
+    // is the Builder's to police: it removes only a stray connector file.
+    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch, delete: del }, sid),
 
   ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) =>
     post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid),

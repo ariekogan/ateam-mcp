@@ -28,21 +28,31 @@ import { createServer } from "../src/server.js";
 const SID = "sess-github-write-default-message";
 const KEY = "adas_tenanta_00000000000000000000000000000000";
 const bodies = [];
+const SOURCE = {
+  ok: true, connector_id: "invoice-mcp", provenance: "authored_fs", authored_source_of_record: true,
+  files: [{ path: "server.js", content: "// v3" }],
+  nested_copies: [{ path: "connectors/invoice-mcp/server.js", copy_of: "server.js", identical: false }],
+  nested_copies_note: "connectors/invoice-mcp/server.js is a copy nested under this connector's own repo prefix, left out of files",
+};
 let api;
 let listed;
 
 before(async () => {
-  // The Builder's rule (deploy.js github/patch → githubService patchFile /
-  // searchReplacePatchFile): the caller's message, else the writer's default.
+  // A stand-in answering as the Builder does. github/patch replies with the
+  // commit (no message field: the message is the Builder's, in the commit);
+  // the connector-source route leaves a nested copy out of files and names it.
   api = createHttpServer((req, res) => {
     let raw = "";
     req.on("data", (c) => { raw += c; });
     req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (req.url.includes("/connectors/invoice-mcp/source")) {
+        res.end(JSON.stringify(SOURCE));
+        return;
+      }
       const body = JSON.parse(raw || "{}");
       bodies.push(body);
-      const message = body.message ?? (body.search !== undefined ? `Edit ${body.path} (1 replacement)` : `Update ${body.path}`);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, branch: "dev", path: body.path, commit_sha: "abc1234", message }));
+      res.end(JSON.stringify({ ok: true, mode: body.delete ? "delete" : "full_content", branch: "dev", path: body.path, commit_sha: "abc1234" }));
     });
   });
   await new Promise((r) => api.listen(0, "127.0.0.1", r));
@@ -81,8 +91,27 @@ test("ateam_github_write: a write without message sends none, so the Builder's d
   const r = await handleToolCall("ateam_github_write", { solution_id: "s", path: "connectors/c/server.js", content: "x" }, SID);
   assert.ok(!r.isError, r.content?.[0]?.text);
   assert.equal(bodies.length, 1);
-  assert.equal("message" in bodies[0], false, "the handler chose a message itself");
-  assert.equal(JSON.parse(r.content[0].text).message, "Update connectors/c/server.js");
+  assert.equal("message" in bodies[0], false, "the handler chose a message itself — the Builder's 'Update <path>' would not apply");
+});
+
+test("ateam_github_patch delete:true reaches the Builder — declared, so MCP does not strip it, and forwarded", async () => {
+  const t = listed.find((x) => x.name === "ateam_github_patch");
+  assert.equal(t.inputSchema.properties.delete?.type, "boolean", "delete is not declared: an undeclared argument is dropped");
+  assert.match(t.description, /DELETE A STRAY/);
+  bodies.length = 0;
+  const r = await handleToolCall("ateam_github_patch", { solution_id: "s", path: "server.js", delete: true }, SID);
+  assert.ok(!r.isError, r.content?.[0]?.text);
+  assert.equal(bodies[0].delete, true, "the handler did not forward delete");
+  assert.equal(bodies[0].path, "server.js");
+});
+
+test("ateam_get_connector_source passes nested_copies through — manifest and single-file answers (CORE B111-4)", async () => {
+  const manifest = JSON.parse((await handleToolCall("ateam_get_connector_source", { solution_id: "s", connector_id: "invoice-mcp" }, SID)).content[0].text);
+  assert.deepEqual(manifest.nested_copies, SOURCE.nested_copies, "the manifest dropped nested_copies");
+  assert.equal(manifest.nested_copies_note, SOURCE.nested_copies_note);
+  const missing = JSON.parse((await handleToolCall("ateam_get_connector_source",
+    { solution_id: "s", connector_id: "invoice-mcp", path: "connectors/invoice-mcp/server.js" }, SID)).content[0].text);
+  assert.deepEqual(missing.nested_copies, SOURCE.nested_copies, "asking for the nested path did not say why it is absent");
 });
 
 test("ateam_github_write: says where connector files go — a root server.js is refused", () => {
