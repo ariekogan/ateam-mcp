@@ -25,6 +25,10 @@ const server = createServer((req, res) => {
   const key = `${req.method} ${req.url.split('?')[0]}`;
   hits.push(key);
   const reply = routes[key];
+  if (reply?.html) { // what Express itself answers for a route it does not have
+    res.writeHead(reply.status, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(reply.html);
+  }
   res.writeHead(reply?.status || (reply ? 200 : 404), { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(reply ? reply.body : { error: 'no route' }));
 });
@@ -56,7 +60,18 @@ async function view(args, extra = {}) {
 test('"triggers" is an offered view, and says what done means', () => {
   const def = TOOLS.tools.find((t) => t.name === 'ateam_get_solution');
   assert.ok(def.inputSchema.properties.view.enum.includes('triggers'), 'view:"triggers" is not offered');
-  assert.match(def.inputSchema.properties.view.description, /'triggers' = .*REGISTERED.*system_halted/);
+  assert.match(def.inputSchema.properties.view.description, /'triggers' = .*registered:true\/false.*system_halted/);
+});
+
+test('every text that says when a schedule is done says registered:true — the view also lists defined-only triggers', () => {
+  const view = TOOLS.tools.find((t) => t.name === 'ateam_get_solution').inputSchema.properties.view.description;
+  const spec = TOOLS.tools.find((t) => t.name === 'ateam_get_spec').inputSchema.properties.topic.description;
+  const triggersLine = spec.slice(spec.indexOf("'triggers' ="), spec.indexOf("'sub-agent' ="));
+  for (const [where, text] of [['get_solution view', view], ['get_spec triggers', triggersLine]]) {
+    assert.match(text, /done only when/, `${where} no longer states the done rule`);
+    assert.match(text, /registered:true with a next run and system_halted:false/,
+      `${where}: "listed" is not "registered" — a trigger only in skill.json is listed with registered:false`);
+  }
 });
 
 test('every skill\'s registry is read, and each trigger says which skill it belongs to', async () => {
@@ -100,4 +115,55 @@ test('a Core failure is an error, not an empty registry', async () => {
   });
   assert.equal(r.isError, true, 'a failed registry read was reported as a result');
   assert.match(r.content[0].text, /trigger-runner \/triggers failed: 401|CORE_TRIGGERS_UNAVAILABLE|502/);
+});
+
+test('a deployment WITHOUT the Builder route: named as such — not "check the solution_id or skill_id"', async () => {
+  const { r } = await view({}, {
+    'GET /deploy/solutions/sol/skills/inbox/triggers': {
+      status: 404,
+      html: '<!DOCTYPE html><html><head><title>Error</title></head><body><pre>Cannot GET /deploy/solutions/sol/skills/inbox/triggers</pre></body></html>',
+    },
+  });
+  assert.equal(r.isError, true);
+  const text = r.content[0].text;
+  assert.match(text, /does not serve the trigger probe yet/);
+  assert.match(text, /do NOT report the schedule as registered/);
+  assert.doesNotMatch(text, /Check the solution_id or skill_id/, 'a missing route read like a wrong id');
+});
+
+test('the route\'s own JSON not-found keeps the id hint', async () => {
+  const { r } = await view({}, {
+    'GET /deploy/solutions/sol/skills/inbox/triggers': { status: 404, body: { error: 'Skill not found' } },
+  });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /Check the solution_id or skill_id/);
+});
+
+test('Core\'s refusal keeps the Builder\'s hint — never "unreachable, try again"', async () => {
+  const { r } = await view({}, {
+    'GET /deploy/solutions/sol/skills/inbox/triggers': { status: 502, body: {
+      ok: false, code: 'CORE_TRIGGERS_UNAVAILABLE', error: 'Core GET /api/triggers: Invalid or missing service token',
+      hint: 'Core answered: it could not list the triggers (its error is above). Retrying will not help until that is fixed.',
+    } },
+  });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /Retrying will not help/);
+  assert.doesNotMatch(r.content[0].text, /unreachable/i);
+});
+
+test('next_run_at_source is "core" when ANY skill\'s registered triggers carried a next run', async () => {
+  const { out } = await view({}, {
+    'GET /deploy/solutions/sol/skills/digest/triggers': { body: probe({ skillSlug: 'digest', next_run_at_source: 'core', triggers: [
+      { id: 'weekly', registered: true, core: { next_run_at: '2026-10-05T07:00:00.000Z' } },
+    ] }) },
+  });
+  assert.equal(out.next_run_at_source, 'core', 'the first skill (no registered triggers) spoke for the whole solution');
+});
+
+test('no skills: the sources say nothing was asked — not that Core was silent', async () => {
+  const { out } = await view({}, { 'GET /deploy/solutions/sol/skills': { body: { skills: [] } } });
+  assert.deepEqual(hits, ['GET /deploy/solutions/sol/skills']);
+  assert.equal(out.system_halted, null);
+  assert.match(out.system_halted_source, /no skill to check/);
+  assert.match(out.next_run_at_source, /no skill to check/);
 });
