@@ -287,7 +287,13 @@ export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
   });
   const text = await res.text().catch(() => "");
   if (!res.ok) {
-    throw new Error(`whoami failed at ${shownBase(baseUrl)} (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    const e = new Error(`whoami failed at ${shownBase(baseUrl)} (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    // The status and the WHOLE body ride on the error, as request()'s do: a
+    // refusal by name (personRefused: the key's person is gone) is an answer
+    // about the key, and its own hint lies past the 300 characters above.
+    e.status = res.status;
+    e.body = text;
+    throw e;
   }
   let json;
   try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${shownBase(baseUrl)}: ${text.slice(0, 200)}`); }

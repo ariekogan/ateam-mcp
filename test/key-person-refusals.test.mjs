@@ -16,6 +16,11 @@
 //     naming the person; none says the key is fine, none is the rotated-key hint;
 //   - none is an actor-not-found, so none unbinds the session's actor;
 //   - ateam_auth given such a key is told the same, not "rotated, revoked";
+//     driven through the real handleToolCall for an older key that names no
+//     API (whose refusal was headed "WRONG API, most likely — not a bad key")
+//     and a sealed key (whose whoami error kept 300 characters of the body,
+//     cutting the Builder's hint, and appended "upgrade it or pass tenant")
+//     (CORE review of #48, aa342968);
 //   - TEST_RUNS_AS carries KEY_OWNER_GONE, byte for byte the Builder's.
 //
 // Run: node --test test/key-person-refusals.test.mjs
@@ -23,6 +28,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as API from "../src/api.js";
 import * as RunsAs from "../src/testRunsAs.js";
+import { handleToolCall } from "../src/tools.js";
 
 const { formatError, actorNotFound } = API;
 const BASE = "https://api.ateam-ai.com";
@@ -96,3 +102,69 @@ test("TEST_RUNS_AS says a key whose person is gone runs nothing — byte for byt
     "rotates the key in Tokens & Keys (the new key belongs to whoever rotated it) or reactivates that person.");
   assert.ok(RunsAs.TEST_RUNS_AS.includes(RunsAs.KEY_OWNER_GONE + " " + RunsAs.RAN_AS_IN_REPLY), "KEY_OWNER_GONE is not a part of TEST_RUNS_AS");
 });
+
+// ─── ateam_auth, through the real dispatcher ─────────────────────────────────
+//
+// The Builder's bodies as #117 serves them (coreCredential.personRefusal):
+// the hint is past the first 300 characters of the body.
+const BUILDER_SAYS = {
+  KEY_OWNER_DELETED: {
+    ok: false, code: "KEY_OWNER_DELETED", retryable: false, actor_id: OWNER,
+    error: `This API key belongs to a person who no longer exists: the account that minted it (actor ${OWNER}) was deleted. A key acts as the person who minted it, so nothing runs under this key, not as that person and not as the platform's service identity. The request did not run.`,
+    hint: "Mint a new key as a person who exists: a workspace owner or admin rotates the key in Tenant Admin → Tokens & Keys at https://app.ateam-ai.com, and the new key belongs to them. Rotating replaces this key for every agent that uses it. Retrying with this key will not help.",
+  },
+  KEY_OWNER_INACTIVE: {
+    ok: false, code: "KEY_OWNER_INACTIVE", retryable: false, actor_id: OWNER,
+    error: `This API key belongs to a person who is no longer active in this workspace: the account that minted it (actor ${OWNER}) may not act (removed, suspended or not yet approved). A key acts as the person who minted it, so nothing runs under this key, not as that person and not as the platform's service identity. The request did not run.`,
+    hint: "Either a workspace owner or admin reactivates or approves that person in Tenant Admin → Users at https://app.ateam-ai.com, or a workspace owner or admin rotates the key in Tenant Admin → Tokens & Keys at https://app.ateam-ai.com, and the new key belongs to them. Rotating replaces this key for every agent that uses it. Retrying with this key will not help until one of them is done.",
+  },
+};
+const HEX = "0123456789abcdef0123456789abcdef";
+const NO_ENV_KEY = `adas_acme_${HEX}`;
+// A sealed key in the layout Core mints, built, not pasted (see
+// key-environment.test.mjs): adas_<env>_ + base64url(version, iv, tenant, tag, secret).
+const SEALED_KEY = "adas_prod_" + Buffer.concat([
+  Buffer.from([1]), Buffer.alloc(8, 0xfb), Buffer.alloc(14, 0xff), Buffer.alloc(8, 0xef), Buffer.alloc(16, 0x00),
+]).toString("base64url");
+const realFetch = globalThis.fetch;
+let sid = 0;
+
+async function signInWith(key, body) {
+  const asked = [];
+  globalThis.fetch = async (u) => {
+    asked.push(new URL(String(u)).pathname);
+    return new Response(JSON.stringify(body), { status: 401, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const r = await handleToolCall("ateam_auth", { api_key: key }, `sess-key-person-${++sid}`);
+    return { out: JSON.parse(r.content[0].text), asked };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+for (const [label, key, path] of [
+  ["an older key that names no API (refused on /deploy/solutions)", NO_ENV_KEY, "/deploy/solutions"],
+  ["a sealed key (refused on /auth/whoami)", SEALED_KEY, "/auth/whoami"],
+]) {
+  for (const code of Object.keys(BUILDER_SAYS)) {
+    test(`ateam_auth, ${label}, ${code}: the API's own answer and its way out — not WRONG API, not "upgrade it or pass tenant"`, async () => {
+      assert.equal(API.parseApiKey(key).sealed, path === "/auth/whoami", "the fixture is not the kind of key this case is about");
+      const { out, asked } = await signInWith(key, BUILDER_SAYS[code]);
+      assert.ok(asked.includes(path), `ateam_auth never asked ${path}: ${asked.join(", ")}`);
+      assert.equal(out.ok, false, JSON.stringify(out));
+      for (const [rx, what] of [
+        [/WRONG API|not a bad key/, "the older-key wrong-environment headline"],
+        [/upgrade it or pass tenant|could not tell me who you are/, "the sealed-key no-whoami text"],
+        [/rotated, revoked, or not a key for this API/, "the refused-key hint"],
+        ...STALE,
+      ]) assert.doesNotMatch(out.message, rx, `${label} / ${code} was answered with ${what}`);
+      assert.match(out.message, WAY_OUT[code], "ateam-mcp's way out for this session is missing");
+      // The Builder's hint, WHOLE: it starts past the first 300 characters of the body.
+      assert.ok(JSON.stringify(BUILDER_SAYS[code]).indexOf('"hint"') > 300, "the fixture's hint is not past the 300-character cut");
+      assert.ok(out.message.includes(JSON.stringify(BUILDER_SAYS[code].hint).slice(1, -1)), "the Builder's own hint was cut");
+      assert.equal(out.code, code);
+      assert.doesNotMatch(out.message, NO_DEV_HOST);
+    });
+  }
+}

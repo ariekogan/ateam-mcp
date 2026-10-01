@@ -73,9 +73,9 @@ export function openingFor(sessionId, opts) {
  * "the key this session signed in with" may have been rotated, with switch
  * steps. A failure with no HTTP answer (a timeout) keeps its own message.
  */
-function signInRefusal(err, base, sessionId) {
+function signInRefusal(err, base, sessionId, path = "/deploy/solutions") {
   if (!err?.status) return err?.message || String(err);
-  return formatError("GET", "/deploy/solutions", err.status, err.body, base, { read: true, signIn: signInContext(sessionId), refusedSignIn: true });
+  return formatError("GET", path, err.status, err.body, base, { read: true, signIn: signInContext(sessionId), refusedSignIn: true });
 }
 
 // ─── A discovered UI plugin needs no declaration ────────────────────────────
@@ -128,7 +128,7 @@ import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "./testRunsAs.js";
 import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
-import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -4883,6 +4883,14 @@ export const handlers = {
         const me = await whoami(api_key, base);
         resolvedTenant = me.tenant;
       } catch (err) {
+        // The API recognised the key and refused its PERSON (deleted, or no
+        // longer active): that is the answer, not a host that cannot say who
+        // the key is — "upgrade it or pass tenant" would send the reader the
+        // wrong way. formatError reads the whole body (whoami carries it).
+        const person = personRefused(err?.status, err?.body);
+        if (person) {
+          return { ok: false, code: person.code, message: `Authentication failed: ${signInRefusal(err, base, sessionId, "/auth/whoami")}` };
+        }
         return {
           ok: false,
           message:
@@ -4951,6 +4959,19 @@ export const handlers = {
       // the session's own ("may have been rotated").
       refused();
       const upstream = signInRefusal(err, base, sessionId);
+      // A KEY WHOSE PERSON IS GONE WAS RECOGNISED. KEY_OWNER_DELETED /
+      // KEY_OWNER_INACTIVE prove this API knows the key, so the older-key
+      // "WRONG API, most likely — not a bad key" below would be false for it:
+      // say what the API said, first.
+      const person = personRefused(err?.status, err?.body);
+      if (person) {
+        return {
+          ok: false,
+          tenant: resolvedTenant,
+          code: person.code,
+          message: `Authentication failed: ${upstream} (tried ${base ? shownBase(base) : "the default base"}).`,
+        };
+      }
       const parsedKey = parseApiKey(api_key);
       const wellFormedKey = parsedKey.isValid;
       const triedProd = /(?:^|\/\/)api\.ateam-ai\.com/.test(base);
