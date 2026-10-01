@@ -1106,13 +1106,23 @@ function solutionOrSkillMissing(body) {
  * Exported so the hints can be TESTED as behaviour rather than as source text.
  * A test that greps for the right-looking code passes on code that never runs.
  */
-export function formatError(method, path, status, body, baseUrl, { read = method === "GET", signIn = null } = {}) {
+export function formatError(method, path, status, body, baseUrl, { read = method === "GET", signIn = null, refusedSignIn = false } = {}) {
   // How this session signs in or moves (signInContext): request() passes it.
   // A direct caller that passes none is told the hosted steps, with the
   // environment of the base it called.
   const ctx = signIn || { audience: "hosted", signedIn: true, environment: envForBaseUrl(baseUrl) || baseUrl || null };
   // The base as a served text may show it (shownBase): no non-production host.
   const shown = baseUrl ? shownBase(baseUrl) : baseUrl;
+  // A key given to ateam_auth that the API refused: ctx is the session AFTER
+  // beginSignIn put it back, so it says where the session still stands. The
+  // 401 text below is for a key the session signed in with, which this is not.
+  const signInRefused = () => {
+    const stands = ctx.signedIn
+      ? `still signed in to ${ctx.tenant ? `workspace "${ctx.tenant}"` : "the workspace it was on"}`
+      : "still not signed in";
+    return `The API refused the key given to ateam_auth (rotated, revoked, or not a key for this API). Nothing changed: this session is ${stands}.\n` +
+      (ctx.signedIn ? switchSteps(ctx) : connectSteps(ctx));
+  };
   // A WRITE IS NOT "TRY AGAIN IN A MINUTE". request() does not re-send one
   // that may have reached the server, and a hint telling the caller to re-send
   // it would undo that: it may already have run.
@@ -1124,10 +1134,12 @@ export function formatError(method, path, status, body, baseUrl, { read = method
     // 401/403 sent the user to …/get-api-key to bring the agent a key for
     // ateam_auth (c6e7275): the agent asking for a key. The steps are
     // signInSteps.js's, word for word, for how THIS session is connected.
-    401: ctx.signedIn
+    401: refusedSignIn ? signInRefused()
+      : ctx.signedIn
       ? `The API refused the key this session signed in with: it may have been rotated.\n${switchSteps(ctx)}`
       : `The API refused this call: this session is not signed in to a workspace.\n${connectSteps(ctx)}`,
-    403: `This key is not allowed to do this here. A key acts only in its own workspace; if the user meant another one:\n${switchSteps(ctx)}`,
+    403: refusedSignIn ? signInRefused()
+      : `This key is not allowed to do this here. A key acts only in its own workspace; if the user meant another one:\n${switchSteps(ctx)}`,
     404: "Resource not found. Check the solution_id or skill_id you're using. Use ateam_list_solutions to see available solutions.",
     409: "Conflict — the resource may already exist or is in a conflicting state.",
     422: "Validation failed. Check the request payload against the spec (use ateam_get_spec).",

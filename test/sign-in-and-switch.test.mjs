@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import * as api from "../src/api.js";
 import { tools, handleToolCall } from "../src/tools.js";
+import * as toolsModule from "../src/tools.js";
 
 const { KEY_ENVIRONMENTS, formatError, getBaseUrl, servedBy, baseUrlForKeyEnv, runToolCall, bindSessionPlatform } = api;
 const steps = await import("../src/signInSteps.js").catch(() => ({}));
@@ -201,15 +202,32 @@ test("a stdio session's not-in-this-workspace refusal gives the stdio switch ste
   assert.doesNotMatch(text, /Disconnect/, "a local process was told to disconnect a connector");
 });
 
-// Review round 2 (R2-3): the stdio refusal text itself.
+// Review round 2 (R2-3): the stdio refusal text itself. Round 3: the EXACT
+// sentence for each branch — a pattern that accepted either one let a gate
+// that never saw the environment's key pass.
 test("a stdio session's auth-gate refusal: why it is not signed in, and the local sign-in", async () => {
-  const sid = "sess-sw-stdio-gate";
-  const r = await runToolCall(sid, () => handleToolCall("ateam_list_solutions", {}, sid), { transport: "stdio" });
-  const text = r.content[0].text;
-  assert.equal(r.structuredContent?.stage, "auth_gate");
-  assert.ok(text.includes(render("connectSteps", { audience: "stdio" })), `stdio gate:\n${text}`);
-  assert.match(text, /IT RESTARTED|ADAS_API_KEY is set in this process's environment/, "the gate does not say why a local process is signed out");
-  assert.ok(!text.includes(render("connectSteps", { audience: "hosted" })), "a local process was told to sign in through the hosted connector");
+  const WHY = toolsModule.WHY_NOT_SIGNED_IN ?? {};
+  const gate = async (sid) => {
+    const r = await runToolCall(sid, () => handleToolCall("ateam_list_solutions", {}, sid), { transport: "stdio" });
+    assert.equal(r.structuredContent?.stage, "auth_gate");
+    return r.content[0].text;
+  };
+  const saved = process.env.ADAS_API_KEY;
+  try {
+    process.env.ADAS_API_KEY = PROD_KEY;
+    const withKey = await gate("sess-sw-stdio-gate-key");
+    assert.ok(typeof WHY.stdioEnvKey === "string" && withKey.includes(WHY.stdioEnvKey), `with ADAS_API_KEY set, the gate did not say the env key does not count:\n${withKey}`);
+    assert.ok(!withKey.includes(WHY.stdioRestart ?? "\0"), "with ADAS_API_KEY set, the gate blamed a restart");
+
+    delete process.env.ADAS_API_KEY;
+    const text = await gate("sess-sw-stdio-gate");
+    assert.ok(typeof WHY.stdioRestart === "string" && text.includes(WHY.stdioRestart), `with no ADAS_API_KEY, the gate did not give the restart diagnosis:\n${text}`);
+    assert.ok(!text.includes(WHY.stdioEnvKey ?? "\0"), "with no ADAS_API_KEY, the gate said one is set");
+    assert.ok(text.includes(render("connectSteps", { audience: "stdio" })), `stdio gate:\n${text}`);
+    assert.ok(!text.includes(render("connectSteps", { audience: "hosted" })), "a local process was told to sign in through the hosted connector");
+  } finally {
+    if (saved === undefined) delete process.env.ADAS_API_KEY; else process.env.ADAS_API_KEY = saved;
+  }
 });
 
 test("a self-hosted url is named as the environment, not folded into 'unstated'", async () => {

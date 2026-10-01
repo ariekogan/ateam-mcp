@@ -65,6 +65,19 @@ export function openingFor(sessionId, opts) {
   return sessionOpening(signInContext(sessionId, opts));
 }
 
+/**
+ * Why the API refused a key given to ateam_auth, built AFTER beginSignIn put
+ * the session back — from the error's status and body, for the session as it
+ * now stands. The request layer built err.message while the unverified key was
+ * still in the session, so a session that had never signed in was told that
+ * "the key this session signed in with" may have been rotated, with switch
+ * steps. A failure with no HTTP answer (a timeout) keeps its own message.
+ */
+function signInRefusal(err, base, sessionId) {
+  if (!err?.status) return err?.message || String(err);
+  return formatError("GET", "/deploy/solutions", err.status, err.body, base, { read: true, signIn: signInContext(sessionId), refusedSignIn: true });
+}
+
 // ─── A discovered UI plugin needs no declaration ────────────────────────────
 //
 // MGAP-A29 (+ the connectors[] half of A13). ateam_create_plugin's description
@@ -115,7 +128,7 @@ import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "./testRunsAs.js";
 import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
-import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -4780,8 +4793,9 @@ export const handlers = {
           message: `Master key authenticated to tenant "${tenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found. Use tenant parameter on any tool to switch tenants without re-auth.`,
         };
       } catch (err) {
+        const base = getBaseUrl(sessionId);
         refused();
-        return { ok: false, tenant, message: `Master key auth failed: ${err.message}` };
+        return { ok: false, tenant, message: `Master key auth failed: ${signInRefusal(err, base, sessionId)}` };
       }
     }
 
@@ -4905,8 +4919,11 @@ export const handlers = {
       // say to retry with that API's base as url — instead of a generic
       // "invalid/unconfigured key". The text names no host but prod's.
       const base = getBaseUrl(sessionId) || "";
-      // Read the base the key was tried at, THEN put the session back.
+      // Read the base the key was tried at, THEN put the session back, THEN
+      // say why: built before, the refusal described the unverified key as
+      // the session's own ("may have been rotated").
       refused();
+      const upstream = signInRefusal(err, base, sessionId);
       const parsedKey = parseApiKey(api_key);
       const wellFormedKey = parsedKey.isValid;
       const triedProd = /(?:^|\/\/)api\.ateam-ai\.com/.test(base);
@@ -4934,7 +4951,7 @@ export const handlers = {
             `and it was tried against PROD (${base}), which is the default. A key from another A-Team API is rejected there: ` +
             `retry with that API's base as url (ateam_auth(api_key, url:"<its API base>")), or use a current key, which names its own API. ` +
             `Only if that also fails is the key itself the problem. ` +
-            `Upstream said: ${err.message}`,
+            `Upstream said: ${upstream}`,
         };
       }
       return {
@@ -4943,7 +4960,7 @@ export const handlers = {
         // It ended "get a valid API key at …/get-api-key" (c61e60b). The
         // upstream error already carries what to do (formatError's 401/403
         // hints render the shared steps).
-        message: `Authentication failed: ${err.message} (tried ${base ? shownBase(base) : "the default base"}).`,
+        message: `Authentication failed: ${upstream} (tried ${base ? shownBase(base) : "the default base"}).`,
       };
     }
   },
@@ -7742,28 +7759,31 @@ function summarizeSpecResult(result) {
  * first-time setup problem (2026-08-21: a Builder deploy logged out a live
  * session mid-work). So where a restart can be the cause, both are stated.
  */
-function whyNotSignedIn(ctx) {
-  if (ctx.audience === "platform") {
-    // The platform signs each workspace in before its calls: a refusal here is
-    // a call that arrived first, and it replays on stage auth_gate (below).
-    return "The A-Team platform had not signed a workspace in on this session when the call arrived.";
-  }
-  if (ctx.audience === "stdio") {
-    return [
-      envApiKeyPresent()
-        ? "An ADAS_API_KEY is set in this process's environment, but it does not sign a session in and is never sent: a key baked into a shared config could point work at the wrong workspace. This process signs in with ateam_auth (below)."
-        : "No sign-in in this local process. TWO CAUSES, and the second is easy to miss:\n" +
-          "  (a) it never signed in, or\n" +
-          "  (b) IT RESTARTED. A sign-in made with ateam_auth lives in this process's memory, so when the client restarts\n" +
-          "      the process, the sign-in is gone.\n" +
-          "If your tools were working minutes ago, it is (b) — nothing is misconfigured: sign in again the same way.",
-    ].join("");
-  }
-  return "This connection carries no workspace sign-in. TWO CAUSES:\n" +
+export const WHY_NOT_SIGNED_IN = Object.freeze({
+  // The platform signs each workspace in before its calls: a refusal here is a
+  // call that arrived first, and it replays on stage auth_gate (below).
+  platform: "The A-Team platform had not signed a workspace in on this session when the call arrived.",
+  stdioEnvKey:
+    "An ADAS_API_KEY is set in this process's environment, but it does not sign a session in and is never sent: " +
+    "a key baked into a shared config could point work at the wrong workspace. This process signs in with ateam_auth (below).",
+  stdioRestart:
+    "No sign-in in this local process. TWO CAUSES, and the second is easy to miss:\n" +
+    "  (a) it never signed in, or\n" +
+    "  (b) IT RESTARTED. A sign-in made with ateam_auth lives in this process's memory, so when the client restarts\n" +
+    "      the process, the sign-in is gone.\n" +
+    "If your tools were working minutes ago, it is (b) — nothing is misconfigured: sign in again the same way.",
+  hosted:
+    "This connection carries no workspace sign-in. TWO CAUSES:\n" +
     "  (a) the client connected without completing the A-Team sign-in, or with a key the API could not resolve, or\n" +
     "  (b) the session was signed in with ateam_auth, and THE MCP SERVER RESTARTED: that sign-in lives in memory and\n" +
     "      does not survive a redeploy. A sign-in made on the A-Team page does.\n" +
-    "Either way, the user signs in again (below).";
+    "Either way, the user signs in again (below).",
+});
+
+function whyNotSignedIn(ctx) {
+  if (ctx.audience === "platform") return WHY_NOT_SIGNED_IN.platform;
+  if (ctx.audience === "stdio") return envApiKeyPresent() ? WHY_NOT_SIGNED_IN.stdioEnvKey : WHY_NOT_SIGNED_IN.stdioRestart;
+  return WHY_NOT_SIGNED_IN.hosted;
 }
 
 export async function handleToolCall(name, args, sessionId) {

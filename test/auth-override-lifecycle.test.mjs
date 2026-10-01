@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import { bindSessionBearer, getAuthOverride, getCredentials, getBaseUrl, isExplicitlyAuthenticated, runToolCall } from "../src/api.js";
 import { handleToolCall, openingFor } from "../src/tools.js";
+const steps = await import("../src/signInSteps.js").catch(() => ({}));
 import { mountOAuth } from "../src/oauth.js";
 
 const HEX = "0".repeat(32);
@@ -81,4 +82,35 @@ test("a refused key leaves a session that never signed in signed out", async () 
   const after = state("sess-own-out");
   assert.equal(after.signedIn, false, `the refused key signed the session in; it now opens: ${after.opening.split("\n")[0]}`);
   assert.deepEqual(after, before);
+});
+
+// Review round 3: the master-key path rolls back the same way. Removing its
+// refused() kept the whole suite green.
+test("a refused master key leaves a signed-in session exactly as it was", async () => {
+  answer(200, { solutions: [] });
+  await stdio("sess-own-master", () => handleToolCall("ateam_auth", { api_key: BEARER }, "sess-own-master"));
+  const before = state("sess-own-master");
+  answer(401, { error: "Invalid master key" });
+  const r = JSON.parse((await stdio("sess-own-master", () => handleToolCall("ateam_auth", { master_key: "not-the-key", tenant: "elsewhere" }, "sess-own-master"))).content[0].text);
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.deepEqual(state("sess-own-master"), before, "the refused master key changed the session");
+});
+
+// Review round 3: the refusal is described for the session as it stands after
+// the rollback. Built before it, a session that had never signed in was told
+// that "the key this session signed in with" may have been rotated, with
+// switch steps.
+test("a refused key's message describes the session as it now stands", async () => {
+  answer(401, { error: "Invalid or rotated key" });
+  const out = JSON.parse((await stdio("sess-own-msg-out", () => handleToolCall("ateam_auth", { api_key: OTHER }, "sess-own-msg-out"))).content[0].text);
+  assert.doesNotMatch(out.message, /may have been rotated|HOW TO SWITCH/, `a session that never signed in was told about its own key:\n${out.message}`);
+  assert.match(out.message, /Nothing changed: this session is still not signed in\./);
+  assert.ok(typeof steps.connectSteps === "function" && out.message.includes(steps.connectSteps({ audience: "stdio" })), out.message);
+
+  answer(200, { solutions: [] });
+  await stdio("sess-own-msg-in", () => handleToolCall("ateam_auth", { api_key: BEARER }, "sess-own-msg-in"));
+  answer(401, { error: "Invalid or rotated key" });
+  const still = JSON.parse((await stdio("sess-own-msg-in", () => handleToolCall("ateam_auth", { api_key: OTHER }, "sess-own-msg-in"))).content[0].text);
+  assert.doesNotMatch(still.message, /may have been rotated/, still.message);
+  assert.match(still.message, /Nothing changed: this session is still signed in to workspace "home"\./);
 });
