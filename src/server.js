@@ -23,15 +23,16 @@ import { runToolCall } from "./api.js";
  */
 /**
  * The MCP `instructions` for a session, built when its server is created: on
- * HTTP after the bearer seeded the session (http.js seedCredentials runs
- * before createServer), so a browser-authorized session is told its workspace
- * at connect. It OPENS with where the session is and how to move (tools.js
- * openingFor — the same text ateam_bootstrap opens with); ateam_bootstrap
- * restates it for the moment it is called.
+ * HTTP after the bearer or the platform secret seeded the session (http.js
+ * seedCredentials runs before createServer), so a browser-authorized session
+ * is told its workspace at connect. It OPENS with where the session is and how
+ * to move, for the transport this server is built for (tools.js openingFor —
+ * the same text ateam_bootstrap opens with); ateam_bootstrap restates it for
+ * the moment it is called.
  */
-export function serverInstructions(sessionId) {
+function serverInstructions(sessionId, transport) {
   return [
-    openingFor(sessionId),
+    openingFor(sessionId, { transport }),
     [
       "You are connected to A-Team MCP — an AI Team Solution Platform.",
       "IMPORTANT: On first user message, ALWAYS call the ateam_bootstrap tool before responding.",
@@ -50,7 +51,7 @@ export function createServer(sessionId = "stdio", { transport = null } = {}) {
     { name: "ateam-mcp", version: MCP_VERSION },
     {
       capabilities: { tools: {} },
-      instructions: serverInstructions(sessionId),
+      instructions: serverInstructions(sessionId, transport),
     }
   );
 

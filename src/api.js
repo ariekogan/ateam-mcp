@@ -14,7 +14,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 // Signing in and switching workspace: ONE statement of the steps (formatError renders them).
-import { SWITCH_STEPS, NOT_IN_THIS_WORKSPACE } from "./signInSteps.js";
+import { connectSteps, switchSteps, notInThisWorkspace } from "./signInSteps.js";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
@@ -114,8 +114,10 @@ function adoptRecord(sessionId, record) {
 // Each user has a unique bearer. MCP clients create new sessions per tool call,
 // so we use the bearer as the persistent actor identity.
 //
-// When a user calls ateam_auth to override (e.g., switch tenants), the override
-// is stored per bearer and applied to all future sessions from that user.
+// When ateam_auth signs a bearer's session in to another key, and that key is
+// ACCEPTED, the override is stored per bearer and applied to all future
+// sessions of it, until it expires or a new sign-in on the A-Team page
+// (/authorize) for that bearer drops it (clearAuthOverride).
 const authOverrides = new Map();  // bearerToken → { tenant, apiKey, updatedAt }
 // sessionId → the session's OWNER: its bearer string, or PLATFORM_PRINCIPAL.
 // denySessionReuse (src/http.js) compares every request against it.
@@ -549,6 +551,56 @@ export function isExplicitlyAuthenticated(sessionId) {
 }
 
 /**
+ * WHICH ENVIRONMENT THIS SESSION'S SIGN-IN IS ON — one answer, read by
+ * ateam_auth's `environment` and by the `session` opening of ateam_bootstrap
+ * and the server instructions. They disagreed for a key that names no
+ * environment: ateam_auth said "unstated" while the opening said "prod",
+ * because the opening read served_by.
+ *
+ * The environment the key names; else the one the session's url names (a url
+ * given to ateam_auth, or kept from an earlier sign-in — the base its calls go
+ * to); else "unstated". A key that names none lands on this server's default
+ * API, and calling that "prod" would turn a default into a claim.
+ *
+ * served_by answers a different question — which API answered a call — and
+ * stays separate (servedBy).
+ * @returns {string} "prod" | "dev" | "unstated"
+ */
+export function sessionEnvironment(sessionId) {
+  const record = sessionRecord(sessionId);
+  const keyEnv = parseApiKey(record?.apiKey).env;
+  if (keyEnv) return keyEnv;
+  return envForBaseUrl(record?.apiUrl) || "unstated";
+}
+
+/**
+ * HOW THIS SESSION SIGNS IN AND MOVES — the facts signInSteps.js renders its
+ * steps from, read in one place:
+ *   - audience: "platform" for a session owned by PLATFORM_PRINCIPAL (the A-Team
+ *     app's builder, via ateam-proxy-mcp); else "stdio" when the call (or the
+ *     server being built) is on stdio — callTransport, the transport's own
+ *     owner; else "hosted". A null transport is NOT local (callTransport).
+ *   - signedIn: the gate's own test (isExplicitlyAuthenticated);
+ *   - tenant, environment (sessionEnvironment), masterMode.
+ * @param {string} sessionId
+ * @param {{ transport?: string|null }} [opts] — for a caller outside a tool call (createServer).
+ */
+export function signInContext(sessionId, { transport = callTransport() } = {}) {
+  const audience = sessionOwners.get(sessionId) === PLATFORM_PRINCIPAL ? "platform"
+    : transport === "stdio" ? "stdio"
+    : "hosted";
+  const signedIn = isExplicitlyAuthenticated(sessionId);
+  const record = signedIn ? sessionRecord(sessionId) : null;
+  return {
+    audience,
+    signedIn,
+    tenant: record?.tenant || null,
+    environment: signedIn ? sessionEnvironment(sessionId) : null,
+    masterMode: !!record?.masterKey,
+  };
+}
+
+/**
  * Record activity on a session — called on every tool call.
  * Keeps the session alive and updates context for smarter UX.
  */
@@ -761,6 +813,20 @@ export function getAuthOverride(bearerToken) {
     return null;
   }
   return { tenant: entry.tenant, apiKey: entry.apiKey, apiUrl: entry.apiUrl || null };
+}
+
+/**
+ * A NEW SIGN-IN ON THE A-TEAM PAGE DROPS THE OVERRIDE KEPT FOR THAT KEY.
+ * Called when /authorize issues a token (oauth.js exchangeAuthorizationCode).
+ * An override is per bearer and re-applied to every new session of it
+ * (http.js seedCredentials) for SESSION_TTL, so without this a user who signed
+ * in again with their key — to get back to its workspace — stayed on the
+ * workspace an earlier ateam_auth had moved that bearer to.
+ */
+export function clearAuthOverride(bearerToken) {
+  if (bearerToken && authOverrides.delete(bearerToken)) {
+    console.log("[Auth] Override dropped for bearer: a new sign-in on the A-Team page");
+  }
 }
 
 /**
@@ -994,12 +1060,34 @@ export function actorNotFound(status, body) {
 }
 
 /**
+ * Does this 404 body say that a SOLUTION or SKILL is missing (as opposed to a
+ * file, job or connector inside one)? Read like actorNotFound: the structured
+ * code, or the top-level error/message sentence, never a token anywhere.
+ */
+const SOLUTION_OR_SKILL_MISSING_RX = /\b(?:solution|skill)\b[^.]{0,80}?\bnot found\b|^no (?:solution|skill)\b/i;
+function solutionOrSkillMissing(body) {
+  let obj = body && typeof body === "object" ? body : null;
+  if (!obj && typeof body === "string") {
+    try { obj = JSON.parse(body); } catch { return SOLUTION_OR_SKILL_MISSING_RX.test(body.trim()); }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  if (obj.code === "SOLUTION_NOT_FOUND" || obj.code === "SKILL_NOT_FOUND") return true;
+  if (obj.code) return false;
+  const said = [obj.error, obj.message].find((v) => typeof v === "string") || "";
+  return SOLUTION_OR_SKILL_MISSING_RX.test(said);
+}
+
+/**
  * Format an API error into a user-friendly message with actionable hints.
  *
  * Exported so the hints can be TESTED as behaviour rather than as source text.
  * A test that greps for the right-looking code passes on code that never runs.
  */
-export function formatError(method, path, status, body, baseUrl, { read = method === "GET" } = {}) {
+export function formatError(method, path, status, body, baseUrl, { read = method === "GET", signIn = null } = {}) {
+  // How this session signs in or moves (signInContext): request() passes it.
+  // A direct caller that passes none is told the hosted steps, with the
+  // environment of the base it called.
+  const ctx = signIn || { audience: "hosted", signedIn: true, environment: envForBaseUrl(baseUrl) || baseUrl || null };
   // A WRITE IS NOT "TRY AGAIN IN A MINUTE". request() does not re-send one
   // that may have reached the server, and a hint telling the caller to re-send
   // it would undo that: it may already have run.
@@ -1010,9 +1098,11 @@ export function formatError(method, path, status, body, baseUrl, { read = method
     400: "Bad request — see the error details above for what to fix.",
     // 401/403 sent the user to …/get-api-key to bring the agent a key for
     // ateam_auth (c6e7275): the agent asking for a key. The steps are
-    // signInSteps.js's, word for word.
-    401: `The key this session signed in with was refused: it may have been rotated.\n${SWITCH_STEPS}`,
-    403: `This key is not allowed to do this here. A key acts only in its own workspace; if the user meant another one:\n${SWITCH_STEPS}`,
+    // signInSteps.js's, word for word, for how THIS session is connected.
+    401: ctx.signedIn
+      ? `The API refused the key this session signed in with: it may have been rotated.\n${switchSteps(ctx)}`
+      : `The API refused this call: this session is not signed in to a workspace.\n${connectSteps(ctx)}`,
+    403: `This key is not allowed to do this here. A key acts only in its own workspace; if the user meant another one:\n${switchSteps(ctx)}`,
     404: "Resource not found. Check the solution_id or skill_id you're using. Use ateam_list_solutions to see available solutions.",
     409: "Conflict — the resource may already exist or is in a conflicting state.",
     422: "Validation failed. Check the request payload against the spec (use ateam_get_spec).",
@@ -1024,8 +1114,9 @@ export function formatError(method, path, status, body, baseUrl, { read = method
 
   // A 401 IS NOT ALWAYS AN AUTH PROBLEM, AND SAYING SO COSTS A RUN.
   //
-  // The table below attaches "your API key may be invalid or expired — get a
-  // new key and call ateam_auth" to EVERY 401, by status code, never by cause.
+  // The table above answers EVERY 401 with a sign-in hint, by status code,
+  // never by cause (from c6e7275 to #38 that hint read "your API key may be
+  // invalid or expired — get a new key and call ateam_auth").
   // Core also returns 401 for `Actor "X" not found`, where the key is perfectly
   // valid and the actor is the problem. A PROD agent believed that hint this
   // morning, stopped, and asked the admin to paste an API key — for an error
@@ -1137,13 +1228,15 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // SOLUTION_NOT_FOUND hint ("this tenant has: …, use one of those ids") — read
   // as "pick from what is here", so a user signed in to the wrong workspace was
   // steered to a look-alike. This adds the cause neither can see; it
-  // contradicts neither, so it follows a specific hint too. Not on a 404 whose
-  // body names another cause (a patch's NO_MATCH): only the not-found codes, or
-  // a solution path the generic hint answers.
-  const solutionMissing = status === 404 && (
-    /"code"\s*:\s*"(?:SOLUTION|SKILL)_NOT_FOUND"/.test(bodyStr)
-    || (!hasSpecificHint && /\/solutions\/[^/?#]+/.test(String(path || "")))
-  );
+  // contradicts neither, so it follows a specific hint too.
+  //
+  // Only where the BODY says a solution or skill is missing: the not-found
+  // codes, or a top-level error/message such as Core's "Skill 'x' not found" or
+  // the Builder's "Solution not found in Builder". Not on any 404 under a
+  // solution's path: a missing file, job or connector inside a solution that
+  // exists is not in another workspace, and a patch's NO_MATCH names its own
+  // cause.
+  const solutionMissing = status === 404 && solutionOrSkillMissing(body);
   // Truncated, never dropped. Before 4b36c4d a body of 2000+ chars was dropped
   // ENTIRELY, so the richer the error the less the caller was told — a 422
   // carrying the full diagnosis (ui.surfaceProbe's failures) arrived as a bare
@@ -1158,7 +1251,7 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   let msg = `A-Team API error: ${method} ${target} returned ${status}`;
   if (detail) msg += ` — ${detail}`;
   if (hint) msg += `\nHint: ${hint}`;
-  if (solutionMissing) msg += `\n${NOT_IN_THIS_WORKSPACE}`;
+  if (solutionMissing) msg += `\n${notInThisWorkspace(ctx)}`;
 
   return msg;
 }
@@ -1329,7 +1422,7 @@ async function request(method, path, body, sessionId, opts = {}) {
         // Attach the HTTP status so callers can distinguish a genuine 404
         // (resource absent) from a transient/5xx failure. ateam_patch relies
         // on this to NOT scaffold-clobber an existing skill on a read error.
-        const e = new Error(formatError(method, path, res.status, text, baseUrl, { read: isRead(method, opts.idempotent) }));
+        const e = new Error(formatError(method, path, res.status, text, baseUrl, { read: isRead(method, opts.idempotent), signIn: signInContext(sessionId) }));
         e.status = res.status;
         // Keep the RAW body on the error. formatError truncates for humans, and
         // an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe's 422

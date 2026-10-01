@@ -46,47 +46,31 @@ That's it. All 12 ADAS tools appear in ChatGPT. Any ChatGPT Pro, Plus, Business,
 
 ### Claude users
 
-**Claude Desktop** — install as an extension (one-click) or add to config:
+**claude.ai and Claude Desktop** — add the hosted connector: open [Customize > Connectors](https://claude.ai/customize/connectors) (Claude Desktop: Customize in the sidebar, then Connectors), click **Add custom connector**, enter `https://mcp.ateam-ai.com`, and click **Connect**. The A-Team sign-in page opens in the browser and asks for your workspace's key: copy it from [app.ateam-ai.com/connect](https://app.ateam-ai.com/connect) (a workspace owner or admin) and paste it there. The key decides the workspace; to switch, Disconnect and Connect again with the other workspace's key.
 
-```json
-{
-  "mcpServers": {
-    "ateam": {
-      "command": "npx",
-      "args": ["-y", "@ateam-ai/mcp"],
-      "env": {
-        "ADAS_TENANT": "your-tenant",
-        "ADAS_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-
-**Claude Code** — one command:
+**Claude Code** — the hosted connector, signed in the same way:
 
 ```bash
-claude mcp add ateam -- npx -y @ateam-ai/mcp
+claude mcp add --transport http ateam https://mcp.ateam-ai.com
 ```
+
+then `/mcp` and authenticate in the browser.
+
+Never paste a key into a chat. `ateam_bootstrap`'s `session` field says which workspace a session is on and how to switch.
 
 ### Cursor / Windsurf / VS Code (Copilot)
 
-Add to `.cursor/mcp.json`, `mcp_config.json`, or `.vscode/mcp.json`:
+Add the hosted server to `.cursor/mcp.json`, `mcp_config.json`, or `.vscode/mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "ateam": {
-      "command": "npx",
-      "args": ["-y", "@ateam-ai/mcp"],
-      "env": {
-        "ADAS_TENANT": "your-tenant",
-        "ADAS_API_KEY": "your-api-key"
-      }
-    }
+    "ateam": { "url": "https://mcp.ateam-ai.com/mcp" }
   }
 }
 ```
+
+A client with OAuth opens the A-Team sign-in page; one without sends the key as `Authorization: Bearer <key>` from its own config (see below). A local process (`npx -y @ateam-ai/mcp`) signs in only through `ateam_auth`: an `ADAS_API_KEY` in its environment does not sign it in.
 
 ### Gemini and other platforms
 

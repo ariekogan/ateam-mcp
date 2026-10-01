@@ -13,7 +13,7 @@ import {
   setSessionCredentials, isAuthenticated, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
-  servedBy, KEY_ENVIRONMENTS,
+  servedBy, KEY_ENVIRONMENTS, signInContext, sessionEnvironment,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -57,17 +57,12 @@ const KEY_PICKS_ENVIRONMENT =
 
 /**
  * The opening of ateam_bootstrap and of the server instructions: where THIS
- * session is, from what it really holds — the explicit sign-in (the gate's own
- * test), the tenant it resolved, and served_by's environment. One reader of
- * those facts for both surfaces.
+ * session is and how it moves, from what it really holds (api.js
+ * signInContext). One composition for both surfaces; `transport` is for the
+ * caller outside a tool call (createServer).
  */
-export function openingFor(sessionId) {
-  const signedIn = isExplicitlyAuthenticated(sessionId);
-  let tenant = null;
-  if (signedIn) {
-    try { tenant = getCredentials(sessionId)?.tenant || null; } catch { /* reported as unread, never guessed */ }
-  }
-  return sessionOpening({ signedIn, tenant, environment: signedIn ? servedBy(sessionId) : null });
+export function openingFor(sessionId, opts) {
+  return sessionOpening(signInContext(sessionId, opts));
 }
 
 // ─── A discovered UI plugin needs no declaration ────────────────────────────
@@ -117,7 +112,9 @@ import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachme
 // Who a test job runs as: ONE statement (the Builder's /spec wording), rendered where it is read.
 import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "./testRunsAs.js";
 // Signing in and switching workspace: ONE statement of the steps, rendered where it is read.
-import { CONNECT_STEPS, NO_KEY_IN_CHAT, NOT_IN_THIS_WORKSPACE, sessionOpening } from "./signInSteps.js";
+import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
+// The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
+import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -1006,14 +1003,14 @@ const deleteNoAnswerNext = (id) =>
 // The socket died after the request went out: it may have run.
 const SOCKET_LOST = new Set(["ECONNRESET", "UND_ERR_SOCKET", "EPIPE"]);
 
-function forceDeleteNext(code, status, id) {
+function forceDeleteNext(code, status, id, sid) {
   if (status === 504 || status === 524 || DELETE_NO_ANSWER_CODES.has(code)) return deleteNoAnswerNext(id);
   if (DELETE_RERUN_SAFE.has(code)) {
     return `The delete stopped part-way (${code}); the steps above say what ran. Re-running is safe and finishes it: ` +
       `ateam_delete_solution(solution_id:"${id}", confirm:true, confirm_solution_id:"${id}", force:true).`;
   }
   if (code === "SOLUTION_NOT_FOUND" || status === 404) {
-    return `Do not retry: there is no solution "${id}" in this tenant, so nothing was deleted. ateam_list_solutions shows its id.\n${NOT_IN_THIS_WORKSPACE}`;
+    return `Do not retry: there is no solution "${id}" in this tenant, so nothing was deleted. ateam_list_solutions shows its id.\n${notInThisWorkspace(signInContext(sid))}`;
   }
   if (status === 401 || status === 403) {
     return "Do not retry: this key may not delete the solution, and the same call gets the same refusal. Fix the credentials first.";
@@ -1035,13 +1032,13 @@ function forceDeleteNext(code, status, id) {
  *     socket that died after the request went out. A body that came with it
  *     is kept under `upstream`.
  */
-function forceDeleteFailure(err, id) {
+function forceDeleteFailure(err, id, sid) {
   if (err?.neverSent) throw err;
   const status = err?.status;
   const body = jsonBodyOf(err?.body);
   const answer = jsonVerdictOf(err?.body) || (status >= 400 && status < 500 ? body : null);
   if (answer) {
-    return { ...answer, ok: false, http_status: status, _next: forceDeleteNext(answer.code, status, id) };
+    return { ...answer, ok: false, http_status: status, _next: forceDeleteNext(answer.code, status, id, sid) };
   }
   if (status >= 400 && status < 500) throw err;
   if (isTimeoutError(err) || status >= 500 || SOCKET_LOST.has(err?.cause?.code)) {
@@ -1098,9 +1095,10 @@ export const tools = [
     name: "ateam_auth",
     core: true,
     description:
-      "Sign this session in to an A-Team workspace (tenant) with an API key — for a caller that holds the key OUTSIDE the chat: a platform proxy, a script, a self-hosted setup. A session must be signed in before any workspace operation (reading solutions, deploying, testing, the widget catalog, the design advisor). The docs need no sign-in: ateam_bootstrap, ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search, and validation. ateam_bootstrap's first line says which workspace this session is on.\n\n" +
+      "Sign this session in to an A-Team workspace (tenant) with an API key — for a caller that holds the key OUTSIDE the chat: a local (stdio) ateam-mcp process reading it from a file, a platform proxy, a script, a self-hosted setup. A session must be signed in before any workspace operation. " +
+      `${NO_SIGN_IN_NEEDED}\n\n` +
       `${NO_KEY_IN_CHAT}\n\n` +
-      `The user signs in through the hosted connector instead, and then this tool is not needed:\n${CONNECT_STEPS}\n\n` +
+      "How a user signs in depends on how this server is connected (the hosted connector signs in in the browser, with no ateam_auth call): ateam_bootstrap's `session` field says which workspace this session is on and gives the steps that apply to it.\n\n" +
       `${KEY_PICKS_ENVIRONMENT} ` +
       "An ADAS_API_KEY environment variable does NOT sign a session in: a key baked into a shared config could point work at the wrong workspace, so workspace tools refuse until the session signs in. For cross-tenant admin operations, use master_key instead of api_key.",
     inputSchema: {
@@ -1131,7 +1129,7 @@ export const tools = [
     name: "ateam_get_spec",
     core: true,
     description:
-      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec. Needs no sign-in. Every answer carries `served_by`: which API answered (prod for A-Team's own, or the API base itself for any other host), the API this session talks to.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.\n\nWhen wiring widgets (UI plugins) into a solution, fetch topic='widgets' — that returns the widget spec (catalog model, how_to_use blocks, opener_call shape, persona phrasing rules, binding semantics) so you can declare `ui_plugins` correctly. For the live catalog of widgets actually available in a deployed tenant, use ateam_get_widget_catalog instead.",
+      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec. Needs no sign-in. Every answer carries `served_by`: the environment whose API answered (prod or dev, or the API base itself for any other host), the API this session talks to, so two environments' docs are never read as one.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.\n\nWhen wiring widgets (UI plugins) into a solution, fetch topic='widgets' — that returns the widget spec (catalog model, how_to_use blocks, opener_call shape, persona phrasing rules, binding semantics) so you can declare `ui_plugins` correctly. For the live catalog of widgets actually available in a deployed tenant, use ateam_get_widget_catalog instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1223,7 +1221,7 @@ export const tools = [
     name: "ateam_spec_search",
     core: true,
     description:
-      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod for A-Team's own API, or the base itself for any other host): whose docs were searched.",
+      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod or dev, or the base itself for any other host): the environment whose docs were searched.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3280,71 +3278,6 @@ const SPEC_PATHS = {
   workflows: "/spec/workflows",
 };
 
-// Tools that are tenant-aware — require EXPLICIT ateam_auth (env vars alone not enough).
-// This prevents accidental reads/writes to the wrong tenant when env vars are
-// baked into MCP config (e.g., ADAS_TENANT + ADAS_API_KEY in ~/.claude.json).
-// Any tool that touches tenant-specific data (solutions, skills, logs, tests) is here.
-const TENANT_TOOLS = new Set([
-  // Lessons are tenant-specific data — a solution's own failure history. They
-  // were MISSING from this set when the tools shipped (2026-08-21), which is a
-  // bug on two counts: they ran without the explicit-auth requirement every
-  // other tenant-scoped tool has, and in master mode `switchTenant` never fired
-  // for them, so a caller passing `tenant` could read or write ANOTHER
-  // tenant's lessons. Tenant isolation is the one boundary this platform
-  // treats as absolute.
-  "ateam_log_lesson",
-  "ateam_log_progress",
-  "ateam_get_progress",
-  "ateam_get_lessons",
-
-  // Write operations
-  "ateam_build_and_run",
-  "ateam_patch",
-  "ateam_deploy_solution",
-  "ateam_deploy_skill",
-  "ateam_deploy_connector",
-  "ateam_upload_connector_files",
-  "ateam_update",
-  "ateam_redeploy",
-  "ateam_delete_solution",
-  "ateam_delete_skill",
-  "ateam_delete_connector",
-  "ateam_upload_connector",
-  "ateam_solution_chat",
-  // Read operations (tenant-specific data)
-  "ateam_list_solutions",
-  "ateam_get_solution",
-  "ateam_get_execution_logs",
-  "ateam_connector_logs",
-  "ateam_conversation",
-  "ateam_test_skill",
-  "ateam_test_notification",
-  "ateam_test_pipeline",
-  "ateam_verify_surface",
-  "ateam_test_voice",
-  "ateam_test_status",
-  "ateam_test_abort",
-  "ateam_get_chain",
-  "ateam_chain_status",
-  "ateam_get_widget_catalog",
-  "ateam_get_connector_source",
-  "ateam_get_deployed_connector_source",
-  "ateam_recover_connector_source",
-  "ateam_get_metrics",
-  "ateam_diff",
-  "ateam_verify_consistency",
-  // GitHub operations
-  "ateam_github_push",
-  "ateam_github_pull",
-  "ateam_github_status",
-  "ateam_github_read",
-  "ateam_github_patch",
-  "ateam_github_log",
-  // Master key bulk operations
-  "ateam_status_all",
-  "ateam_sync_all",
-]);
-
 /** Small delay helper */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -4473,7 +4406,7 @@ export const handlers = {
       // "as set by ateam_auth's `url`" (af5e366) was written 22 minutes before
       // bff5934 made the KEY pick the environment (MGAP-A31).
       _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to: the environment its sign-in's key names (adas_<env>_…), a `url` given to ateam_auth for a host that is neither environment, or this server's default before any sign-in. " +
-        "`served_by` (top of this result, and on every ateam_get_spec / ateam_get_examples / ateam_get_workflows / ateam_spec_search result) names that API: prod for A-Team's own, or the base itself for any other host. " +
+        "`served_by` (top of this result, and on every ateam_get_spec / ateam_get_examples / ateam_get_workflows / ateam_spec_search result) names that environment: prod or dev, or the base itself for any other host. It says which API ANSWERED; the environment of this session's sign-in is in `session`. " +
         "If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
     },
     platform_positioning: {
@@ -4780,14 +4713,14 @@ export const handlers = {
       // backticked field here must exist in the result it is read from
       // (test/sign-in-texts.test.mjs).
       environment_transparency: {
-        on_connect: "State it explicitly: 'Connected to <workspace> on <environment> — changes you make deploy here.' READ both, do not derive them from a url: ateam_bootstrap's first field, `session`, says which workspace this session is on and how to switch, and its `served_by` names the environment; ateam_auth returns `tenant` and `environment` ('unstated' for an older key that names none — then say you cannot confirm it). Show a human label (e.g. PROD), not a raw host. Never silently operate on a workspace or environment the user didn't expect.",
+        on_connect: "State it explicitly: 'Connected to <workspace> on <environment> — changes you make deploy here.' READ both, do not derive them from a url: ateam_bootstrap's first field, `session`, names the workspace and the environment of this session's sign-in, and how to switch; ateam_auth returns `tenant` and `environment` (the same answer: 'unstated' for an older key that names none — then say you cannot confirm it). Show a human label (PROD / DEV), not a raw host. Never silently operate on a workspace or environment the user didn't expect.",
         after_deploy: "Confirm WHERE it landed with a link: '✅ Added <thing> to <solution> (tenant <t>, <env>) — view it: <app url>.'",
       },
       // ── Delivering a build. (Backlog findings #2,#7,#8.)
       build_flow: {
         follow_the_stages: "Drive builds through thinking_order + minimal_authoring (below) — do NOT improvise. A skill is mainly its role.persona + connectors; the platform generates intents/tools/scenarios.",
         ui_is_in_scope: "If the user asks for a UI / app screen / dashboard, the WIDGET is part of the build — deliver it, don't silently defer it. If you must stage it, say so up front and get agreement.",
-        pick_build_path_by_tenant_state: "Choose the write path by the tenant's GitHub state: repo connected → normal github flow; NO repo (Core-only / freshly onboarded) → use source:'local' for definition edits and ateam_create_plugin/ateam_upload_connector for widgets (they fall back to deployed source). If a github write returns github_not_connected / SOLUTION_NOT_FOUND, guide the user to connect GitHub (mcp.ateam-ai.com/connect-github) — do not surface the raw error.",
+        pick_build_path_by_tenant_state: "Choose the write path by the tenant's GitHub state: repo connected → normal github flow; NO repo (Core-only / freshly onboarded) → use source:'local' for definition edits and ateam_create_plugin/ateam_upload_connector for widgets (they fall back to deployed source). If a github write returns github_not_connected, guide the user to connect GitHub (mcp.ateam-ai.com/connect-github) — do not surface the raw error. SOLUTION_NOT_FOUND is not a GitHub problem: this workspace has no solution by that id, and the error says what to do (ateam_list_solutions, or the solution may be in another workspace).",
       },
       always: [
         "Open with a grounded welcome built from the user's real solution + skill names (business-friendly).",
@@ -4924,12 +4857,17 @@ export const handlers = {
     }
 
     setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true });
-    // Persist override per bearer (survives session changes)
-    setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl });
     // Verify the key works by listing solutions
     try {
       const result = await get("/deploy/solutions", sessionId);
+      // Persist the override per bearer (every later session of it) only for a
+      // key the API ACCEPTED. It was stored before this check (8fc71af), so a
+      // refused key was re-applied to each new session of the bearer for
+      // SESSION_TTL — a reconnect or a new chat stayed on it. A new sign-in on
+      // the A-Team page drops it (oauth.js exchangeAuthorizationCode).
+      setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl });
       const urlNote = apiUrl ? ` (via ${apiUrl})` : "";
+      const environment = sessionEnvironment(sessionId);
       return {
         ok: true,
         tenant: resolvedTenant,
@@ -4945,8 +4883,10 @@ export const handlers = {
         // unstated default into a confident assertion, which is the exact
         // failure this whole change exists to remove. So the field says
         // `unstated`, and the note says which base was used and why.
-        environment: keyEnv || (explicitUrl ? envForBaseUrl(explicitUrl) : null) || "unstated",
-        ...(!keyEnv && !explicitUrl && {
+        // ONE owner of the answer (api.js sessionEnvironment), read by the
+        // `session` opening too: they disagreed for this very key.
+        environment,
+        ...(environment === "unstated" && !explicitUrl && {
           environment_note: `This key does not name an environment, so the process default was used (${getBaseUrl(sessionId)}). Recreate it as adas_<env>_<tenant>_<hex> to make the environment explicit — until then nothing here can confirm which system you are on.`,
         }),
         base_url: getBaseUrl(sessionId),
@@ -5846,7 +5786,9 @@ export const handlers = {
             _note: "Share these 3 lines with a developer (or their agent). They will clone the repo and, if CLAUDE.md is present, their agent sees the full onboarding on session start.",
             clone: `git clone ${gh.repo_url}`,
             cd: `cd ${(gh.full_name || "").split("/").pop() || s.id}`,
-            auth_in_new_session: `ateam_auth(api_key: "adas_<tenant>_<hex>")`,
+            // It said `ateam_auth(api_key: "adas_<tenant>_<hex>")` (e75feac):
+            // an agent typing a key, in a format bff5934 retired.
+            auth_in_new_session: "Call ateam_bootstrap: its `session` field says which workspace the session is on and how to sign in — never with a key in the chat.",
             needs_github_collaborator_access: !gh.repo_url.includes("public") ? true : false,
           };
         }
@@ -7047,7 +6989,7 @@ export const handlers = {
     try {
       return await del(`${solutionPath}?force=true`, sid, { retries: 0, timeoutMs: FORCE_DELETE_TIMEOUT_MS });
     } catch (err) {
-      return forceDeleteFailure(err, solution_id);
+      return forceDeleteFailure(err, solution_id, sid);
     }
   },
 
@@ -7130,7 +7072,7 @@ export const handlers = {
     if (!skill_id) throw new Error("skill_id required");
     const full = await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
     const skill = full?.skill || full;
-    if (!skill) return { ok: false, error: "skill not found", hint: NOT_IN_THIS_WORKSPACE };
+    if (!skill) return { ok: false, error: "skill not found", hint: notInThisWorkspace(signInContext(sid)) };
     return {
       ok: true,
       id: skill.id,
@@ -7188,7 +7130,7 @@ export const handlers = {
     if (!solution_id) throw new Error("solution_id required");
     const full = await get(apiPath`/deploy/solutions/${solution_id}/definition`, sid);
     const sol = full?.solution || full;
-    if (!sol) return { ok: false, error: "solution not found", hint: NOT_IN_THIS_WORKSPACE };
+    if (!sol) return { ok: false, error: "solution not found", hint: notInThisWorkspace(signInContext(sid)) };
     return {
       ok: true,
       id: sol.id,
@@ -7793,7 +7735,7 @@ export async function handleToolCall(name, args, sessionId) {
   // it (94b9bc0), they went into the previous tenant's record, which a call
   // already in flight as that tenant still holds. isMasterMode implies an
   // explicit ateam_auth, so this does not get ahead of the auth gate below.
-  if (TENANT_TOOLS.has(name) && isMasterMode(sessionId) && args?.tenant) {
+  if (!PUBLIC_TOOLS.has(name) && isMasterMode(sessionId) && args?.tenant) {
     switchTenant(sessionId, args.tenant);
   }
 
@@ -7808,21 +7750,28 @@ export async function handleToolCall(name, args, sessionId) {
     actorId: args?.actor_id,
   });
 
-  // Check auth for tenant-aware operations — requires an EXPLICIT sign-in:
-  // ateam_auth, or a Bearer the user authorized (http.js seedCredentials).
-  // Env vars (ADAS_API_KEY / ADAS_TENANT) are NOT sufficient — they may be
-  // baked into MCP config and silently target the wrong tenant.
-  // Only global/public tools (bootstrap, spec, examples, workflows, spec_search,
-  // validate) bypass this.
-  if (TENANT_TOOLS.has(name) && !isExplicitlyAuthenticated(sessionId)) {
+  // THE AUTH GATE — DENY BY DEFAULT. Every tool needs an EXPLICIT sign-in
+  // (ateam_auth, or a bearer the user authorized: http.js seedCredentials)
+  // unless publicTools.js lists it. Env vars (ADAS_API_KEY / ADAS_TENANT) are
+  // NOT a sign-in: baked into an MCP config, they would silently target the
+  // wrong tenant. This was an allow-list of tenant tools (TENANT_TOOLS,
+  // eb5e007) that fifteen later tools never joined, so they ran on that env
+  // fallback — promote, rollback and repo writes among them.
+  if (!PUBLIC_TOOLS.has(name) && !isExplicitlyAuthenticated(sessionId)) {
     const hasEnvVars = isAuthenticated(sessionId);
+    const ctx = signInContext(sessionId);
     return {
       content: [{
         type: "text",
         text: [
           `Authentication required — this session is not signed in to a workspace (tenant), so ${name} was refused before it ran.`,
           "",
-          hasEnvVars
+          ctx.audience === "platform"
+            // The platform signs each workspace in before its calls: a refusal
+            // here is a call that arrived first, and it replays on stage
+            // auth_gate (below). No user step applies.
+            ? "The A-Team platform had not signed a workspace in on this session when the call arrived."
+            : hasEnvVars
             ? "An ADAS_API_KEY environment variable was found, but it does not sign a session in: a key baked into a shared config could point work at the wrong workspace, so the session signs in (below) to say which workspace it means."
             // "No authentication found." was TRUE and pointed at the WRONG CAUSE.
             // Auth is held in this process's memory and does NOT survive a
@@ -7839,16 +7788,19 @@ export async function handleToolCall(name, args, sessionId) {
               "      restart, so a container rebuild or redeploy logs out every such session with no warning.\n" +
               "If your tools were working minutes ago, it is (b) — nothing is misconfigured: sign in again the same way.",
           "",
-          // The steps are signInSteps.js's, word for word. c61e60b said "Get
-          // their API key at …/get-api-key, then call ateam_auth(api_key)" — an
-          // agent asking for the key; 0f5f4d3 (MGAP-A1) said to authorize in the
-          // browser, with ateam_auth "for a local setup" and every environment's
-          // host listed. The device-code sign-in is a separate design.
-          CONNECT_STEPS,
+          // The steps are signInSteps.js's, word for word, for how this
+          // session is connected. c61e60b said "Get their API key at
+          // …/get-api-key, then call ateam_auth(api_key)" — an agent asking for
+          // the key; 0f5f4d3 (MGAP-A1) said to authorize in the browser, with
+          // ateam_auth "for a local setup". The device-code sign-in is a
+          // separate design.
+          connectSteps(ctx),
           "",
           NO_KEY_IN_CHAT,
           "",
-          "The docs need no sign-in: ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search.",
+          // The ONE list (publicTools.js). Three hand-written lists — here,
+          // in ateam_auth's description and in the opening — had drifted apart.
+          NO_SIGN_IN_NEEDED,
         ].join("\n"),
       }],
       isError: true,
@@ -7909,12 +7861,15 @@ export async function handleToolCall(name, args, sessionId) {
           last_tool_used: ctx.lastToolName || null,
         };
       }
-      // If authenticated, attach a tenant onboarding block so the agent can
+      // If signed in, attach a tenant onboarding block so the agent can
       // discover existing solutions + their repo URLs without extra round-trips.
       // This is what lets a fresh agent clone the right repo on first greet.
+      // SIGNED IN means the gate's own test. It read getCredentials, which
+      // falls back to ADAS_API_KEY, so a signed-out session listed the env
+      // key's workspace here while the gate refused the same read.
       try {
         const creds = getCredentials(sessionId);
-        if (creds?.apiKey || creds?.masterKey) {
+        if (isExplicitlyAuthenticated(sessionId)) {
           const listed = await handlers.ateam_list_solutions({}, sessionId);
           const solutions = Array.isArray(listed?.solutions) ? listed.solutions : [];
           if (solutions.length > 0) {

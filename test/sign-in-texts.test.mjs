@@ -61,10 +61,14 @@ test("A1: the refusal keeps the contract a proxy replays on", async () => {
   assert.match(r.content[0].text, /^Authentication required/);
 });
 
-test("A1: ateam_auth's description names the browser sign-in and no key page", () => {
+// The description is served to every transport, and the steps differ per
+// transport (a local process cannot use the browser sign-in), so it names the
+// browser sign-in and sends the agent to the session's own steps rather than
+// restating one transport's (review of #38).
+test("A1: ateam_auth's description names the browser sign-in, points at the session's steps, and no key page", () => {
   const d = tool("ateam_auth").description;
-  assert.ok(d.includes(HOSTED), d);
-  assert.match(d, /The A-Team sign-in page opens in the browser/);
+  assert.match(d, /the hosted connector signs in in the browser, with no ateam_auth call/);
+  assert.match(d, /ateam_bootstrap's `session` field/);
   assert.doesNotMatch(d, /get-api-key/);
 });
 

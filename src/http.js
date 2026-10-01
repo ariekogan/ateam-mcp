@@ -39,6 +39,7 @@ import {
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
 import { connectGithubPage } from "./pages.js";
+import { KEY_PAGE_URL } from "./signInSteps.js";
 
 // When THIS process started. The version beside it on /health is MCP_VERSION —
 // the same value the MCP handshake and ateam_bootstrap report, read once from
@@ -149,10 +150,14 @@ export function startHttpServer(port = 3100) {
   // — a failure that looks like a broken server and is actually a server that
   // never asked. The token was there the whole time.
   //
-  // The in-band ateam_auth path is NOT lost: a client authenticates with its
-  // bearer and may still call ateam_auth to switch tenants or point at another
-  // environment. What is gone is authenticating with nothing at all, which
-  // never worked for an OAuth client anyway — it only looked like it did.
+  // The in-band ateam_auth path is NOT lost: a client authenticated with its
+  // bearer may still call ateam_auth with a key it holds outside the chat (a
+  // platform proxy, a script); an ACCEPTED key is then kept for that bearer's
+  // later sessions (api.js setAuthOverride) until a new sign-in on the A-Team
+  // page drops it. A person switches workspace by signing in again on that
+  // page, never by giving an agent a key. What is gone is authenticating with
+  // nothing at all, which never worked for an OAuth client anyway — it only
+  // looked like it did.
   //
   // It was also a security hole, not only a discovery problem. A session opened
   // with no bearer has no owner (denySessionReuse has nothing to compare), so
@@ -284,14 +289,15 @@ export function startHttpServer(port = 3100) {
     });
   });
 
-  // ─── Get API Key — redirect to the main web app (c61e60b). ──
-  // No text served from this repo links here any more: the steps name the app
-  // and the clicks (signInSteps.js WHERE_A_KEY_IS), because the app reads no
-  // ?admin=tokens and lands on its home page. KEPT for links outside this repo
-  // (the Builder's docs/PUBLIC_MCP_DOCUMENTATION.md, Core's docs); remove when
-  // those stop linking it (the agent sign-in design deletes it with them).
+  // ─── Get API Key — redirect to Core's key page (/connect). ──
+  // Added in c61e60b. No text served from this repo links here; the steps link
+  // the key page itself (signInSteps.js KEY_PAGE_URL). It redirected to
+  // https://app.ateam-ai.com/?admin=tokens, which nothing in the app reads, so
+  // it landed on the home page. Kept for links outside this repo (the
+  // Builder's docs/PUBLIC_MCP_DOCUMENTATION.md, Core's docs): DEAD once those
+  // link KEY_PAGE_URL instead — then delete this route.
   app.get("/get-api-key", (_req, res) => {
-    res.redirect("https://app.ateam-ai.com/?admin=tokens");
+    res.redirect(KEY_PAGE_URL);
   });
 
   // ─── Connect GitHub — user-facing guide an agent links to on
@@ -504,7 +510,7 @@ export function startHttpServer(port = 3100) {
   });
 
   // ─── Start ────────────────────────────────────────────────────
-  app.listen(port, "0.0.0.0", () => {
+  const listener = app.listen(port, "0.0.0.0", () => {
     console.log(`ateam-mcp HTTP server listening on port ${port}`);
     console.log(`  MCP endpoint: http://localhost:${port}/mcp (also at /)`);
     console.log(`  Health check: http://localhost:${port}/health`);
@@ -525,14 +531,18 @@ export function startHttpServer(port = 3100) {
     }
     process.exit(0);
   });
+
+  // The listening server, so a caller (a test) can close it.
+  return listener;
 }
 
 /**
  * Seed session credentials from the OAuth bearer token.
  *
  * The bearer IS the user's API key (set during OAuth authorization).
- * If the user previously called ateam_auth to override (e.g., switch tenants),
- * that override is stored per bearer and takes priority here.
+ * If ateam_auth signed one of this bearer's sessions in to another key the API
+ * accepted, that override is stored per bearer and takes priority here, until
+ * a new sign-in on the A-Team page drops it (oauth.js).
  *
  * A platform request binds its owner and seeds NOTHING: no key, no tenant, no
  * override. The tenant arrives in-band through ateam_auth.
@@ -548,7 +558,9 @@ async function seedCredentials(req, sessionId) {
   // Track bearer → session (persistent actor identity)
   bindSessionBearer(sessionId, token);
 
-  // Check for ateam_auth override for this bearer
+  // An ateam_auth override for this bearer: only a key the API accepted, and
+  // dropped when the person signs in again on the A-Team page (api.js
+  // setAuthOverride / clearAuthOverride).
   const override = getAuthOverride(token);
   if (override) {
     setSessionCredentials(sessionId, { ...override, explicit: true });
