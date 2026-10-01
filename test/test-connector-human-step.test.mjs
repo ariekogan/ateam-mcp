@@ -70,20 +70,22 @@ test("no tool description names the retired refusal 'unsafe actor segment'", () 
   assert.doesNotMatch(all, /unsafe actor segment/i);
 });
 
-test("ateam_conversation: you play the person, with an input you wrote", () => {
+test("ateam_conversation: a person's step is your next message, and you play the person with an input you wrote", () => {
   const d = description("ateam_conversation");
-  assert.ok(d.includes("This is how to test a step that waits for a person: you play the person, with an input you wrote, so you know the right answer — never invent one for a real record."));
-  // After the Multi-turn sentence, not somewhere else.
-  assert.ok(d.indexOf("you play the person") > d.indexOf("Multi-turn:"), "the sentence is not in the multi-turn paragraph");
+  const multi = d.slice(d.indexOf("Multi-turn:"));
+  assert.ok(multi.includes(waitingText()), "the multi-turn paragraph does not say a person's step is your next message");
+  assert.ok(multi.includes("You play the person, with an input you wrote, so you know the right answer — never invent one for a real record."));
 });
 
-test("chain_done + pending_question: one wording, in every place that says when to stop polling", async () => {
+// Arie, 2026-10-01: "human step is simply another message." One plain
+// sentence — the same words /spec/skill human_step_testing.rule leads with.
+const LEAD = "A step that waits for a person is just your next message: when pending_question is set, send ateam_conversation(same actor_id, the answer that person would give).";
+
+test("WAITING_ON_THE_USER is one plain sentence, in every place that says when to stop polling", async () => {
   const text = waitingText();
-  assert.match(text, /When chain_done is true and pending_question is set, the assistant is waiting on the user/);
-  assert.match(text, /Reply with ateam_conversation\(same actor_id, your answer\)/);
-  assert.match(text, /new chain on the same thread/);
-  assert.ok(description("ateam_conversation").includes(text), "ateam_conversation does not say what a pending_question means");
-  assert.ok(description("ateam_chain_status").includes(text), "ateam_chain_status does not say what a pending_question means");
+  assert.equal(text, LEAD);
+  assert.ok(description("ateam_conversation").includes(text), "ateam_conversation does not say it");
+  assert.ok(description("ateam_chain_status").includes(text), "ateam_chain_status does not say it");
   const boot = JSON.parse((await handleToolCall("ateam_bootstrap", {}, "sess-human-step-boot")).content[0].text);
   assert.ok(boot.conversation_flow.steps[1].includes(text), "bootstrap conversation_flow step 2 does not say it");
   // The old wording read as two different ends of the poll.

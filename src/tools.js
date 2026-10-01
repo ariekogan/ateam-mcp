@@ -140,9 +140,11 @@ import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, 
 // bootstrap's conversation_flow each said "stop when chain_done === true (or
 // pending_question is set …)", which reads as two different ends of a poll and
 // says nothing about how to answer. This is the one wording; each renders it.
+// Arie, 2026-10-01: "human step is simply another message" — one plain
+// sentence, the same words the Builder's /spec/skill human_step_testing.rule
+// leads with.
 export const WAITING_ON_THE_USER =
-  "When chain_done is true and pending_question is set, the assistant is waiting on the user: its question ended the chain. " +
-  "Reply with ateam_conversation(same actor_id, your answer) — a new chain on the same thread, which Core routes back to the skill that asked.";
+  "A step that waits for a person is just your next message: when pending_question is set, send ateam_conversation(same actor_id, the answer that person would give).";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -1461,9 +1463,9 @@ export const tools = [
     description:
       "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
       "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
-      "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true. " + WAITING_ON_THE_USER + " That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
-      "Multi-turn: each call starts a new chain; pass the reply's actor_id (the thread) back in to continue that thread (e.g. reply to a confirmation prompt). " +
-      "This is how to test a step that waits for a person: you play the person, with an input you wrote, so you know the right answer — never invent one for a real record. " +
+      "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true. That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
+      "Multi-turn: each call starts a new chain; pass the reply's actor_id (the thread) back in to continue that thread. " + WAITING_ON_THE_USER + " " +
+      "You play the person, with an input you wrote, so you know the right answer — never invent one for a real record. " +
       "Who the job runs as: see actor_id. " + RAN_AS_IN_REPLY + "\n\n" +
       "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
     inputSchema: {
