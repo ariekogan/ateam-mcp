@@ -98,6 +98,11 @@ test("ateam_github_patch delete:true reaches the Builder — declared, so MCP do
   const t = listed.find((x) => x.name === "ateam_github_patch");
   assert.equal(t.inputSchema.properties.delete?.type, "boolean", "delete is not declared: an undeclared argument is dropped");
   assert.match(t.description, /DELETE A STRAY/);
+  // CORE on #111: a stray delete writes the working branch only; main moves by promote.
+  for (const text of [t.description, t.inputSchema.properties.delete.description]) {
+    assert.doesNotMatch(text, /production and dev/, "the text still says a delete lands on production");
+    assert.match(text, /working branch \(`dev`\) only/);
+  }
   bodies.length = 0;
   const r = await handleToolCall("ateam_github_patch", { solution_id: "s", path: "server.js", delete: true }, SID);
   assert.ok(!r.isError, r.content?.[0]?.text);
