@@ -2,8 +2,7 @@
  * WHO A TEST RUNS AS — ONE statement, rendered into every ateam-mcp surface
  * that says who a test job runs as: ateam_test_skill's and ateam_conversation's
  * actor_id, ateam_test_voice, ateam_test_connector (KEY_PERSON), bootstrap's
- * conversation_flow, the tenant CLAUDE.md (agentDoc.js) and the scaffolded
- * connector's missing-actor error.
+ * conversation_flow and the tenant CLAUDE.md (agentDoc.js).
  * Its own module because agentDoc.js cannot import tools.js (tools.js imports
  * agentDoc.js).
  *

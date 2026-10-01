@@ -2465,7 +2465,11 @@ export const tools = [
       "Call ONE tool on a running connector DIRECTLY and get its raw result — no skill, no guardrails, no user turn. It proves a tool's plumbing (arguments in, result out). " +
       "It can NOT prove a step that waits for a person — a confirmation, an approval, a value only the user knows: test those with ateam_conversation (ateam_get_spec('skill') → agent_guide.key_concepts.testing_and_runtime.human_step_testing). " +
       TEST_CONNECTOR_NEVER + " " +
-      "This call runs as " + KEY_PERSON + ". " +
+      // CORE review M41x-L3: the key's person is what an API key gets
+      // (Builder #115). A master_key session has no key person: the Builder
+      // passes its own actor through, and with none Core uses its service
+      // identity.
+      "With an API key this call runs as " + KEY_PERSON + "; a master_key session runs as the actor it holds, or the platform's service identity when it holds none. " +
       "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",
     inputSchema: {
       type: "object",

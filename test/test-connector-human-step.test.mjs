@@ -69,7 +69,10 @@ test("ateam_test_connector says who the call runs as — what PRE-1 saw, never _
   // The key's OWNER — one agent key per tenant, so not necessarily the person
   // chatting (CORE review M41r3-2). The Builder's KEY_PERSON is the same bytes.
   assert.equal(testRunsAs.KEY_PERSON, "the person whose key started the test (the key's owner)");
-  assert.ok(d.includes("This call runs as " + testRunsAs.KEY_PERSON + "."), "ateam_test_connector does not say who it runs as");
+  assert.ok(d.includes("With an API key this call runs as " + testRunsAs.KEY_PERSON + ";"), "ateam_test_connector does not say who it runs as");
+  // CORE review M41x-L3: a master_key session has no key person (Builder #115
+  // passes a master caller's own actor through).
+  assert.ok(d.includes("a master_key session runs as the actor it holds, or the platform's service identity when it holds none."), "the master_key case is not scoped");
   assert.doesNotMatch(d, /_system_service/);
 });
 
@@ -160,4 +163,16 @@ test("ateam_conversation's result says what to do when the assistant asks", asyn
   assert.ok(!r.isError, r.content[0].text.slice(0, 300));
   const out = JSON.parse(r.content[0].text);
   assert.equal(out._poll.waiting_on_the_user, waitingText(), "_poll does not say what a pending_question means");
+});
+
+// CORE review M41x-L1/L2: stale statements of the old answer in this repo.
+test("no file in the repo still says ateam_test_connector runs as _system_service, or points at the deleted scaffold error", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const header = readFileSync(join(root, "src", "testRunsAs.js"), "utf8").split("*/")[0];
+  assert.doesNotMatch(header, /missing-actor error/, "testRunsAs.js header still lists the scaffold's deleted missing-actor error");
+  const wip = readFileSync(join(root, "docs", "WIP", "AGENT_ONBOARDING_DOC_AUTOGEN.md"), "utf8");
+  assert.doesNotMatch(wip, /`ateam_test_connector` runs as `_system_service`|stripped to `_system_service`/, "docs/WIP still states the old pitfall");
 });
