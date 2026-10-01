@@ -3013,10 +3013,24 @@ export const tools = [
           type: "string",
           description: "The ui_plugin id to probe, e.g. 'mcp:accounting-mcp:spending-dashboard'.",
         },
+        // values: Core's ui.surfaceProbe has taken expect.values since 2984d2a60
+        // (2026-08-13; the on-screen half since 77a44bbbb) — its own schema and
+        // this description are read from apps/backend/tools/impl/system/
+        // ui.surfaceProbe.js. 242048d defined this schema with tools only, so no
+        // agent was told it could prove a number came from the data. The
+        // handler forwards `expect` whole, so only the schema was missing.
         expect: {
           type: "object",
-          description: "Optional assertion: { tools: ['memory.get', ...] } — each MUST be called by the plugin, else ok:false.",
-          properties: { tools: { type: "array", items: { type: "string" } } },
+          description:
+            "Optional assertion. { tools: ['memory.get', ...] } — each listed tool MUST be called by the plugin, else ok:false. " +
+            "{ values: ['37.50', 'Groceries'] } — each string must appear in visible_text AND must DISAPPEAR when the data " +
+            "path is disabled: the probe renders the plugin a second time with every data call answered by an error, and a " +
+            "value still rendered then is hardcoded in the plugin, so the probe fails it. Use a value from a record you " +
+            "created, formatted as the widget shows it.",
+          properties: {
+            tools: { type: "array", items: { type: "string" } },
+            values: { type: "array", items: { type: "string" } },
+          },
         },
         actor_id: { type: "string", description: "Optional actor to render as; defaults to the solution's context actor." },
       },
