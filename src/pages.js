@@ -4,9 +4,10 @@
  * These are user-facing landing pages an agent can link to from a tool result
  * (e.g. the github_not_connected guide). Self-contained HTML, no external
  * assets — matches the dark card style of the OAuth authorize page.
+ *
+ * A page names an A-Team app only as its caller passes it: the app of the
+ * environment the request's host names (http.js, api.js appUrlForEnv), or null.
  */
-
-const APP_URL = process.env.ATEAM_APP_URL || "https://app.ateam-ai.com";
 
 function shell(title, body) {
   return `<!DOCTYPE html>
@@ -58,7 +59,12 @@ function shell(title, body) {
 </html>`;
 }
 
-export function connectGithubPage() {
+/**
+ * @param {string|null} appUrl - the addressed environment's app, or null when
+ *   none may be named (another A-Team environment, or a host this server
+ *   cannot name): the page then says where in words, with no link.
+ */
+export function connectGithubPage(appUrl) {
   return shell("Connect GitHub", `
     <div class="logo">A-Team</div>
     <h1>Connect GitHub to keep iterating</h1>
@@ -72,7 +78,9 @@ export function connectGithubPage() {
       <li>Click <b>Connect GitHub</b> and approve the A-Team GitHub App for your account.</li>
       <li>Go back to your agent and <b>retry</b> — the repo is auto-created on the next deploy.</li>
     </ol>
-    <a class="btn" href="${APP_URL}" target="_blank" rel="noopener">Open the A-Team app →</a>
+    ${appUrl
+      ? `<a class="btn" href="${appUrl}" target="_blank" rel="noopener">Open the A-Team app →</a>`
+      : `<div class="lead">Open your environment's own A-Team app.</div>`}
     <div class="note">
       Not ready for GitHub? Skill and solution <b>definition</b> edits still work
       without a repo via <code>ateam_patch(..., source:"local")</code>. Only

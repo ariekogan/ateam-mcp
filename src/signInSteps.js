@@ -49,8 +49,21 @@ const HOSTED_CONNECTOR_URL = "https://mcp.ateam-ai.com";
 const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
 const CLAUDE_ORG_CONNECTORS_URL = "https://claude.ai/admin-settings/connectors";
 
-/** Core's page that copies a workspace's key, on the production app. */
-export const KEY_PAGE_URL = "https://app.ateam-ai.com/connect";
+/** Core's page that copies a workspace's key: its path on any A-Team app, and on the production app. */
+export const KEY_PAGE_PATH = "/connect";
+export const KEY_PAGE_URL = `https://app.ateam-ai.com${KEY_PAGE_PATH}`;
+
+/**
+ * Where the key is, given the key page this text may link: that page, or —
+ * when none may be named (null) — the environment's own app, with no URL.
+ * The HTTP transport passes the page of the host a request addressed
+ * (api.js keyPageForEnv); a session's texts go through whereTheKeyIs.
+ */
+export function whereTheKeyIsAt(keyPage) {
+  const page = keyPage || `the ${KEY_PAGE_PATH} page of your environment's own A-Team app`;
+  return `The key: ${page}. It asks you to sign in to the A-Team app, shows the workspace, solution and environment the ` +
+    "key belongs to, and has one action, Copy key — for a workspace owner or admin only; anyone else asks one of them.";
+}
 
 /**
  * Where the key is, for a session on `environment`: the production page, or —
@@ -59,11 +72,7 @@ export const KEY_PAGE_URL = "https://app.ateam-ai.com/connect";
  * on production) get the production page.
  */
 export function whereTheKeyIs(environment = null) {
-  const page = !environment || environment === "prod" || environment === "unstated"
-    ? KEY_PAGE_URL
-    : "the /connect page of your environment's own A-Team app";
-  return `The key: ${page}. It asks you to sign in to the A-Team app, shows the workspace, solution and environment the ` +
-    "key belongs to, and has one action, Copy key — for a workspace owner or admin only; anyone else asks one of them.";
+  return whereTheKeyIsAt(!environment || environment === "prod" || environment === "unstated" ? KEY_PAGE_URL : null);
 }
 
 /** Step 2, and the sign-in page itself (oauth.js). */

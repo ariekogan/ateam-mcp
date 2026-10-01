@@ -36,10 +36,11 @@ import {
   startSessionSweeper, getSessionStats, sweepStaleSessions,
   bindSessionBearer, bindSessionPlatform, getAuthOverride, getSessionOwner, sessionOwnershipOk,
   presentsPlatformSecret, PLATFORM_PRINCIPAL, getBaseUrl,
+  hostEnvironments, envForMcpHost, appUrlForEnv, keyPageForEnv,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
 import { connectGithubPage } from "./pages.js";
-import { KEY_PAGE_URL } from "./signInSteps.js";
+import { whereTheKeyIsAt } from "./signInSteps.js";
 
 // When THIS process started. The version beside it on /health is MCP_VERSION —
 // the same value the MCP handshake and ateam_bootstrap report, read once from
@@ -116,6 +117,14 @@ export function startHttpServer(port = 3100) {
     });
   }
 
+  // ─── The environments a request's host can name ─────────────────
+  // Read once, here: KEY_ENVIRONMENTS, plus a self-hosted box's own when DOMAIN
+  // names one (api.js hostEnvironments, which refuses a malformed DOMAIN). Every
+  // URL this server publishes or redirects to is that of the environment the
+  // request's host names: the sign-in, /get-api-key, /connect-github.
+  const environments = hostEnvironments();
+  const envOf = (req) => envForMcpHost(req.hostname, environments);
+
   // ─── OAuth setup ────────────────────────────────────────────────
   // The issuer and every URL the sign-in publishes are those of the host each
   // request addressed (oauth.js mountOAuth), not a configured base.
@@ -123,7 +132,7 @@ export function startHttpServer(port = 3100) {
 
   let bearerMiddlewareFor = null;
   if (!oauthDisabled) {
-    const oauth = mountOAuth(app);
+    const oauth = mountOAuth(app, environments);
     bearerMiddlewareFor = oauth.bearerMiddlewareFor;
 
     console.log("  OAuth: enabled (issuer: the A-Team MCP host each request addressed)");
@@ -291,21 +300,32 @@ export function startHttpServer(port = 3100) {
     });
   });
 
-  // ─── Get API Key — redirect to Core's key page (/connect). ──
+  // ─── Get API Key — redirect to the addressed environment's key page. ──
   // Added in c61e60b. No text served from this repo links here; the steps link
   // the key page itself (signInSteps.js KEY_PAGE_URL). It redirected to
   // https://app.ateam-ai.com/?admin=tokens, which nothing in the app reads, so
-  // it landed on the home page. Kept for links outside this repo (the
-  // Builder's docs/PUBLIC_MCP_DOCUMENTATION.md, Core's docs): DEAD once those
-  // link KEY_PAGE_URL instead — then delete this route.
-  app.get("/get-api-key", (_req, res) => {
-    res.redirect(KEY_PAGE_URL);
+  // it landed on the home page; then (eb8e2c2) to production's /connect on
+  // EVERY host, so the dev MCP's sent people to production for a key. Now:
+  // production's key page on production, a self-hosted box's own on that box
+  // (api.js keyPageForEnv), and on any other host — another A-Team environment,
+  // whose app is never named, or a host this server cannot name — the words
+  // with no link. Kept for links outside this repo (the Builder's
+  // docs/PUBLIC_MCP_DOCUMENTATION.md, Core's docs): DEAD once those link
+  // KEY_PAGE_URL instead — then delete this route.
+  app.get("/get-api-key", (req, res) => {
+    const keyPage = keyPageForEnv(envOf(req), environments);
+    if (keyPage) {
+      res.redirect(keyPage);
+      return;
+    }
+    res.type("text/plain").send(whereTheKeyIsAt(null));
   });
 
   // ─── Connect GitHub — user-facing guide an agent links to on
-  //     github_not_connected (see formatError in api.js). ──
-  app.get("/connect-github", (_req, res) => {
-    res.type("html").send(connectGithubPage());
+  //     github_not_connected (see formatError in api.js). Its "open the app"
+  //     link is the addressed environment's app (api.js appUrlForEnv), or none.
+  app.get("/connect-github", (req, res) => {
+    res.type("html").send(connectGithubPage(appUrlForEnv(envOf(req), environments)));
   });
 
   // ─── MCP POST — handle tool calls + initialize ───────────────

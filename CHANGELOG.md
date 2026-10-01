@@ -12,13 +12,24 @@
   production, so a browser sign-in started on a non-production MCP was sent to
   production and bound a production workspace. `ATEAM_BASE_URL` is deleted
   from the code and the Dockerfile; nothing reads it.
+- A self-hosted box signs in on its own MCP host: when `DOMAIN` (the variable
+  its setup page writes) is set, `mcp.<DOMAIN>` gets its own issuer and
+  endpoints, derived from `api.<DOMAIN>` the way every other environment's are,
+  and its sign-in page links its own key page, `app.<DOMAIN>/connect`. `DOMAIN`
+  must be a bare hostname; any other value is refused at startup with a log
+  line and is never used.
 - A host the server cannot name (a forged header, `localhost`, a self-hosted
-  domain) gets no browser sign-in: the sign-in paths answer `421` with no URL,
-  and the `401` challenge names no metadata. The host is never echoed, and it
-  is not given production's URLs. A client there sends the key as
-  `Authorization: Bearer <key>`.
-- The sign-in page links the production key page only on production; on any
-  other environment it says the key is on that environment's own A-Team app.
+  domain `DOMAIN` does not name) gets no browser sign-in: the sign-in paths
+  answer `421` with no URL, and the `401` challenge names no metadata. The host
+  is never echoed, and it is not given production's URLs. A client there sends
+  the key as `Authorization: Bearer <key>`.
+- The sign-in page links the production key page only on production (and a
+  self-hosted box's own on that box); on any other environment it says the key
+  is on that environment's own A-Team app.
+- `/get-api-key` and `/connect-github` answer by the host too: production's key
+  page and app on production, a self-hosted box's own on that box, and on any
+  other host the same words with no link. They sent every host to production's.
+  `ATEAM_APP_URL` is deleted; nothing reads it.
 - A sign-in's code is redeemed only on the host that issued it.
 
 ### Signing in, which workspace a session is on, and how to switch

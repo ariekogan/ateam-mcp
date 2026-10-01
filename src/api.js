@@ -15,7 +15,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 // Signing in and switching workspace: ONE statement of the steps (formatError renders them).
-import { connectSteps, switchSteps, notInThisWorkspace } from "./signInSteps.js";
+import { connectSteps, switchSteps, notInThisWorkspace, KEY_PAGE_PATH } from "./signInSteps.js";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
@@ -316,14 +316,58 @@ export function baseUrlForKeyEnv(key) {
  * the known hosts: an unrecognised url (localhost, a staging box) is still
  * allowed through, because the override exists for those — it just must not be
  * a way to cross prod/dev by accident.
+ *
+ * `environments` is the table to look in: KEY_ENVIRONMENTS for everything about
+ * keys, or the HTTP transport's hostEnvironments() for an addressed host.
  */
-export function envForBaseUrl(url) {
+export function envForBaseUrl(url, environments = KEY_ENVIRONMENTS) {
   if (!url) return null;
   const norm = String(url).replace(/\/+$/, "");
-  for (const [env, base] of Object.entries(KEY_ENVIRONMENTS)) {
+  for (const [env, base] of Object.entries(environments)) {
     if (norm === base) return env;
   }
   return null;
+}
+
+const SELF_HOSTED = "self-hosted";
+const DNS_LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+const BARE_HOSTNAME = new RegExp(`^${DNS_LABEL}(?:\\.${DNS_LABEL})+$`);
+
+/**
+ * THE ENVIRONMENTS AN ADDRESSED HOST CAN NAME — read ONCE, when the HTTP
+ * transport starts (http.js startHttpServer), and passed to everything there
+ * that answers by host: the sign-in (oauth.js), /get-api-key, /connect-github.
+ *
+ * Every KEY_ENVIRONMENTS entry, and on a SELF-HOSTED box that box's own
+ * deployment. A self-hosted box is named by DOMAIN, the variable its setup
+ * page writes and every one of its public URLs derives from (ai-dev-assistant
+ * docker-compose.selfhost.yml: app.<DOMAIN>, api.<DOMAIN>, mcp.<DOMAIN>). Its
+ * API base is https://api.<DOMAIN>, and its MCP and app are derived from that
+ * base exactly as every other environment's are. It is NOT a key environment:
+ * KEY_ENVIRONMENTS is unchanged, so key parsing, key routing and ateam_auth's
+ * key-against-url check are too.
+ *
+ * DOMAIN must be a bare hostname, the setup page's own rule (deploy/selfhost/
+ * setup-server.py DOMAIN_RE: two or more RFC 1123 labels, at most 253
+ * characters). Any other value is refused here with a log line, never becomes
+ * a URL, and is never repeated: the box then names no self-hosted host, and a
+ * sign-in there answers 421 like any host it cannot name. DOMAIN unset or
+ * empty: no self-hosted environment. A DOMAIN whose API base is already a
+ * KEY_ENVIRONMENTS entry adds nothing.
+ *
+ * @returns {Readonly<Record<string, string>>} environment → API base
+ */
+export function hostEnvironments(domain = process.env.DOMAIN) {
+  if (domain === undefined || domain === "") return KEY_ENVIRONMENTS;
+  const host = typeof domain === "string" ? domain.toLowerCase() : "";
+  if (host.length > 253 || !BARE_HOSTNAME.test(host)) {
+    console.error("[Self-host] DOMAIN is set but is not a bare hostname (like example.com): it is ignored, so this " +
+      "server names no self-hosted host and a browser sign-in there is refused (421). Fix DOMAIN in the box's .env.");
+    return KEY_ENVIRONMENTS;
+  }
+  const api = `https://api.${host}`;
+  if (envForBaseUrl(api)) return KEY_ENVIRONMENTS;
+  return Object.freeze({ ...KEY_ENVIRONMENTS, [SELF_HOSTED]: api });
 }
 
 /**
@@ -331,21 +375,22 @@ export function envForBaseUrl(url) {
  *
  * An environment's MCP host is its API host with the "api" label swapped for
  * "mcp" (api.<domain> ↔ mcp.<domain>, and the same for every prefixed entry).
- * So the closed set of environments stays in KEY_ENVIRONMENTS alone, and the
- * classifier stays envForBaseUrl: an addressed MCP host is mapped to its API
- * base and classified there, as a url given to ateam_auth is.
+ * So the environments stay in one table (`environments`, from
+ * hostEnvironments), and the classifier stays envForBaseUrl: an addressed MCP
+ * host is mapped to its API base and classified there, as a url given to
+ * ateam_auth is.
  *
- * The HTTP transport's sign-in (oauth.js mountOAuth) publishes mcpUrlForEnv(env)
- * for the environment envForMcpHost(req.hostname) names, never the request's
- * own host. null means a host this server cannot name.
+ * The HTTP transport publishes the URLs of the environment
+ * envForMcpHost(req.hostname, environments) names, never the request's own
+ * host. null means a host this server cannot name.
  */
 const API_LABEL = /^((?:[a-z0-9]+-)?)api\./;
 const MCP_HOST = /^((?:[a-z0-9]+-)?)mcp\.([a-z0-9.-]+)$/;
 
 /** The origin of `env`'s hosted MCP, or null for an environment that has none. */
-export function mcpUrlForEnv(env) {
-  if (!Object.hasOwn(KEY_ENVIRONMENTS, env)) return null;
-  const url = new URL(KEY_ENVIRONMENTS[env]);
+export function mcpUrlForEnv(env, environments) {
+  if (!Object.hasOwn(environments, env)) return null;
+  const url = new URL(environments[env]);
   const mcpHost = url.hostname.replace(API_LABEL, "$1mcp.");
   if (mcpHost === url.hostname) return null;
   url.hostname = mcpHost;
@@ -353,9 +398,24 @@ export function mcpUrlForEnv(env) {
 }
 
 /** The environment whose hosted MCP is `hostname`, or null. */
-export function envForMcpHost(hostname) {
+export function envForMcpHost(hostname, environments) {
   const m = MCP_HOST.exec(String(hostname ?? "").toLowerCase());
-  return m ? envForBaseUrl(`https://${m[1]}api.${m[2]}`) : null;
+  return m ? envForBaseUrl(`https://${m[1]}api.${m[2]}`, environments) : null;
+}
+
+/**
+ * The A-Team app `env`'s served text may link (shownAppUrl), or null: none for
+ * a host this server cannot name, and none for a non-production A-Team
+ * environment, whose app is never named.
+ */
+export function appUrlForEnv(env, environments) {
+  return Object.hasOwn(environments, env ?? "") ? shownAppUrl(environments[env]) : null;
+}
+
+/** The key page (Core's /connect) of appUrlForEnv, or null. */
+export function keyPageForEnv(env, environments) {
+  const app = appUrlForEnv(env, environments);
+  return app ? `${app}${KEY_PAGE_PATH}` : null;
 }
 
 /**
@@ -935,6 +995,20 @@ export function apiToAppUrl(baseUrl) {
 }
 
 /**
+ * THE APP A SERVED TEXT MAY LINK for an API base: its app (apiToAppUrl) when
+ * the base may be shown (shownBase: production, or a self-hosted base) and the
+ * app is public; else null. A non-production A-Team environment's app is never
+ * named, and neither is an internal one (localhost, a compose service name).
+ * One answer for getWhere's _where and the HTTP transport's pages.
+ */
+function shownAppUrl(base) {
+  if (!base || shownBase(base) !== base) return null;
+  const appUrl = apiToAppUrl(base);
+  const isPublic = /^https?:\/\/[^/]*\./.test(appUrl || "") && !/^https?:\/\/(localhost|127\.|\[?::1)/i.test(appUrl || "");
+  return isPublic ? appUrl : null;
+}
+
+/**
  * Location stamp for a tool result: which tenant + which app URL a change
  * landed on. Returned as `_where` so any consumer (desktop, mobile, cloud
  * agent) can tell the user where to see it — no reliance on a plugin SKILL.md.
@@ -953,12 +1027,9 @@ export function getWhere(sessionId) {
   // resolved host actually looks public. Otherwise `_where` is just the
   // tenant, which is the part that is solution-scoped and that the agent
   // genuinely needs. (Arie, 2026-08-21, reading a raw error panel.)
-  // A non-production A-Team environment's app is not named (shownBase).
-  const base = getBaseUrl(sessionId);
-  if (shownBase(base) !== base) return tenant ? { tenant } : {};
-  const appUrl = apiToAppUrl(base);
-  const isPublic = /^https?:\/\/[^/]*\./.test(appUrl || "") && !/^https?:\/\/(localhost|127\.|\[?::1)/i.test(appUrl || "");
-  if (!isPublic) return tenant ? { tenant } : {};
+  // A non-production A-Team environment's app is not named (shownAppUrl).
+  const appUrl = shownAppUrl(getBaseUrl(sessionId));
+  if (!appUrl) return tenant ? { tenant } : {};
   return {
     tenant,
     app_url: appUrl,
