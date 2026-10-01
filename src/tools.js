@@ -1234,10 +1234,10 @@ export const tools = [
     // Builder matches words, not intent, so the conflicts sentence says so.
     description:
       "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. " +
-      "If this call fails, your design is unchecked: do not write storage code on a store you picked before asking. ateam_get_spec('connector-multi-user') → storage_decision answers storage with no LLM (a failure the advisor answers carries it as `storage_decision`); retry after a short wait (a 'circuit open … cooling down' error names no time). " +
-      "Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the ateam_get_spec topic to read next and the tool to wire it, plus 'missing' and lifecycle hints. " +
+      "If this call fails, your design is unchecked: do not write storage code on a store you picked before asking. ateam_get_spec('connector-multi-user') → storage_decision answers storage with no LLM (a failure the advisor answers carries it as `storage_decision`; on a 401 it may be cut — sign in and ask again for the full answer); retry after a short wait (a 'circuit open … cooling down' error names no time). " +
+      "Describe what you're building; it returns POINTERS to the capabilities that fit (storage, widgets, triggers, sub-agents, mobile data, …), each with the ateam_get_spec topic to read next and the tool to wire it, plus 'missing' and lifecycle hints. " +
       "`conflicts_with_platform_rules` lists words in your goal or design_state that name a store the platform forbids (matched by words, so a 'never /tmp' you wrote is listed too): check each against its rule. " +
-      "ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call. " +
+      "ADVISORY ONLY — you own the design. Stateless: pass the current design_state each call. " +
       "`truncated: true` means the answer was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search.",
     inputSchema: {
       type: "object",
