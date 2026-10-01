@@ -41,23 +41,34 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_verify_surface",
 ]);
 
-// ─── Signing in, and which environment: ONE statement, rendered where read ──
+// ─── Signing in, switching workspace, and which environment ────────────────
 //
-// MGAP-A1 (interim text) / MGAP-A31. ateam_auth's description (94b9bc0) and the
-// auth gate's refusal (c61e60b) told an agent to have the user "get their API
-// key" and hand it over. Since 9f84856 (2026-07-16) a session the user
-// authorized in the browser through the hosted connector is signed in with no
-// ateam_auth call and no key in the chat; neither text ever said so. Both also
-// taught the environment model bff5934 (2026-09-10) replaced: `url` picks the
-// environment (57007d3), a key looks like adas_<tenant>_<32hex>. Now the key's
-// adas_<env>_ prefix picks it, and `url` is for a host that is neither.
-// The environment list is rendered from KEY_ENVIRONMENTS, the one map of them.
-const HOSTED_CONNECTOR_URL = "https://mcp.ateam-ai.com";
+// The steps live in signInSteps.js, ONE statement rendered word for word here,
+// in the auth gate, in every not-in-this-workspace refusal and in the server
+// instructions. It replaced SIGN_IN_IN_THE_BROWSER (0f5f4d3, MGAP-A1), which
+// said how to sign in but not which workspace a session was on or how to move.
+//
+// MGAP-A31: since bff5934 the key picks its API, and `url` is only for a host
+// that is not A-Team's own. PUBLIC TEXT NAMES PRODUCTION ONLY (Arie,
+// 2026-10-01): this line listed every KEY_ENVIRONMENTS entry with its host.
+// KEY_ENVIRONMENTS itself, and every route it decides, are unchanged.
 const KEY_PICKS_ENVIRONMENT =
-  `The key's adas_<env>_ prefix picks the environment (${Object.entries(KEY_ENVIRONMENTS).map(([env, base]) => `adas_${env}_… → ${base}`).join(", ")}).`;
-const SIGN_IN_IN_THE_BROWSER =
-  `Ask the user to connect this MCP through the hosted connector: add ${HOSTED_CONNECTOR_URL} as a remote MCP server (connector) in their client, and authorize it in the browser when it asks. ` +
-  "The session is then signed in to the tenant and environment they chose, and no key passes through this chat.";
+  `An A-Team key names its own API, so it needs no url (adas_prod_… → ${KEY_ENVIRONMENTS.prod}).`;
+
+/**
+ * The opening of ateam_bootstrap and of the server instructions: where THIS
+ * session is, from what it really holds — the explicit sign-in (the gate's own
+ * test), the tenant it resolved, and served_by's environment. One reader of
+ * those facts for both surfaces.
+ */
+export function openingFor(sessionId) {
+  const signedIn = isExplicitlyAuthenticated(sessionId);
+  let tenant = null;
+  if (signedIn) {
+    try { tenant = getCredentials(sessionId)?.tenant || null; } catch { /* reported as unread, never guessed */ }
+  }
+  return sessionOpening({ signedIn, tenant, environment: signedIn ? servedBy(sessionId) : null });
+}
 
 // ─── A discovered UI plugin needs no declaration ────────────────────────────
 //
@@ -105,6 +116,8 @@ import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
 // Who a test job runs as: ONE statement (the Builder's /spec wording), rendered where it is read.
 import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "./testRunsAs.js";
+// Signing in and switching workspace: ONE statement of the steps, rendered where it is read.
+import { CONNECT_STEPS, NO_KEY_IN_CHAT, NOT_IN_THIS_WORKSPACE, sessionOpening } from "./signInSteps.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport } from "./api.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -1000,7 +1013,7 @@ function forceDeleteNext(code, status, id) {
       `ateam_delete_solution(solution_id:"${id}", confirm:true, confirm_solution_id:"${id}", force:true).`;
   }
   if (code === "SOLUTION_NOT_FOUND" || status === 404) {
-    return `Do not retry: there is no solution "${id}" in this tenant, so nothing was deleted. ateam_list_solutions shows its id.`;
+    return `Do not retry: there is no solution "${id}" in this tenant, so nothing was deleted. ateam_list_solutions shows its id.\n${NOT_IN_THIS_WORKSPACE}`;
   }
   if (status === 401 || status === 403) {
     return "Do not retry: this key may not delete the solution, and the same call gets the same refusal. Fix the credentials first.";
@@ -1085,16 +1098,17 @@ export const tools = [
     name: "ateam_auth",
     core: true,
     description:
-      "Sign this session in to an A-Team tenant with an API key. A session must be signed in before any tenant-aware operation (reading solutions, deploying, testing, the widget catalog, the design advisor). The docs need no sign-in: ateam_bootstrap, ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search, and validation.\n\n" +
-      `AN AGENT DOES NOT ASK FOR A KEY. ${SIGN_IN_IN_THE_BROWSER} Then this tool is not needed.\n\n` +
-      `This tool is for a local setup where the user supplies their own key. ${KEY_PICKS_ENVIRONMENT} ` +
-      "An ADAS_API_KEY environment variable does NOT sign a session in: a key baked into a shared config could point work at the wrong tenant, so tenant tools refuse until the session signs in. For cross-tenant admin operations, use master_key instead of api_key.",
+      "Sign this session in to an A-Team workspace (tenant) with an API key — for a caller that holds the key OUTSIDE the chat: a platform proxy, a script, a self-hosted setup. A session must be signed in before any workspace operation (reading solutions, deploying, testing, the widget catalog, the design advisor). The docs need no sign-in: ateam_bootstrap, ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search, and validation. ateam_bootstrap's first line says which workspace this session is on.\n\n" +
+      `${NO_KEY_IN_CHAT}\n\n` +
+      `The user signs in through the hosted connector instead, and then this tool is not needed:\n${CONNECT_STEPS}\n\n` +
+      `${KEY_PICKS_ENVIRONMENT} ` +
+      "An ADAS_API_KEY environment variable does NOT sign a session in: a key baked into a shared config could point work at the wrong workspace, so workspace tools refuse until the session signs in. For cross-tenant admin operations, use master_key instead of api_key.",
     inputSchema: {
       type: "object",
       properties: {
         api_key: {
           type: "string",
-          description: `The user's A-Team API key. ${KEY_PICKS_ENVIRONMENT}`,
+          description: `An A-Team API key held outside the chat — never one a user typed or pasted into it. ${KEY_PICKS_ENVIRONMENT}`,
         },
         master_key: {
           type: "string",
@@ -1102,13 +1116,13 @@ export const tools = [
         },
         tenant: {
           type: "string",
-          description: "Tenant name (e.g., dev, main). Optional with api_key if format is adas_<tenant>_<hex>. REQUIRED with master_key.",
+          description: "Tenant (workspace) name, e.g. acme. Optional with api_key if format is adas_<tenant>_<hex>. REQUIRED with master_key.",
         },
         url: {
           type: "string",
           description:
-            "Only for a host that is neither A-Team environment (localhost, a self-hosted deployment), or for an older key that names no environment (adas_<tenant>_<hex>, which otherwise lands on this server's default API). " +
-            "Leave it out for an adas_<env>_ key: the key already picks its environment, and a url that contradicts it is refused.",
+            "Only for a host other than A-Team's own API (localhost, a self-hosted deployment), or for an older key that names no API (adas_<tenant>_<hex>, which otherwise lands on this server's default API). " +
+            "Leave it out for a current A-Team key: the key already names its API, and a url that contradicts it is refused.",
         },
       },
     },
@@ -1117,7 +1131,7 @@ export const tools = [
     name: "ateam_get_spec",
     core: true,
     description:
-      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec. Needs no sign-in. Every answer carries `served_by`: the environment that answered (prod or dev, the API this session talks to), so two environments' docs are never read as one.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.\n\nWhen wiring widgets (UI plugins) into a solution, fetch topic='widgets' — that returns the widget spec (catalog model, how_to_use blocks, opener_call shape, persona phrasing rules, binding semantics) so you can declare `ui_plugins` correctly. For the live catalog of widgets actually available in a deployed tenant, use ateam_get_widget_catalog instead.",
+      "Get the A-Team specification — schemas, validation rules, system tools, agent guides, and templates. Start here after bootstrap to understand how to build skills and solutions. Use 'section' to get just one part of the skill spec (much smaller than the full spec). Use 'search' to find specific fields or concepts across the spec. Needs no sign-in. Every answer carries `served_by`: which API answered (prod for A-Team's own, or the API base itself for any other host), the API this session talks to.\n\nWhen designing a persona that orchestrates logic via run_python_script (the Python-as-orchestrator pattern), also fetch topic='python_helpers' — that returns the adas.* helper namespace reference. Skills designed without knowing about adas.* produce 5-10x larger / brittler scripts.\n\nWhen wiring widgets (UI plugins) into a solution, fetch topic='widgets' — that returns the widget spec (catalog model, how_to_use blocks, opener_call shape, persona phrasing rules, binding semantics) so you can declare `ui_plugins` correctly. For the live catalog of widgets actually available in a deployed tenant, use ateam_get_widget_catalog instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1209,7 +1223,7 @@ export const tools = [
     name: "ateam_spec_search",
     core: true,
     description:
-      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod or dev): the environment whose docs were searched.",
+      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod for A-Team's own API, or the base itself for any other host): whose docs were searched.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4449,6 +4463,9 @@ export const handlers = {
   // to learn from deploy errors which environment it was actually on. The
   // dangerous direction is the mirror image — believing you are on dev.
   ateam_bootstrap: async (_args, sid) => ({
+    // FIRST: where this session is and how to move (signInSteps.js). A session
+    // was on one workspace while the user needed another, and nothing said which.
+    session: openingFor(sid),
     served_by: servedBy(sid),
     runtime: {
       ateam_mcp_version: MCP_VERSION,
@@ -4456,7 +4473,7 @@ export const handlers = {
       // "as set by ateam_auth's `url`" (af5e366) was written 22 minutes before
       // bff5934 made the KEY pick the environment (MGAP-A31).
       _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to: the environment its sign-in's key names (adas_<env>_…), a `url` given to ateam_auth for a host that is neither environment, or this server's default before any sign-in. " +
-        "`served_by` (top of this result, and on every ateam_get_spec / ateam_get_examples / ateam_get_workflows / ateam_spec_search result) names that environment: prod or dev, or the base itself for any other host. " +
+        "`served_by` (top of this result, and on every ateam_get_spec / ateam_get_examples / ateam_get_workflows / ateam_spec_search result) names that API: prod for A-Team's own, or the base itself for any other host. " +
         "If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
     },
     platform_positioning: {
@@ -4763,7 +4780,7 @@ export const handlers = {
       // backticked field here must exist in the result it is read from
       // (test/sign-in-texts.test.mjs).
       environment_transparency: {
-        on_connect: "State it explicitly: 'Connected to <tenant> on <environment> — changes you make deploy here.' READ the environment, do not derive it from a url: ateam_auth returns `environment` (prod or dev; 'unstated' for an older key that names none — then say you cannot confirm it), and a session signed in through the hosted connector (no ateam_auth call) finds it in ateam_bootstrap's `served_by`. Show a human label (PROD / DEV), not a raw host. Never silently operate on an env the user didn't expect.",
+        on_connect: "State it explicitly: 'Connected to <workspace> on <environment> — changes you make deploy here.' READ both, do not derive them from a url: ateam_bootstrap's first field, `session`, says which workspace this session is on and how to switch, and its `served_by` names the environment; ateam_auth returns `tenant` and `environment` ('unstated' for an older key that names none — then say you cannot confirm it). Show a human label (e.g. PROD), not a raw host. Never silently operate on a workspace or environment the user didn't expect.",
         after_deploy: "Confirm WHERE it landed with a link: '✅ Added <thing> to <solution> (tenant <t>, <env>) — view it: <app url>.'",
       },
       // ── Delivering a build. (Backlog findings #2,#7,#8.)
@@ -4939,7 +4956,8 @@ export const handlers = {
       // OPEN-18: a well-formed `adas_<tenant>_<hex>` key that's rejected is often
       // a key for the OTHER environment (a dev key against the prod base, or vice
       // versa). Surface the base we tried and, if it looks like that mismatch,
-      // hint the dev-api retry — instead of a generic "invalid/unconfigured key".
+      // say to retry with that API's base as url — instead of a generic
+      // "invalid/unconfigured key". The text names no host but prod's.
       const base = getBaseUrl(sessionId) || "";
       const parsedKey = parseApiKey(api_key);
       const wellFormedKey = parsedKey.isValid;
@@ -4962,17 +4980,22 @@ export const handlers = {
           tenant: resolvedTenant,
           env_mismatch_suspected: true,
           message:
-            `WRONG ENVIRONMENT, most likely — not a bad key. "adas_${resolvedTenant}_…" is a well-formed tenant key, ` +
-            `and it was tried against PROD (${base}), which is the default. A DEV tenant's key is rejected there. ` +
-            `Retry as: ateam_auth(api_key, url:"https://dev-api.ateam-ai.com"). ` +
-            `Only if that also fails is the key itself the problem (get one at https://mcp.ateam-ai.com/get-api-key). ` +
+            // PUBLIC TEXT NAMES PRODUCTION ONLY (Arie, 2026-10-01): this named
+            // the other environment's host as the url to retry with.
+            `WRONG API, most likely — not a bad key. "adas_${resolvedTenant}_…" is an older, well-formed key that names no API, ` +
+            `and it was tried against PROD (${base}), which is the default. A key from another A-Team API is rejected there: ` +
+            `retry with that API's base as url (ateam_auth(api_key, url:"<its API base>")), or use a current key, which names its own API. ` +
+            `Only if that also fails is the key itself the problem. ` +
             `Upstream said: ${err.message}`,
         };
       }
       return {
         ok: false,
         tenant: resolvedTenant,
-        message: `Authentication failed: ${err.message} (tried ${base || "the default base"}). The user can get a valid API key at https://mcp.ateam-ai.com/get-api-key`,
+        // It ended "get a valid API key at …/get-api-key" (c61e60b). The
+        // upstream error already carries what to do (formatError's 401/403
+        // hints render the shared steps).
+        message: `Authentication failed: ${err.message} (tried ${base || "the default base"}).`,
       };
     }
   },
@@ -7107,7 +7130,7 @@ export const handlers = {
     if (!skill_id) throw new Error("skill_id required");
     const full = await get(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}`, sid);
     const skill = full?.skill || full;
-    if (!skill) return { ok: false, error: "skill not found" };
+    if (!skill) return { ok: false, error: "skill not found", hint: NOT_IN_THIS_WORKSPACE };
     return {
       ok: true,
       id: skill.id,
@@ -7165,7 +7188,7 @@ export const handlers = {
     if (!solution_id) throw new Error("solution_id required");
     const full = await get(apiPath`/deploy/solutions/${solution_id}/definition`, sid);
     const sol = full?.solution || full;
-    if (!sol) return { ok: false, error: "solution not found" };
+    if (!sol) return { ok: false, error: "solution not found", hint: NOT_IN_THIS_WORKSPACE };
     return {
       ok: true,
       id: sol.id,
@@ -7797,10 +7820,10 @@ export async function handleToolCall(name, args, sessionId) {
       content: [{
         type: "text",
         text: [
-          `Authentication required — this session is not signed in to a tenant, so ${name} was refused before it ran.`,
+          `Authentication required — this session is not signed in to a workspace (tenant), so ${name} was refused before it ran.`,
           "",
           hasEnvVars
-            ? "An ADAS_API_KEY environment variable was found, but it does not sign a session in: a key baked into a shared config could point work at the wrong tenant, so the session signs in (below) to say which tenant it means."
+            ? "An ADAS_API_KEY environment variable was found, but it does not sign a session in: a key baked into a shared config could point work at the wrong workspace, so the session signs in (below) to say which workspace it means."
             // "No authentication found." was TRUE and pointed at the WRONG CAUSE.
             // Auth is held in this process's memory and does NOT survive a
             // restart, so a container rebuild silently logs out every connected
@@ -7816,13 +7839,14 @@ export async function handleToolCall(name, args, sessionId) {
               "      restart, so a container rebuild or redeploy logs out every such session with no warning.\n" +
               "If your tools were working minutes ago, it is (b) — nothing is misconfigured: sign in again the same way.",
           "",
-          // MGAP-A1 interim: this said "Get their API key at …/get-api-key, then
-          // call ateam_auth(api_key)" (c61e60b) — an agent asking for the key.
-          // The browser sign-in (9f84856) needs none. The device-code sign-in
-          // that replaces both is a separate design.
-          "HOW TO SIGN IN — do not ask the user for a key:",
-          `1. ${SIGN_IN_IN_THE_BROWSER}`,
-          `2. A local setup has no browser sign-in: there the user signs in with their own key through ateam_auth(api_key). ${KEY_PICKS_ENVIRONMENT}`,
+          // The steps are signInSteps.js's, word for word. c61e60b said "Get
+          // their API key at …/get-api-key, then call ateam_auth(api_key)" — an
+          // agent asking for the key; 0f5f4d3 (MGAP-A1) said to authorize in the
+          // browser, with ateam_auth "for a local setup" and every environment's
+          // host listed. The device-code sign-in is a separate design.
+          CONNECT_STEPS,
+          "",
+          NO_KEY_IN_CHAT,
           "",
           "The docs need no sign-in: ateam_get_spec, ateam_get_examples, ateam_get_workflows, ateam_spec_search.",
         ].join("\n"),

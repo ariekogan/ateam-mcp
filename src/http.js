@@ -284,8 +284,12 @@ export function startHttpServer(port = 3100) {
     });
   });
 
-  // ─── Get API Key — redirect to the main web app's Tenant Admin →
-  //     Tokens & Keys (the key now lives in the main UI, not the builder). ──
+  // ─── Get API Key — redirect to the main web app (c61e60b). ──
+  // No text served from this repo links here any more: the steps name the app
+  // and the clicks (signInSteps.js WHERE_A_KEY_IS), because the app reads no
+  // ?admin=tokens and lands on its home page. KEPT for links outside this repo
+  // (the Builder's docs/PUBLIC_MCP_DOCUMENTATION.md, Core's docs); remove when
+  // those stop linking it (the agent sign-in design deletes it with them).
   app.get("/get-api-key", (_req, res) => {
     res.redirect("https://app.ateam-ai.com/?admin=tokens");
   });

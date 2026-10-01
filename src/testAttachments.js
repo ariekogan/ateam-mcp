@@ -193,7 +193,7 @@ export async function prepareTestAttachments(attachments) {
     }
     if (typeof item.data !== "string" || !item.data) throw refuse("ATTACHMENT_INVALID", `${where}.data must be a non-empty base64 string.`);
     if (item.data.startsWith("data:")) {
-      throw refuse("ATTACHMENT_INVALID", `${where}.data starts with "data:": send the base64 payload alone, without the data:<type>;base64, prefix (as dev-app does).`);
+      throw refuse("ATTACHMENT_INVALID", `${where}.data starts with "data:": send the base64 payload alone, without the data:<type>;base64, prefix (as the A-Team app does).`);
     }
     if (!BASE64_RX.test(item.data) || item.data.length % 4 === 1) {
       throw refuse("ATTACHMENT_INVALID", `${where}.data is not base64 (A-Z a-z 0-9 + / with = padding; no whitespace).`);

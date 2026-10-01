@@ -13,6 +13,8 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+// Signing in and switching workspace: ONE statement of the steps (formatError renders them).
+import { SWITCH_STEPS, NOT_IN_THIS_WORKSPACE } from "./signInSteps.js";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
@@ -793,7 +795,7 @@ export function getBaseUrl(sessionId) {
  *   dev-api.ateam-ai.com      → dev-app.ateam-ai.com      (our internal dev)
  *   anything else (self-host) → best-effort api→app swap, or the base itself
  */
-function apiToAppUrl(baseUrl) {
+export function apiToAppUrl(baseUrl) {
   try {
     const u = new URL(baseUrl);
     // host swaps: <x>api.<domain> → <x>app.<domain>; "api." prefix → "app."
@@ -1006,8 +1008,11 @@ export function formatError(method, path, status, body, baseUrl, { read = method
     : "The call was not re-sent: check whether it took effect before issuing it again.";
   const hints = {
     400: "Bad request — see the error details above for what to fix.",
-    401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call ateam_auth(api_key: \"your_key\").",
-    403: "You don't have permission for this operation. Check your tenant and API key. Get a key at https://mcp.ateam-ai.com/get-api-key",
+    // 401/403 sent the user to …/get-api-key to bring the agent a key for
+    // ateam_auth (c6e7275): the agent asking for a key. The steps are
+    // signInSteps.js's, word for word.
+    401: `The key this session signed in with was refused: it may have been rotated.\n${SWITCH_STEPS}`,
+    403: `This key is not allowed to do this here. A key acts only in its own workspace; if the user meant another one:\n${SWITCH_STEPS}`,
     404: "Resource not found. Check the solution_id or skill_id you're using. Use ateam_list_solutions to see available solutions.",
     409: "Conflict — the resource may already exist or is in a conflicting state.",
     422: "Validation failed. Check the request payload against the spec (use ateam_get_spec).",
@@ -1127,6 +1132,18 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // agent went hunting for a missing solution three times.
   const hasSpecificHint = /"code"\s*:/.test(bodyStr) && /"hint"\s*:/.test(bodyStr);
   const hint = hasSpecificHint ? "" : (hints[status] || "");
+  // A SOLUTION THIS WORKSPACE DOES NOT HAVE MAY BE IN ANOTHER ONE. Both 404
+  // hints — the table's "check the solution_id" and the Builder's own
+  // SOLUTION_NOT_FOUND hint ("this tenant has: …, use one of those ids") — read
+  // as "pick from what is here", so a user signed in to the wrong workspace was
+  // steered to a look-alike. This adds the cause neither can see; it
+  // contradicts neither, so it follows a specific hint too. Not on a 404 whose
+  // body names another cause (a patch's NO_MATCH): only the not-found codes, or
+  // a solution path the generic hint answers.
+  const solutionMissing = status === 404 && (
+    /"code"\s*:\s*"(?:SOLUTION|SKILL)_NOT_FOUND"/.test(bodyStr)
+    || (!hasSpecificHint && /\/solutions\/[^/?#]+/.test(String(path || "")))
+  );
   // Truncated, never dropped. Before 4b36c4d a body of 2000+ chars was dropped
   // ENTIRELY, so the richer the error the less the caller was told — a 422
   // carrying the full diagnosis (ui.surfaceProbe's failures) arrived as a bare
@@ -1141,6 +1158,7 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   let msg = `A-Team API error: ${method} ${target} returned ${status}`;
   if (detail) msg += ` — ${detail}`;
   if (hint) msg += `\nHint: ${hint}`;
+  if (solutionMissing) msg += `\n${NOT_IN_THIS_WORKSPACE}`;
 
   return msg;
 }

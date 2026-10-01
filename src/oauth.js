@@ -13,6 +13,7 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelconte
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { InvalidTokenError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { parseApiKey } from "./api.js";
+import { KEY_IS_THE_WORKSPACE, WHERE_A_KEY_IS, PROD_APP_URL } from "./signInSteps.js";
 
 // ─── TTLs ─────────────────────────────────────────────────────────
 const AUTH_CODE_TTL = 5 * 60 * 1000;   // 5 minutes
@@ -244,9 +245,22 @@ class ATeamOAuthProvider {
 
 // ─── Auth Page HTML ───────────────────────────────────────────────
 
+// Under the key field: the key picks the workspace, and where a key is — the
+// words of signInSteps.js, with the app linked. It said "Don't have a key? Get
+// your API key" (293c43b), a link to /get-api-key, which lands on the app's
+// home page: nothing in the app reads the ?admin=tokens it redirects with.
+function keyHintHtml() {
+  const where = escapeHtml(WHERE_A_KEY_IS).replace(
+    escapeHtml(PROD_APP_URL),
+    `<a href="${escapeHtml(PROD_APP_URL)}" target="_blank" rel="noopener">${escapeHtml(PROD_APP_URL)}</a>`,
+  );
+  return `${escapeHtml(KEY_IS_THE_WORKSPACE)} ${where}`;
+}
+
 // `requester` is redirectRequester(redirect_uri): who the code goes to, by the
 // redirect's host. Never the client_name, which the caller chooses.
-function generateAuthPage(pendingId, requester, error) {
+// Exported so the page's words can be tested as rendered.
+export function generateAuthPage(pendingId, requester, error) {
   const errorHtml = error
     ? `<div style="background:#3a1c1c;border:1px solid #7f1d1d;color:#fca5a5;padding:12px;border-radius:8px;margin-bottom:16px;font-size:14px">${escapeHtml(error)}</div>`
     : "";
@@ -328,10 +342,7 @@ function generateAuthPage(pendingId, requester, error) {
       <input type="text" id="api_key" name="api_key"
              placeholder="adas_tenant_abc123..." required autofocus
              autocomplete="off" spellcheck="false">
-      <div class="hint">
-        Don't have a key?
-        <a href="/get-api-key" target="_blank">Get your API key</a>
-      </div>
+      <div class="hint">${keyHintHtml()}</div>
       <div class="actions">
         <button type="submit" id="submitBtn" class="btn-primary">Authorize</button>
       </div>

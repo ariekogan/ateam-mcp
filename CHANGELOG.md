@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Which workspace a session is on, and how to switch
+
+- `ateam_bootstrap` opens with `session`, and the MCP server instructions open
+  with the same text: "You are signed in to workspace "<tenant>" (<environment>)"
+  and how to switch, or, signed out, how to sign in. No person is named:
+  ateam-mcp is not told whose key it is.
+- The steps live in one place, `src/signInSteps.js`, and are rendered word for
+  word in `ateam_auth`'s description, the sign-in refusal, the 401/403 hints,
+  every refusal for a solution or skill this workspace does not have (which now
+  says it may be in another workspace), and the sign-in page. They link the
+  hosted connector (`https://mcp.ateam-ai.com`), claude.ai's connector settings
+  (`https://claude.ai/customize/connectors`) and the A-Team app
+  (`https://app.ateam-ai.com`, then Tenant administration > Tokens & Keys).
+  Switching is Disconnect, then Connect, then the other workspace's key on the
+  A-Team sign-in page: the key is the workspace, and there is no picker.
+- An agent never asks for a key in the chat and never uses one pasted there; it
+  tells the user to rotate it.
+- No text links `/get-api-key` any more (the route stays for outside links).
+- Served texts name the production API only. Routing is unchanged: a key still
+  reaches the API its prefix names.
+
 ### Security
 
 - `ateam_delete_solution` no longer lets `solution_id` carry `?force=true`.
@@ -74,9 +95,9 @@
   connector route and answered 401 "Missing API key" to any session that had
   not signed in; it now calls the Builder's keyless `POST /spec/search`.
 - `ateam_get_spec`, `ateam_get_examples`, `ateam_get_workflows`,
-  `ateam_spec_search` and `ateam_bootstrap` return `served_by`: `prod` or
-  `dev`, the environment whose API answered (the base URL itself for any
-  other host). It is derived from the base the call went to, never configured.
+  `ateam_spec_search` and `ateam_bootstrap` return `served_by`: the API that
+  answered (`prod` for A-Team's own, the base URL itself for any other host).
+  It is derived from the base the call went to, never configured.
 - `ateam_auth` and the sign-in refusal no longer send the user to fetch a key
   for the agent. They say to connect through the hosted connector
   (`https://mcp.ateam-ai.com`) and authorize in the browser; `ateam_auth` is
