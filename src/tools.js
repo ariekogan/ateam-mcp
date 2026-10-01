@@ -1218,8 +1218,27 @@ export const tools = [
     // call a building agent makes and it carries the storage decision, so when
     // it times out the run proceeds with no capability guidance at all.
     monitoring: { safe: true, cost: "normal", latency_ms_p95: 25000, output: "bounded" },
+    // CORE CUTS EVERY TOOL DESCRIPTION AT 1200 CHARACTERS for an agent run
+    // (ai-dev-assistant anthropicAgentBackend.js, openaiAgentBackend.js,
+    // sys.callAiWithTools.js), and the in-app solution builder makes every
+    // ateam_* call inside one. So this whole text stays within 1200, with the
+    // failure sentence second (test/advisor-failure-text.test.mjs).
+    //
+    // BUILDER-2. job_wfkgyg5o (2026-09-28) asked this with the store already
+    // chosen ("Use an in-memory / JSON store in a custom MCP connector"); the
+    // call failed with Core's "circuit open for <tenant>::ateam-proxy-mcp;
+    // cooling down" before it left Core, nothing pushed back, and the build
+    // wrote that store. This text is the one channel that reaches an agent
+    // whose call never got an answer. That error names no cool-down time
+    // (Core utils/circuitBreaker.js), so this does not promise one. The
+    // Builder matches words, not intent, so the conflicts sentence says so.
     description:
-      "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the /spec topic to read next (via ateam_get_spec) and the tool to wire it. Also returns 'missing' hints (capabilities your goal implies but the design hasn't wired) and lifecycle hints (e.g. connect GitHub when the project will iterate). ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call; consult it as often as you like as the design evolves. If the reply carries `truncated: true`, the answer ran past the length budget and was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search, before concluding the platform lacks something.",
+      "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. " +
+      "If this call fails, your design is unchecked: do not write storage code on a store you picked before asking. ateam_get_spec('connector-multi-user') → storage_decision answers storage with no LLM (a failure the advisor answers carries it as `storage_decision`); retry after a short wait (a 'circuit open … cooling down' error names no time). " +
+      "Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the ateam_get_spec topic to read next and the tool to wire it, plus 'missing' and lifecycle hints. " +
+      "`conflicts_with_platform_rules` lists words in your goal or design_state that name a store the platform forbids (matched by words, so a 'never /tmp' you wrote is listed too): check each against its rule. " +
+      "ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call. " +
+      "`truncated: true` means the answer was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4414,7 +4433,10 @@ export const handlers = {
         "full spec corpus. The advisor is different: it runs your tenant's LLM, so it can refuse a session that has not " +
         "signed in, and it can time out. If the advisor answers " +
         "with `truncated: true`, what you got is CORRECT but INCOMPLETE: use it, and treat a capability's absence as " +
-        "UNKNOWN rather than 'no' — re-ask with a narrower goal, or check the three doors above.",
+        "UNKNOWN rather than 'no' — re-ask with a narrower goal, or check the three doors above. " +
+        // ONE home for what a failed call means for the design (review M39-4):
+        // the tool's own description, which every agent sees.
+        "What a failed call means for your design, storage first: the ateam_design_advisor description.",
     },
     what_is_a_team: {
       definition: "A Team is a structured multi-role AI system composed of Skills, Connectors, Governance contracts, and Managed Runtime deployment.",

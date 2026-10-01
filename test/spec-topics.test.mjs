@@ -304,5 +304,20 @@ if (Array.isArray(servedTopics)) {
   );
 }
 
+// The page ateam_design_advisor's description sends a failed call to —
+// ateam_get_spec('connector-multi-user') → storage_decision — must serve it
+// before a release carrying that text ships (review M39-5).
+if (Array.isArray(servedTopics)) {
+  let page = null, why = null;
+  try {
+    const r = await fetch(`${SPEC_BASE}/spec/multi-user-connector`, { signal: AbortSignal.timeout(15_000) });
+    if (r.ok) page = await r.text(); else why = `HTTP ${r.status}`;
+  } catch (err) { why = err.message; }
+  check(
+    `/spec/multi-user-connector serves storage_decision, which ateam_design_advisor's description points at${page === null ? ` — ${why}` : ""}`,
+    typeof page === "string" && page.includes('"storage_decision"')
+  );
+}
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
