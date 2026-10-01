@@ -37,6 +37,17 @@
 export const RAN_AS_IN_REPLY =
   "Every reply's ran_as is the actor the job ran as — the person, or null for an anonymous run.";
 
+/**
+ * A KEY WHOSE PERSON IS GONE (Builder #117, Core 9f32bac37): Core's
+ * verify-agent-key refuses it by name and the Builder answers that refusal
+ * before anything runs. Part of TEST_RUNS_AS below, byte for byte the
+ * Builder's capabilitySpecs.js KEY_OWNER_GONE.
+ */
+export const KEY_OWNER_GONE =
+  "A key whose person has since been deleted, or is no longer active in the workspace, runs nothing: it is refused " +
+  "(401 KEY_OWNER_DELETED or KEY_OWNER_INACTIVE) and never run as anyone else, until a workspace owner or admin " +
+  "rotates the key in Tokens & Keys (the new key belongs to whoever rotated it) or reactivates that person.";
+
 export const TEST_RUNS_AS =
   "WHO A TEST RUNS AS: a test an agent starts through the Builder with an API key (ateam_conversation, " +
   "ateam_test_skill, ateam_test_voice) runs AS THE PERSON that key belongs to — the signed-in user who generated it " +
@@ -44,6 +55,6 @@ export const TEST_RUNS_AS =
   "product. actor_id never picks the identity: it names the conversation thread, and with a person on the key the " +
   "thread IS that person (Core keys a conversation by its actor), so a different actor_id is not honoured. Only a " +
   "key no person minted (a service-provisioned key) still runs as before: anonymously, under the test_ thread that " +
-  "actor_id names or a fresh one. " + RAN_AS_IN_REPLY + " A voice test (ateam_test_voice) runs as the person only " +
+  "actor_id names or a fresh one. " + KEY_OWNER_GONE + " " + RAN_AS_IN_REPLY + " A voice test (ateam_test_voice) runs as the person only " +
   "once the voice backend verifies the API key the Builder sends it (Core follow-up); until then it is anonymous, " +
   "and its ran_as says so.";

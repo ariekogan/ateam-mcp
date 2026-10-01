@@ -1083,6 +1083,57 @@ export function actorNotFound(status, body) {
 }
 
 /**
+ * A PERSON THE PLATFORM WILL NOT ACT AS — Core's named refusals (ai-dev-assistant
+ * 9f32bac37), which the Builder answers in its own words with the same code
+ * (Builder #117). Each is a 401 whose top-level `code` says which:
+ *   KEY_OWNER_DELETED   the person this API key belongs to (who minted it) was
+ *                       deleted: the key runs nothing, as anyone;
+ *   KEY_OWNER_INACTIVE  that person is no longer active in the workspace;
+ *   ACTOR_INACTIVE      Core will not act as the person a call named.
+ * Not an actor this session sent by mistake (actorNotFound), and not a key
+ * that was rotated (the table's 401): each has its own way out, and saying
+ * "your key is fine" or "sign in again" about it sends the reader the wrong way.
+ * Read like actorNotFound: the code at the TOP LEVEL of the body, never a token
+ * anywhere. `actor` is the person, from Core's actorId or the Builder's actor_id.
+ *
+ * @param {number} status
+ * @param {string|object} body
+ * @returns {{ code: string, actor: string|null } | null}
+ */
+const PERSON_REFUSAL_CODES = new Set(["KEY_OWNER_DELETED", "KEY_OWNER_INACTIVE", "ACTOR_INACTIVE"]);
+export function personRefused(status, body) {
+  if (status !== 401) return null;
+  const obj = body && typeof body === "object" && !Array.isArray(body) ? body : jsonBodyOf(body);
+  if (!obj || !PERSON_REFUSAL_CODES.has(obj.code)) return null;
+  const actor = [obj.actorId, obj.actor_id].find((v) => typeof v === "string" && v.trim());
+  return { code: obj.code, actor: actor ? actor.trim() : null };
+}
+
+/** The way out of a personRefused 401, for this session as it stands (ctx). */
+function personRefusalHint({ code, actor }, ctx) {
+  const who = actor ? ` (actor ${actor})` : "";
+  const signInWithIt = ctx.signedIn ? switchSteps(ctx) : connectSteps(ctx);
+  if (code === "KEY_OWNER_DELETED") {
+    return `This API key belongs to a person who has been deleted${who}. A key acts as the person who minted it, so ` +
+      "this one runs nothing now, and it is never run as anyone else. Signing in again with the same key will not help: " +
+      "a workspace owner or admin rotates the key (Tenant Admin → Tokens & Keys, in the A-Team app), the new key " +
+      `belongs to whoever rotates it, and this session signs in with the new key.\n${signInWithIt}`;
+  }
+  if (code === "KEY_OWNER_INACTIVE") {
+    return `This API key belongs to a person who is no longer active in this workspace${who}. A key acts as the person ` +
+      "who minted it, so this one runs nothing until that changes, and it is never run as anyone else. Signing in again " +
+      "with the same key will not help. Either a workspace owner or admin reactivates or approves that person (Tenant " +
+      "Admin → Users, in the A-Team app), and the same key works again; or they rotate the key (Tenant Admin → Tokens & " +
+      `Keys), the new key belongs to whoever rotates it, and this session signs in with the new key.\n${signInWithIt}`;
+  }
+  return `The platform will not act as the person${who}: they are no longer active in this workspace, so the call did ` +
+    "not run. Retrying as the same person will not help. Act as a person who is active here, or have a workspace owner " +
+    "or admin reactivate or approve that person (Tenant Admin → Users, in the A-Team app). If that person is the one " +
+    "this session's key belongs to, the key acts as nobody else: reactivate them, or rotate the key (Tenant Admin → " +
+    "Tokens & Keys) and sign this session in with the new one.";
+}
+
+/**
  * Does this 404 body say that a SOLUTION or SKILL is missing (as opposed to a
  * file, job or connector inside one)? Read like actorNotFound: the structured
  * code, or the top-level error/message sentence, never a token anywhere.
@@ -1276,7 +1327,14 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // followed by "Check the solution_id … use ateam_list_solutions", and the
   // agent went hunting for a missing solution three times.
   const hasSpecificHint = /"code"\s*:/.test(bodyStr) && /"hint"\s*:/.test(bodyStr);
-  const hint = hasSpecificHint ? "" : (hints[status] || "");
+  // A person the platform will not act as has ONE way out, whichever hop said
+  // so: Core's bare { code, actorId, error } carries no hint, so the table would
+  // have answered "the key may have been rotated — sign in again"; the
+  // Builder's carries one, and this adds only how THIS session signs in with a
+  // new key, which no endpoint can know. It contradicts neither.
+  const person = personRefused(status, body);
+  const hint = person ? personRefusalHint(person, ctx)
+    : hasSpecificHint ? "" : (hints[status] || "");
   // A SOLUTION THIS WORKSPACE DOES NOT HAVE MAY BE IN ANOTHER ONE. Both 404
   // hints — the table's "check the solution_id" and the Builder's own
   // SOLUTION_NOT_FOUND hint ("this tenant has: …, use one of those ids") — read
