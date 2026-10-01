@@ -20,8 +20,11 @@
 //      request with such a bearer was a 500.
 //
 // Boot mirrors session-isolation.test.mjs: a fake validator on 127.0.0.1 is the
-// process default (ADAS_API_URL), and the server is its own OAuth issuer, so no
-// check can reach a real host.
+// process default (ADAS_API_URL). Every request addresses the production MCP
+// host by X-Forwarded-Host, so the challenge names that host's metadata
+// (oauth.js mountOAuth), and the test follows it on THIS server, so no check
+// can reach a real host. test/oauth-addressed-host.test.mjs covers the other
+// hosts.
 //
 // Plain script with a checklist, like session-isolation.test.mjs: the HTTP
 // server it boots keeps the process alive, so it ends with process.exit.
@@ -62,7 +65,8 @@ await new Promise((r) => fake.listen(0, "127.0.0.1", r));
 process.env.ADAS_API_URL = `http://127.0.0.1:${fake.address().port}`;
 const PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
-process.env.ATEAM_BASE_URL = BASE; // OAuth issuer = self
+const MCP_ORIGIN = "https://mcp.ateam-ai.com";
+const ADDRESSED = { "x-forwarded-host": new URL(MCP_ORIGIN).host };
 delete process.env.ATEAM_OAUTH_DISABLED;
 const { startHttpServer } = await import("../src/http.js");
 startHttpServer(PORT);
@@ -82,7 +86,7 @@ let rpcId = 10;
 async function post(path, { headers = {}, body }) {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+    headers: { ...ADDRESSED, "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(5000),
   });
@@ -102,11 +106,12 @@ for (const [mount, prmPath] of [["/", "/.well-known/oauth-protected-resource"], 
     assert.equal(r.status, 401);
     const www = r.headers.get("www-authenticate") || "";
     const named = /resource_metadata="([^"]+)"/.exec(www)?.[1];
-    assert.equal(named, `${BASE}${prmPath}`, `the ${mount} challenge points at ${named}`);
+    assert.equal(named, `${MCP_ORIGIN}${prmPath}`, `the ${mount} challenge points at ${named}`);
 
-    // Follow it, as a client does, and check the correspondence it checks.
-    const prm = await (await fetch(named)).json();
-    assert.equal(prm.resource, new URL(mount, BASE).href,
+    // Follow it, as a client does (on this server, addressed as that host), and
+    // check the correspondence it checks.
+    const prm = await (await fetch(`${BASE}${new URL(named).pathname}`, { headers: ADDRESSED })).json();
+    assert.equal(prm.resource, new URL(mount, MCP_ORIGIN).href,
       `a client that called ${mount} was sent to metadata for ${prm.resource}`);
   });
 

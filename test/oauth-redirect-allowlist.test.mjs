@@ -12,8 +12,10 @@
 // the redirect's host.
 //
 // Boot mirrors oauth-edges.test.mjs: a fake validator on 127.0.0.1 is the
-// process default and the server is its own issuer, so nothing reaches a real
-// host. Plain script with a checklist; it ends with process.exit.
+// process default, and every request addresses the production MCP host by
+// X-Forwarded-Host (the sign-in is the addressed host's; oauth.js mountOAuth),
+// so nothing reaches a real host. Plain script with a checklist; it ends with
+// process.exit.
 //
 // Run: node test/oauth-redirect-allowlist.test.mjs   (npm test runs it too)
 
@@ -35,7 +37,7 @@ await new Promise((r) => fake.listen(0, "127.0.0.1", r));
 process.env.ADAS_API_URL = `http://127.0.0.1:${fake.address().port}`;
 const PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
-process.env.ATEAM_BASE_URL = BASE;
+const ADDRESSED = { "x-forwarded-host": "mcp.ateam-ai.com" };
 delete process.env.ATEAM_OAUTH_DISABLED;
 const { startHttpServer } = await import("../src/http.js");
 startHttpServer(PORT);
@@ -55,7 +57,7 @@ async function register(redirect_uris, client_name = "t") {
   const n = ++registrations;
   const r = await fetch(`${BASE}/register`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": `10.77.${n >> 8}.${n & 255}` },
+    headers: { ...ADDRESSED, "content-type": "application/json", "x-forwarded-for": `10.77.${n >> 8}.${n & 255}` },
     body: JSON.stringify({ redirect_uris, client_name, token_endpoint_auth_method: "none" }),
     signal: AbortSignal.timeout(5000),
   });
@@ -66,7 +68,7 @@ async function authorize(client_id, redirect_uri) {
     response_type: "code", client_id, redirect_uri, state: "st",
     code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256",
   });
-  const r = await fetch(`${BASE}/authorize?${q}`, { redirect: "manual", signal: AbortSignal.timeout(5000) });
+  const r = await fetch(`${BASE}/authorize?${q}`, { headers: ADDRESSED, redirect: "manual", signal: AbortSignal.timeout(5000) });
   return { status: r.status, location: r.headers.get("location"), text: await r.text() };
 }
 const isConsentPage = (r) => r.status === 200 && r.text.includes('action="/authorize-submit"');
@@ -142,7 +144,7 @@ async function complete(clientId, uri) {
   const pending = /name="pending_id" value="([^"]+)"/.exec(page.text)?.[1];
   const r = await fetch(`${BASE}/authorize-submit`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: { ...ADDRESSED, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ pending_id: pending, api_key: KEY }),
     redirect: "manual",
   });
@@ -217,7 +219,7 @@ await test("a caller-chosen client_name never appears, on the page or on its err
   assert.ok(pending, "no pending_id on the page");
   const again = await fetch(`${BASE}/authorize-submit`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: { ...ADDRESSED, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ pending_id: pending, api_key: "not-a-key" }),
     redirect: "manual",
   });

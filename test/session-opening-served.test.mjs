@@ -34,7 +34,6 @@ process.env.ADAS_API_URL = `http://127.0.0.1:${fakeApi.address().port}`;
 const PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 const SECRET = "served-opening-platform-secret";
-process.env.ATEAM_BASE_URL = BASE;
 process.env.CORE_MCP_SECRET = SECRET;
 delete process.env.ATEAM_OAUTH_DISABLED;
 const { startHttpServer } = await import("../src/http.js");

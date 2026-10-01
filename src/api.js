@@ -327,6 +327,38 @@ export function envForBaseUrl(url) {
 }
 
 /**
+ * EACH ENVIRONMENT'S HOSTED MCP, AND WHICH ONE A REQUEST ADDRESSED.
+ *
+ * An environment's MCP host is its API host with the "api" label swapped for
+ * "mcp" (api.<domain> ↔ mcp.<domain>, and the same for every prefixed entry).
+ * So the closed set of environments stays in KEY_ENVIRONMENTS alone, and the
+ * classifier stays envForBaseUrl: an addressed MCP host is mapped to its API
+ * base and classified there, as a url given to ateam_auth is.
+ *
+ * The HTTP transport's sign-in (oauth.js mountOAuth) publishes mcpUrlForEnv(env)
+ * for the environment envForMcpHost(req.hostname) names, never the request's
+ * own host. null means a host this server cannot name.
+ */
+const API_LABEL = /^((?:[a-z0-9]+-)?)api\./;
+const MCP_HOST = /^((?:[a-z0-9]+-)?)mcp\.([a-z0-9.-]+)$/;
+
+/** The origin of `env`'s hosted MCP, or null for an environment that has none. */
+export function mcpUrlForEnv(env) {
+  if (!Object.hasOwn(KEY_ENVIRONMENTS, env)) return null;
+  const url = new URL(KEY_ENVIRONMENTS[env]);
+  const mcpHost = url.hostname.replace(API_LABEL, "$1mcp.");
+  if (mcpHost === url.hostname) return null;
+  url.hostname = mcpHost;
+  return url.origin;
+}
+
+/** The environment whose hosted MCP is `hostname`, or null. */
+export function envForMcpHost(hostname) {
+  const m = MCP_HOST.exec(String(hostname ?? "").toLowerCase());
+  return m ? envForBaseUrl(`https://${m[1]}api.${m[2]}`) : null;
+}
+
+/**
  * A BASE AS A SERVED TEXT OR FIELD MAY SHOW IT. Production's host and a
  * self-hosted base as themselves; any other A-Team environment by its name only
  * ("the dev API"). Public text names no non-production host (Arie, 2026-10-01),

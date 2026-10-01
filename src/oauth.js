@@ -12,7 +12,7 @@ import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { InvalidTokenError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import { parseApiKey, clearAuthOverride } from "./api.js";
+import { parseApiKey, clearAuthOverride, KEY_ENVIRONMENTS, mcpUrlForEnv, envForMcpHost } from "./api.js";
 import { KEY_IS_THE_WORKSPACE, whereTheKeyIs, KEY_PAGE_URL } from "./signInSteps.js";
 
 // ─── TTLs ─────────────────────────────────────────────────────────
@@ -139,8 +139,12 @@ class ATeamClientsStore {
 
 // ─── OAuth Provider ───────────────────────────────────────────────
 
+// ONE PROVIDER PER ENVIRONMENT (mountOAuth): its sign-in page, its pending
+// sign-ins and the codes it issues belong to that environment's MCP host, so a
+// code is redeemed only at the issuer that issued it.
 class ATeamOAuthProvider {
-  constructor() {
+  constructor(environment) {
+    this.environment = environment;
     this._clientsStore = new ATeamClientsStore();
     this.codes = new Map();     // code -> { client, params, apiKey, expiresAt }
     this.pending = new Map();   // pendingId -> { client, params, expiresAt }
@@ -171,7 +175,7 @@ class ATeamOAuthProvider {
       expiresAt: Date.now() + PENDING_TTL,
     });
     res.setHeader("Content-Type", "text/html");
-    res.send(generateAuthPage(pendingId, requester));
+    res.send(generateAuthPage(pendingId, requester, { environment: this.environment }));
   }
 
   async challengeForAuthorizationCode(_client, authorizationCode) {
@@ -229,11 +233,14 @@ class ATeamOAuthProvider {
       expires_in: 3600,
     };
   }
+}
 
-  /**
-   * Validates that the token is a structurally valid adas_* API key.
-   * Returns AuthInfo matching the MCP SDK format.
-   */
+/**
+ * The bearer gate's verifier, the same on every host: a token is valid when it
+ * is a structurally valid adas_* API key. Returns AuthInfo in the MCP SDK's
+ * shape.
+ */
+const accessTokens = {
   async verifyAccessToken(token) {
     const parsed = parseApiKey(token);
     if (!parsed.isValid) throw new InvalidTokenError("Invalid access token");
@@ -246,8 +253,8 @@ class ATeamOAuthProvider {
         userId: parsed.tenant,
       },
     };
-  }
-}
+  },
+};
 
 // ─── Auth Page HTML ───────────────────────────────────────────────
 
@@ -255,8 +262,13 @@ class ATeamOAuthProvider {
 // words of signInSteps.js, with Core's key page linked. It said "Don't have a
 // key? Get your API key" (293c43b), a link to /get-api-key, which landed on
 // the app's home page: nothing in the app read the ?admin=tokens it sent.
-function keyHintHtml() {
-  const where = escapeHtml(whereTheKeyIs()).replace(
+// `environment` is the one the addressed host names (mountOAuth): production's
+// page links production's key page; any other environment's says "your
+// environment's own A-Team app", with no URL (signInSteps.js whereTheKeyIs).
+// It took no environment, so the dev MCP's page sent people to production for
+// a key.
+function keyHintHtml(environment) {
+  const where = escapeHtml(whereTheKeyIs(environment)).replace(
     escapeHtml(KEY_PAGE_URL),
     `<a href="${escapeHtml(KEY_PAGE_URL)}" target="_blank" rel="noopener">${escapeHtml(KEY_PAGE_URL)}</a>`,
   );
@@ -266,7 +278,7 @@ function keyHintHtml() {
 // `requester` is redirectRequester(redirect_uri): who the code goes to, by the
 // redirect's host. Never the client_name, which the caller chooses.
 // Exported so the page's words can be tested as rendered.
-export function generateAuthPage(pendingId, requester, error) {
+export function generateAuthPage(pendingId, requester, { error = null, environment = null } = {}) {
   const errorHtml = error
     ? `<div style="background:#3a1c1c;border:1px solid #7f1d1d;color:#fca5a5;padding:12px;border-radius:8px;margin-bottom:16px;font-size:14px">${escapeHtml(error)}</div>`
     : "";
@@ -348,7 +360,7 @@ export function generateAuthPage(pendingId, requester, error) {
       <input type="text" id="api_key" name="api_key"
              placeholder="adas_…" required autofocus
              autocomplete="off" spellcheck="false">
-      <div class="hint">${keyHintHtml()}</div>
+      <div class="hint">${keyHintHtml(environment)}</div>
       <div class="actions">
         <button type="submit" id="submitBtn" class="btn-primary">Authorize</button>
       </div>
@@ -381,88 +393,148 @@ function escapeHtml(str) {
 
 // ─── Mount OAuth Routes ───────────────────────────────────────────
 
+// Every path the sign-in serves. On a host this server cannot name, each one
+// answers 421 (refuseUnnamedHost) instead of falling through to the 404.
+const SIGN_IN_PATHS = [
+  "/.well-known/oauth-authorization-server",
+  "/.well-known/oauth-protected-resource",
+  "/authorize",
+  "/authorize-submit",
+  "/token",
+  "/register",
+];
+const isSignInPath = (path) => SIGN_IN_PATHS.some((p) => path === p || path.startsWith(`${p}/`));
+
+// RFC 9110 §15.5.20: this server will not answer for the host the request
+// named. No URL in it, and not the host it was sent.
+function refuseUnnamedHost(res) {
+  res.status(421).json({
+    error: "misdirected_request",
+    error_description: "This server signs in only on the A-Team MCP host it serves, and this request did not " +
+      "address one, so there is no sign-in here and no sign-in URL to give. Connect to the A-Team MCP by its own " +
+      "address, or send the key as an Authorization: Bearer header from the client's config.",
+  });
+}
+
 /**
- * Mounts OAuth2 discovery, authorization, token, and registration
- * endpoints on the Express app.
+ * Mounts OAuth2 discovery, authorization, token, and registration endpoints on
+ * the Express app — once for each environment this server can name.
+ *
+ * THE URLS BELONG TO THE HOST THE REQUEST ADDRESSED. They came from one
+ * process-wide base (ATEAM_BASE_URL, 293c43b), which the Dockerfile set to
+ * production's MCP, so the dev MCP's 401 challenge, metadata, issuer, and
+ * authorize and token endpoints all named production, and a browser sign-in
+ * started on dev bound a production workspace. Now each environment
+ * (KEY_ENVIRONMENTS, via mcpUrlForEnv) gets its own SDK router and provider,
+ * built from that environment's URL, and each request is dispatched by the
+ * environment its host names: req.hostname, which is X-Forwarded-Host under
+ * http.js's `trust proxy`, else Host, classified by envForMcpHost.
+ *
+ * A HOST THIS SERVER CANNOT NAME (a forged X-Forwarded-Host, a local run on
+ * localhost, a self-hosted domain) gets no browser sign-in: every sign-in path
+ * answers 421 with no URL, and the bearer gate's 401 names no metadata. It is
+ * never echoed and never given production's URLs. A client there sends the
+ * key as an Authorization: Bearer header, which the gate accepts on any host.
  *
  * @param {express.Application} app
- * @param {string} baseUrl - Public URL of the server (e.g. https://mcp.ateam-ai.com)
- * @returns {{ provider: ATeamOAuthProvider, bearerMiddlewareFor: (mountPath: string) => express.RequestHandler }}
+ * @returns {{ providers: Record<string, ATeamOAuthProvider>, bearerMiddlewareFor: (mountPath: string) => express.RequestHandler }}
  *   bearerMiddlewareFor("/") / ("/mcp"): the bearer gate for that mount, whose
- *   401 challenge names that mount's protected-resource metadata.
+ *   401 challenge names that mount's protected-resource metadata on the
+ *   addressed host, or none on a host this server cannot name.
  */
-export function mountOAuth(app, baseUrl) {
-  const serverUrl = new URL(baseUrl);
-  const provider = new ATeamOAuthProvider();
+export function mountOAuth(app) {
   // The PRM document for the resource mounted at `mountPath` ("/" or "/mcp").
   // The SDK's own rule: /.well-known/oauth-protected-resource + the resource's
   // path. One function for the route that serves it and the challenge that
   // points at it.
-  const prmUrlFor = (mountPath) => getOAuthProtectedResourceMetadataUrl(new URL(mountPath, serverUrl));
+  const prmUrlFor = (serverUrl, mountPath) => getOAuthProtectedResourceMetadataUrl(new URL(mountPath, serverUrl));
 
-  // Mount SDK OAuth router (/.well-known/*, /authorize, /token, /register)
-  // IMPORTANT: resourceServerUrl MUST match the connector URL that users configure
-  // in Claude.ai. Claude.ai validates resource == connector URL after token exchange.
-  // Connector URL is the root (https://mcp.ateam-ai.com), NOT /mcp.
-  app.use(mcpAuthRouter({
-    provider,
-    issuerUrl: serverUrl,
-    baseUrl: serverUrl,
-    resourceServerUrl: serverUrl,
-    resourceName: "A-Team MCP",
-    serviceDocumentationUrl: new URL("https://ateam-ai.com"),
-    scopesSupported: [],
-  }));
+  const hosts = new Map(); // environment → { provider, router, serverUrl }
+  for (const environment of Object.keys(KEY_ENVIRONMENTS)) {
+    const origin = mcpUrlForEnv(environment);
+    if (!origin) continue;
+    const serverUrl = new URL(origin);
+    const provider = new ATeamOAuthProvider(environment);
+    const router = express.Router();
 
-  // ─── PRM at /mcp path (RFC 9728 path-based discovery) ──────────────
-  // Claude.ai looks for /.well-known/oauth-protected-resource/mcp when
-  // connecting to /mcp. The SDK only serves PRM at the root resource path.
-  // Its URL comes from the same function as the challenge that points at it
-  // (prmUrlFor below), so the two cannot name different documents.
-  app.get(new URL(prmUrlFor("/mcp")).pathname, (_req, res) => {
-    res.json({
-      resource: new URL("/mcp", baseUrl).href,
-      authorization_servers: [serverUrl.href],
+    // SDK OAuth router (/.well-known/*, /authorize, /token, /register)
+    // IMPORTANT: resourceServerUrl MUST match the connector URL that users configure
+    // in Claude.ai. Claude.ai validates resource == connector URL after token exchange.
+    // Connector URL is the root (the MCP's origin), NOT /mcp.
+    router.use(mcpAuthRouter({
+      provider,
+      issuerUrl: serverUrl,
+      baseUrl: serverUrl,
+      resourceServerUrl: serverUrl,
+      resourceName: "A-Team MCP",
+      serviceDocumentationUrl: new URL("https://ateam-ai.com"),
+      scopesSupported: [],
+    }));
+
+    // ─── PRM at /mcp path (RFC 9728 path-based discovery) ────────────
+    // Claude.ai looks for /.well-known/oauth-protected-resource/mcp when
+    // connecting to /mcp. The SDK only serves PRM at the root resource path.
+    // Its URL comes from the same function as the challenge that points at it
+    // (prmUrlFor), so the two cannot name different documents.
+    router.get(new URL(prmUrlFor(serverUrl, "/mcp")).pathname, (_req, res) => {
+      res.json({
+        resource: new URL("/mcp", serverUrl).href,
+        authorization_servers: [serverUrl.href],
+      });
     });
-  });
 
-  // ─── Custom POST /authorize-submit — processes the auth page form ──
-  app.post("/authorize-submit", express.urlencoded({ extended: false }), (req, res) => {
-    const { pending_id, api_key } = req.body;
+    // ─── POST /authorize-submit — processes the auth page form ───────
+    router.post("/authorize-submit", express.urlencoded({ extended: false }), (req, res) => {
+      const { pending_id, api_key } = req.body;
 
-    const entry = provider.pending.get(pending_id);
-    if (!entry || entry.expiresAt < Date.now()) {
+      const entry = provider.pending.get(pending_id);
+      if (!entry || entry.expiresAt < Date.now()) {
+        provider.pending.delete(pending_id);
+        res.status(400).send(generateAuthPage("expired", null, {
+          environment,
+          error: "Authorization request expired. Please close this page and try connecting again.",
+        }));
+        return;
+      }
+
+      const parsed = parseApiKey(api_key);
+      if (!parsed.isValid) {
+        // Re-render the page with an error
+        res.status(400).send(generateAuthPage(pending_id, redirectRequester(entry.params.redirectUri), {
+          environment,
+          error: `That is not an A-Team API key. ${whereTheKeyIs(environment)}`,
+        }));
+        return;
+      }
+
+      // Generate one-time auth code
+      const code = randomUUID();
+      provider.codes.set(code, {
+        client: entry.client,
+        params: entry.params,
+        apiKey: api_key,
+        expiresAt: Date.now() + AUTH_CODE_TTL,
+      });
       provider.pending.delete(pending_id);
-      res.status(400).send(generateAuthPage("expired", null,
-        "Authorization request expired. Please close this page and try connecting again."));
-      return;
-    }
 
-    const parsed = parseApiKey(api_key);
-    if (!parsed.isValid) {
-      // Re-render the page with an error
-      res.status(400).send(generateAuthPage(pending_id, redirectRequester(entry.params.redirectUri),
-        `That is not an A-Team API key. ${whereTheKeyIs()}`));
-      return;
-    }
-
-    // Generate one-time auth code
-    const code = randomUUID();
-    provider.codes.set(code, {
-      client: entry.client,
-      params: entry.params,
-      apiKey: api_key,
-      expiresAt: Date.now() + AUTH_CODE_TTL,
+      // Redirect back to the client with the auth code
+      const redirectUrl = new URL(entry.params.redirectUri);
+      redirectUrl.searchParams.set("code", code);
+      if (entry.params.state) {
+        redirectUrl.searchParams.set("state", entry.params.state);
+      }
+      res.redirect(redirectUrl.toString());
     });
-    provider.pending.delete(pending_id);
 
-    // Redirect back to the client with the auth code
-    const redirectUrl = new URL(entry.params.redirectUri);
-    redirectUrl.searchParams.set("code", code);
-    if (entry.params.state) {
-      redirectUrl.searchParams.set("state", entry.params.state);
-    }
-    res.redirect(redirectUrl.toString());
+    hosts.set(environment, { provider, router, serverUrl });
+  }
+
+  // Dispatch by the addressed host. Every other path goes on untouched.
+  app.use((req, res, next) => {
+    const host = hosts.get(envForMcpHost(req.hostname));
+    if (host) return host.router(req, res, next);
+    if (isSignInPath(req.path)) return refuseUnnamedHost(res);
+    next();
   });
 
   // ─── Bearer middleware for MCP routes — one per mount ────────────
@@ -470,29 +542,39 @@ export function mountOAuth(app, baseUrl) {
   // (WWW-Authenticate resource_metadata, RFC 9728), and a client checks that
   // the document's `resource` is the URL it called (§3.3). So the challenge on
   // "/" points at the root PRM (resource = the root) and the challenge on
-  // "/mcp" at the /mcp PRM above (resource = …/mcp).
+  // "/mcp" at the /mcp PRM above (resource = …/mcp), on the addressed host.
   //
   // There was ONE middleware, pointing every challenge at the root PRM
   // (8661ca0). That was inert while "/mcp" never challenged; since 39ff024 made
   // "/mcp" strict, every anonymous /mcp request was sent to a document naming a
   // different resource than the one it asked for.
-  const bearerMiddlewareFor = (mountPath) => requireBearerAuth({
-    verifier: provider,
-    requiredScopes: [],
-    resourceMetadataUrl: prmUrlFor(mountPath),
-  });
+  //
+  // A host this server cannot name gets the same gate with no resource_metadata:
+  // the 401 still refuses, and points nowhere.
+  const bearerMiddlewareFor = (mountPath) => {
+    const gates = new Map([...hosts].map(([environment, { serverUrl }]) => [environment, requireBearerAuth({
+      verifier: accessTokens,
+      requiredScopes: [],
+      resourceMetadataUrl: prmUrlFor(serverUrl, mountPath),
+    })]));
+    const unnamed = requireBearerAuth({ verifier: accessTokens, requiredScopes: [] });
+    return (req, res, next) => (gates.get(envForMcpHost(req.hostname)) || unnamed)(req, res, next);
+  };
 
   // ─── Periodic cleanup of expired entries ────────────────────────
   const cleanup = setInterval(() => {
     const now = Date.now();
-    for (const [code, data] of provider.codes) {
-      if (data.expiresAt < now) provider.codes.delete(code);
-    }
-    for (const [id, data] of provider.pending) {
-      if (data.expiresAt < now) provider.pending.delete(id);
+    for (const { provider } of hosts.values()) {
+      for (const [code, data] of provider.codes) {
+        if (data.expiresAt < now) provider.codes.delete(code);
+      }
+      for (const [id, data] of provider.pending) {
+        if (data.expiresAt < now) provider.pending.delete(id);
+      }
     }
   }, 60_000);
   cleanup.unref();
 
-  return { provider, bearerMiddlewareFor };
+  const providers = Object.fromEntries([...hosts].map(([environment, { provider }]) => [environment, provider]));
+  return { providers, bearerMiddlewareFor };
 }

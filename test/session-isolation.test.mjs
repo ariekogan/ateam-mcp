@@ -191,7 +191,6 @@ const PORT_OPEN = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 const BASE_OPEN = `http://127.0.0.1:${PORT_OPEN}`;
 
-process.env.ATEAM_BASE_URL = BASE;               // OAuth issuer = self (no network)
 const { startHttpServer } = await import("../src/http.js");
 delete process.env.ATEAM_OAUTH_DISABLED;
 startHttpServer(PORT);                           // OAuth ON: what mac1 and prod run
@@ -203,10 +202,14 @@ await new Promise((r) => setTimeout(r, 400));
 const INIT = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } };
 const TOOLS_LIST = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
 
+// Every request addresses the production MCP host (X-Forwarded-Host), whose
+// metadata the challenge names (oauth.js mountOAuth); nothing leaves 127.0.0.1.
+const MCP_ORIGIN = "https://mcp.ateam-ai.com";
+const ADDRESSED = { "x-forwarded-host": new URL(MCP_ORIGIN).host };
 async function mcp(method, { path = "/mcp", base = BASE, headers = {}, body } = {}) {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+    headers: { ...ADDRESSED, "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(5000),
   });
@@ -225,7 +228,7 @@ const bearer = (b) => ({ authorization: `Bearer ${b}` });
 const challenged = (r) =>
   r.status === 401 &&
   /^Bearer /.test(r.www) &&
-  r.www.includes(`resource_metadata="${BASE}/.well-known/oauth-protected-resource${r.path === "/" ? "" : r.path}"`) &&
+  r.www.includes(`resource_metadata="${MCP_ORIGIN}/.well-known/oauth-protected-resource${r.path === "/" ? "" : r.path}"`) &&
   !r.sid;
 // Layer 2 answered: the session belongs to a different credential.
 const ownershipDenied = (r) => r.status === 401 && /"code":\s*-32001/.test(r.text) && /different credential/.test(r.text);
@@ -695,7 +698,7 @@ const ipHeaders = (ip) => ({ "x-forwarded-for": ip });
 async function exchange(key, ip) {
   const r = await fetch(`${BASE}/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", ...ipHeaders(ip) },
+    headers: { ...ADDRESSED, "content-type": "application/x-www-form-urlencoded", ...ipHeaders(ip) },
     body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: `rt_${key}`, client_id: "ateam-public" }),
     signal: AbortSignal.timeout(5000),
   });

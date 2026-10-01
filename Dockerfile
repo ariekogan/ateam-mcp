@@ -10,6 +10,4 @@ WORKDIR /app
 ARG ATEAM_MCP_VERSION=latest
 RUN npm init -y && npm install @ateam-ai/mcp@${ATEAM_MCP_VERSION}
 
-ENV ATEAM_BASE_URL=https://mcp.ateam-ai.com
-
 ENTRYPOINT ["node", "node_modules/@ateam-ai/mcp/src/index.js", "--http"]

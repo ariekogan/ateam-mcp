@@ -117,15 +117,16 @@ export function startHttpServer(port = 3100) {
   }
 
   // ─── OAuth setup ────────────────────────────────────────────────
+  // The issuer and every URL the sign-in publishes are those of the host each
+  // request addressed (oauth.js mountOAuth), not a configured base.
   const oauthDisabled = process.env.ATEAM_OAUTH_DISABLED === "1";
-  const baseUrl = process.env.ATEAM_BASE_URL || "https://mcp.ateam-ai.com";
 
   let bearerMiddlewareFor = null;
   if (!oauthDisabled) {
-    const oauth = mountOAuth(app, baseUrl);
+    const oauth = mountOAuth(app);
     bearerMiddlewareFor = oauth.bearerMiddlewareFor;
 
-    console.log(`  OAuth: enabled (issuer: ${baseUrl})`);
+    console.log("  OAuth: enabled (issuer: the A-Team MCP host each request addressed)");
   } else {
     console.log("  OAuth: disabled (ATEAM_OAUTH_DISABLED=1)");
   }
@@ -206,7 +207,8 @@ export function startHttpServer(port = 3100) {
   };
   const unlessPlatform = (mw) => (req, res, next) => (req.platformPrincipal ? next() : mw(req, res, next));
   // ONE rule on both mounts. Only the challenge differs: each names the
-  // protected-resource metadata for the URL the client called (see mountOAuth).
+  // protected-resource metadata for the URL the client called, on the host it
+  // addressed (see mountOAuth).
   //
   // NO TOKEN INJECTION. Until BUILDER-SEC-SIGNIN-P0 a middleware ran here,
   // BEFORE the bearer gate: it cached every /token response by client IP
