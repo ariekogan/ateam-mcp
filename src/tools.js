@@ -1231,12 +1231,14 @@ export const tools = [
     // wrote that store. This text is the one channel that reaches an agent
     // whose call never got an answer. That error names no cool-down time
     // (Core utils/circuitBreaker.js), so this does not promise one. The
-    // Builder matches words, not intent, so the conflicts sentence says so.
+    // Builder reports a conflict only for an unambiguous form and anything
+    // matched by words as words_to_check (Builder #109 round 3), so the text
+    // names both fields for what they are.
     description:
       "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. " +
       "If this call fails, your design is unchecked: do not write storage code on a store you picked before asking. ateam_get_spec('connector-multi-user') → storage_decision answers storage with no LLM (a failure the advisor answers carries it as `storage_decision`; on a 401 it may be cut — sign in and ask again for the full answer); retry after a short wait (a 'circuit open … cooling down' error names no time). " +
       "Describe what you're building; it returns POINTERS to the capabilities that fit (storage, widgets, triggers, sub-agents, mobile data, …), each with the ateam_get_spec topic to read next and the tool to wire it, plus 'missing' and lifecycle hints. " +
-      "`conflicts_with_platform_rules` lists words in your goal or design_state that name a store the platform forbids (matched by words, so a 'never /tmp' you wrote is listed too): check each against its rule. " +
+      "`conflicts_with_platform_rules` names a forbidden store your design plainly uses; `words_to_check` lists words that often mean one (a 'never /tmp' is listed too): check them against storage_decision. " +
       "ADVISORY ONLY — you own the design. Stateless: pass the current design_state each call. " +
       "`truncated: true` means the answer was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search.",
     inputSchema: {
