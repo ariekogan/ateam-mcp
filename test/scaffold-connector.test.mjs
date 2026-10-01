@@ -39,6 +39,12 @@ before(async () => {
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
       if (req.url.split("?")[0].endsWith("/upload")) uploads.push(JSON.parse(body || "{}"));
+      // A new connector: nothing authored, nothing deployed (create's existence check).
+      if (req.method === "GET" && req.url.split("?")[0].endsWith("/source")) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, code: "AUTHORED_SOURCE_MISSING", deployed_in_core: false }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, tools: 1 }));
     });
