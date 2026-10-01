@@ -44,6 +44,8 @@ test("TEST_RUNS_AS says what the Builder's /spec says", () => {
     /ateam_test_voice\) runs as the person only once the voice backend verifies the API key/,
     /Core follow-up/,
     /until then it is anonymous/,
+    // CORE review M41-3: a voice test given a phone_number reports the phone caller.
+    /until then it is anonymous — or, given a phone_number, the phone caller \(phone::<number>\) — and its ran_as says so/,
   ]) assert.match(TEST_RUNS_AS, rx);
   assert.ok(TEST_RUNS_AS.includes(RAN_AS_IN_REPLY), "RAN_AS_IN_REPLY must be a part of TEST_RUNS_AS, not a second wording");
 });

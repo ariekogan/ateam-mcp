@@ -130,21 +130,8 @@ import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused } from "./api.js";
 
-// A QUESTION ENDS THE CHAIN. sys.askUser finishes the job that asks (done,
-// still carrying state.pendingQuestion — Core cp.chain_api
-// getActiveChainsForActor), so chain_done is true while pending_question is
-// set. The answer is a NEW chain on the same actor_id, which Core's continuity
-// routing lands on the skill that asked: Core removed /api/job/:id/respond
-// (Chain Additions D2), and the web chat answers the same way. PRE-1
-// (2026-10-01) watched it live. ateam_conversation, ateam_chain_status and
-// bootstrap's conversation_flow each said "stop when chain_done === true (or
-// pending_question is set …)", which reads as two different ends of a poll and
-// says nothing about how to answer. This is the one wording; each renders it.
-// Arie, 2026-10-01: "human step is simply another message" — one plain
-// sentence, the same words the Builder's /spec/skill human_step_testing.rule
-// leads with.
-export const WAITING_ON_THE_USER =
-  "A step that waits for a person is just your next message: when pending_question is set, send ateam_conversation(same actor_id, the answer that person would give).";
+// A step that waits for a person: the Builder's human_step_testing words, verbatim.
+import { WAITING_ON_THE_USER, TEST_CONNECTOR_NEVER } from "./humanStep.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -2470,11 +2457,14 @@ export const tools = [
     // (179ecf1, 2026-03-22) — no word that the call skips the skill. On
     // 2026-09-28 a build (job_zare1ton, call #23) "tested" a person's
     // confirmation by calling invoice.confirm_held here with an amount nobody
-    // supplied. Who it runs as is what PRE-1 (2026-10-01) saw: the key's person.
+    // supplied. Who it runs as: the key's person — PRE-1 (2026-10-01) saw it
+    // only after a conversation had latched the session's actor; on a fresh
+    // session the Builder sent Core no actor and it ran as _system_service
+    // until Builder #115 (CORE review M41-1).
     description:
       "Call ONE tool on a running connector DIRECTLY and get its raw result — no skill, no guardrails, no user turn. It proves a tool's plumbing (arguments in, result out). " +
       "It can NOT prove a step that waits for a person — a confirmation, an approval, a value only the user knows: test those with ateam_conversation, multi-turn, playing the person with an input you wrote (ateam_get_spec('skill') → agent_guide.key_concepts.testing_and_runtime.human_step_testing). " +
-      "Never call a write tool here on a record your test did not create. " +
+      TEST_CONNECTOR_NEVER + " " +
       "This call runs as " + KEY_PERSON + ". " +
       "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",
     inputSchema: {

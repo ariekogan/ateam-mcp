@@ -25,15 +25,19 @@ import { setSessionCredentials } from "../src/api.js";
 import * as toolsModule from "../src/tools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
 import * as testRunsAs from "../src/testRunsAs.js";
+import * as humanStep from "../src/humanStep.js";
 
 const { tools, handleToolCall } = toolsModule;
 const tool = (name) => tools.find((t) => t.name === name);
 const description = (name) => tool(name).description;
 const waitingText = () => {
-  const text = toolsModule.WAITING_ON_THE_USER;
-  assert.equal(typeof text, "string", "tools.js exports no WAITING_ON_THE_USER — the one wording of what chain_done + pending_question means");
+  const text = humanStep.WAITING_ON_THE_USER;
+  assert.equal(typeof text, "string", "humanStep.js exports no WAITING_ON_THE_USER — the one wording of what chain_done + pending_question means");
   return text;
 };
+// The Builder's /spec/skill human_step_testing.never, byte for byte (#112) —
+// the one wording of what ateam_test_connector must never write.
+const NEVER = "Never call a write tool with ateam_test_connector on a record your test did not create.";
 
 test("ateam_test_connector: DIRECTLY, plumbing only, a person's step goes to ateam_conversation", () => {
   const d = description("ateam_test_connector");
@@ -43,7 +47,7 @@ test("ateam_test_connector: DIRECTLY, plumbing only, a person's step goes to ate
     "It can NOT prove a step that waits for a person",
     "ateam_conversation",
     "human_step_testing",
-    "Never call a write tool here on a record your test did not create",
+    NEVER,
     "NO_INDIVIDUAL_USER",
     "never a reason to change where",
     "storage_decision",
@@ -103,8 +107,25 @@ test("the tenant CLAUDE.md no longer says ateam_test_connector runs as _system_s
   const line = doc.split("\n").find((l) => l.includes("`ateam_test_connector`"));
   assert.ok(line, "CLAUDE.md has no ateam_test_connector pitfall");
   assert.doesNotMatch(line, /_system_service/);
-  assert.ok(line.includes(testRunsAs.KEY_PERSON), "the pitfall does not say who the call runs as");
+  assert.ok(line.includes(testRunsAs.TEST_RUNS_AS), "the pitfall does not say who the call runs as (TEST_RUNS_AS)");
   assert.match(line, /ateam_conversation/);
+});
+
+// CORE review M41-4: the rule had three wordings — "a write tool … on a record
+// your test did not create" here, "a commit tool … on a real record" on the
+// Builder, and a CLAUDE.md paraphrase. One wording now, the Builder's, rendered.
+test("what ateam_test_connector must never write: one wording, rendered in the description and CLAUDE.md", () => {
+  assert.equal(humanStep.TEST_CONNECTOR_NEVER, NEVER, "humanStep.js does not hold the Builder's human_step_testing.never");
+  const d = description("ateam_test_connector");
+  const doc = renderAgentDocHeader({ solution: { id: "walkmate", name: "Walkmate" }, skills: [], connectors: [] });
+  for (const [where, text] of [["ateam_test_connector description", d], ["CLAUDE.md", doc]]) {
+    assert.ok(text.includes(NEVER), `${where} does not render human_step_testing.never`);
+    assert.doesNotMatch(text, /Never call a (?:write|commit) tool (?:here )?on a|commit tool \(confirm/, `${where} still has another wording of the rule`);
+  }
+});
+
+test("TEST_RUNS_AS names ateam_test_connector among the tests that run as the key's person", () => {
+  assert.match(testRunsAs.TEST_RUNS_AS, /\(ateam_conversation, ateam_test_skill, ateam_test_connector, ateam_test_voice\) runs AS THE PERSON/);
 });
 
 // A stand-in Builder answering a conversation kickoff.
