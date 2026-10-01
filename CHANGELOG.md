@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### The browser sign-in belongs to the host the request addressed
+
+- The OAuth issuer, the `401` challenge's `resource_metadata`, the
+  protected-resource and authorization-server metadata, and the authorize and
+  token endpoints are now those of the MCP host the request addressed
+  (`X-Forwarded-Host`, else `Host`), for each environment the key table names.
+  They came from one process-wide `ATEAM_BASE_URL`, which the Dockerfile set to
+  production, so a browser sign-in started on a non-production MCP was sent to
+  production and bound a production workspace. `ATEAM_BASE_URL` is deleted
+  from the code and the Dockerfile; nothing reads it.
+- A host the server cannot name (a forged header, `localhost`, a self-hosted
+  domain) gets no browser sign-in: the sign-in paths answer `421` with no URL,
+  and the `401` challenge names no metadata. The host is never echoed, and it
+  is not given production's URLs. A client there sends the key as
+  `Authorization: Bearer <key>`.
+- The sign-in page links the production key page only on production; on any
+  other environment it says the key is on that environment's own A-Team app.
+- A sign-in's code is redeemed only on the host that issued it.
+
 ### Signing in, which workspace a session is on, and how to switch
 
 - Every tool needs a sign-in unless `src/publicTools.js` lists it (the docs,

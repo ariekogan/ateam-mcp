@@ -48,7 +48,7 @@ test("a new sign-in on the A-Team page drops the bearer's override", async () =>
 
   // The person signs in again on /authorize with their own key: the code the
   // page issued is exchanged for the token (exactly what the SDK's /token does).
-  const { provider } = mountOAuth(express(), "http://127.0.0.1:9");
+  const { providers: { prod: provider } } = mountOAuth(express());
   const client = { client_id: "ateam-public" };
   provider.codes.set("code-1", { client, params: { codeChallenge: "c", redirectUri: "http://localhost/cb" }, apiKey: BEARER, expiresAt: Date.now() + 60_000 });
   const tokens = await provider.exchangeAuthorizationCode(client, "code-1");

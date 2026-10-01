@@ -27,7 +27,6 @@ async function freePort() {
 }
 
 const PORT = await freePort();
-process.env.ATEAM_BASE_URL = `http://127.0.0.1:${PORT}`; // OAuth issuer = self (no network)
 const { startHttpServer } = await import("../src/http.js");
 const { MCP_VERSION } = await import("../src/tools.js");
 startHttpServer(PORT);

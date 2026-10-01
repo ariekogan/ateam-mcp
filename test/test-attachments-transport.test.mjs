@@ -126,7 +126,6 @@ async function freePort() {
 }
 const PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
-process.env.ATEAM_BASE_URL = BASE;
 process.env.ATEAM_OAUTH_DISABLED = "1";   // no bearer to mint here: the session is signed in below
 const { startHttpServer } = await import("../src/http.js");
 startHttpServer(PORT);
