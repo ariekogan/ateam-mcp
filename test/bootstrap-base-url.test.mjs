@@ -12,12 +12,16 @@
  * real environment from where its errors came back. The mirror image — being
  * told "dev" while pointed at prod — is the one that does damage.
  *
+ * Since #38 a non-production A-Team API is SHOWN by its name, not its host
+ * ("the dev API": public text names no non-production host), so the field is
+ * compared with shownBase of the base the request layer resolves.
+ *
  * Run: node --test test/bootstrap-base-url.test.mjs
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { handlers } from "../src/tools.js";
-import { setSessionCredentials, getBaseUrl } from "../src/api.js";
+import { setSessionCredentials, getBaseUrl, shownBase } from "../src/api.js";
 
 const DEV = "https://dev-api.ateam-ai.com";
 
@@ -27,8 +31,9 @@ describe("bootstrap reports the session's own API", () => {
     setSessionCredentials(sid, { apiKey: "adas_t_x", tenant: "t", apiUrl: DEV });
 
     const out = await handlers.ateam_bootstrap({}, sid);
-    assert.equal(out.runtime.base_url, DEV,
-      `bootstrap reported ${out.runtime.base_url} for a session authenticated to ${DEV}`);
+    assert.equal(out.runtime.base_url, shownBase(DEV),
+      `bootstrap reported ${out.runtime.base_url} for a session authenticated to the dev API`);
+    assert.notEqual(out.runtime.base_url, getBaseUrl("sess-nobody"), "a dev session was told the default (prod)");
   });
 
   test("it matches what every other call in that session actually uses", async () => {
@@ -38,7 +43,7 @@ describe("bootstrap reports the session's own API", () => {
     setSessionCredentials(sid, { apiKey: "adas_t_x", tenant: "t", apiUrl: DEV });
 
     const out = await handlers.ateam_bootstrap({}, sid);
-    assert.equal(out.runtime.base_url, getBaseUrl(sid));
+    assert.equal(out.runtime.base_url, shownBase(getBaseUrl(sid)));
   });
 
   test("a session with no explicit url still gets the default", async () => {

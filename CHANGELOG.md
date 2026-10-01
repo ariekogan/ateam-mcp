@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Signing in, which workspace a session is on, and how to switch
+
+- Every tool needs a sign-in unless `src/publicTools.js` lists it (the docs,
+  validation, `ateam_bootstrap`, `ateam_auth`). The gate allowed only a
+  hand-kept list of tenant tools, and fifteen later tools (promote, rollback,
+  repo writes among them) ran on an `ADAS_API_KEY` environment fallback that
+  is not a sign-in.
+- `ateam_bootstrap` opens with `session`, and the MCP server instructions open
+  with the same text: the workspace and environment the session is signed in
+  to and how to switch, or, signed out, how to sign in. The steps differ for
+  the hosted connector, a local (stdio) process, and the A-Team app's own
+  builder, and each gets its own; no person is named.
+- The steps live in `src/signInSteps.js` and are rendered in the sign-in
+  refusal, the 401/403 hints, every refusal for a solution or skill this
+  workspace does not have (which now says it may be in another workspace),
+  and the sign-in page. They link `https://mcp.ateam-ai.com`,
+  `https://claude.ai/customize/connectors` and the key page
+  `https://app.ateam-ai.com/connect`. Switching is signing in again on the
+  A-Team page with the other workspace's key.
+- `ateam_auth` keeps a key for a bearer's later sessions only when the API
+  accepted it, and a new sign-in on the A-Team page drops it.
+- An agent never asks for a key in the chat and never uses one pasted there.
+- `ateam_auth`'s `environment` and the opening give one answer (`unstated` for
+  a key that names none, the url itself for a self-hosted API). `/get-api-key`
+  redirects to the key page.
+- An `ADAS_API_KEY` in the environment is never sent: a signed-out session's
+  public tools (validation) went out with it, and the Builder read and billed
+  that key's tenant. A refused `ateam_auth` leaves the session exactly as it was.
+- A session on a non-production A-Team API is shown it by name ("the dev API"),
+  never by host, in `base_url`, `_where` and error messages.
+
 ### Security
 
 - `ateam_delete_solution` no longer lets `solution_id` carry `?force=true`.
@@ -77,11 +108,6 @@
   `ateam_spec_search` and `ateam_bootstrap` return `served_by`: `prod` or
   `dev`, the environment whose API answered (the base URL itself for any
   other host). It is derived from the base the call went to, never configured.
-- `ateam_auth` and the sign-in refusal no longer send the user to fetch a key
-  for the agent. They say to connect through the hosted connector
-  (`https://mcp.ateam-ai.com`) and authorize in the browser; `ateam_auth` is
-  for a local setup. The texts say the key's `adas_<env>_` prefix picks the
-  environment and `url` is only for a host that is neither.
 - `ateam_create_plugin` no longer says to declare the plugin in
   `solution.ui_plugins[]`: the deploy merges what it discovers. Bootstrap says
   `platform_connectors` can carry the solution's own connectors

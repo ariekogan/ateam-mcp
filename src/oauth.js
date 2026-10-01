@@ -12,7 +12,8 @@ import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { InvalidTokenError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import { parseApiKey } from "./api.js";
+import { parseApiKey, clearAuthOverride } from "./api.js";
+import { KEY_IS_THE_WORKSPACE, whereTheKeyIs, KEY_PAGE_URL } from "./signInSteps.js";
 
 // ─── TTLs ─────────────────────────────────────────────────────────
 const AUTH_CODE_TTL = 5 * 60 * 1000;   // 5 minutes
@@ -194,6 +195,12 @@ class ATeamOAuthProvider {
     // One-time use
     this.codes.delete(authorizationCode);
 
+    // A NEW SIGN-IN ON THIS PAGE IS THE WORKSPACE THE PERSON CHOSE. An
+    // ateam_auth override kept for this key (api.js setAuthOverride) would put
+    // every new session of it back on the workspace that override names, so a
+    // person who signed in again to get back to this key's workspace did not.
+    clearAuthOverride(entry.apiKey);
+
     // PHASE-1: the access token is the RAW tenant key the person typed, and the
     // refresh token is rt_<that key>. Phase 1 of the agent sign-in design
     // (Core Docs/handoff/2026-09-27-agent-signin) replaces both with a
@@ -244,9 +251,22 @@ class ATeamOAuthProvider {
 
 // ─── Auth Page HTML ───────────────────────────────────────────────
 
+// Under the key field: the key picks the workspace, and where a key is — the
+// words of signInSteps.js, with Core's key page linked. It said "Don't have a
+// key? Get your API key" (293c43b), a link to /get-api-key, which landed on
+// the app's home page: nothing in the app read the ?admin=tokens it sent.
+function keyHintHtml() {
+  const where = escapeHtml(whereTheKeyIs()).replace(
+    escapeHtml(KEY_PAGE_URL),
+    `<a href="${escapeHtml(KEY_PAGE_URL)}" target="_blank" rel="noopener">${escapeHtml(KEY_PAGE_URL)}</a>`,
+  );
+  return `${escapeHtml(KEY_IS_THE_WORKSPACE)} ${where}`;
+}
+
 // `requester` is redirectRequester(redirect_uri): who the code goes to, by the
 // redirect's host. Never the client_name, which the caller chooses.
-function generateAuthPage(pendingId, requester, error) {
+// Exported so the page's words can be tested as rendered.
+export function generateAuthPage(pendingId, requester, error) {
   const errorHtml = error
     ? `<div style="background:#3a1c1c;border:1px solid #7f1d1d;color:#fca5a5;padding:12px;border-radius:8px;margin-bottom:16px;font-size:14px">${escapeHtml(error)}</div>`
     : "";
@@ -318,20 +338,17 @@ function generateAuthPage(pendingId, requester, error) {
     <div class="logo">A-Team</div>
     <div class="subtitle">
       ${requester
-        ? `<span class="client-name">${escapeHtml(requester.name)}</span> (<span class="client-host">${escapeHtml(requester.host)}</span>) wants to connect to your A-Team account`
-        : "Connect to your A-Team account"}
+        ? `<span class="client-name">${escapeHtml(requester.name)}</span> (<span class="client-host">${escapeHtml(requester.host)}</span>) wants to connect to an A-Team workspace`
+        : "Connect to an A-Team workspace"}
     </div>
     ${errorHtml}
     <form id="authForm" method="POST" action="/authorize-submit">
       <input type="hidden" name="pending_id" value="${escapeHtml(pendingId)}">
       <label for="api_key">API Key</label>
       <input type="text" id="api_key" name="api_key"
-             placeholder="adas_tenant_abc123..." required autofocus
+             placeholder="adas_…" required autofocus
              autocomplete="off" spellcheck="false">
-      <div class="hint">
-        Don't have a key?
-        <a href="/get-api-key" target="_blank">Get your API key</a>
-      </div>
+      <div class="hint">${keyHintHtml()}</div>
       <div class="actions">
         <button type="submit" id="submitBtn" class="btn-primary">Authorize</button>
       </div>
@@ -425,7 +442,7 @@ export function mountOAuth(app, baseUrl) {
     if (!parsed.isValid) {
       // Re-render the page with an error
       res.status(400).send(generateAuthPage(pending_id, redirectRequester(entry.params.redirectUri),
-        "Invalid API key format. Keys look like: adas_tenant_abc123..."));
+        `That is not an A-Team API key. ${whereTheKeyIs()}`));
       return;
     }
 

@@ -4,8 +4,9 @@
  * Credentials resolve in this order:
  *   1. Per-session record (set via ateam_auth, or seeded from the bearer), as
  *      the CURRENT TOOL CALL sees it — see runToolCall
- *   2. Environment variables (ADAS_API_KEY, ADAS_TENANT — used by stdio transport)
- *   3. Nothing: no key and no tenant. There is no default tenant.
+ *   2. Nothing: no key and no tenant. There is no default tenant, and no
+ *      environment key: ADAS_API_KEY / ADAS_TENANT do not sign a session in
+ *      and are never sent (see getCredentials).
  *
  * Sessions also track activity timestamps and optional context (active solution,
  * last skill) to support TTL-based cleanup and smarter UX.
@@ -13,11 +14,11 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+// Signing in and switching workspace: ONE statement of the steps (formatError renders them).
+import { connectSteps, switchSteps, notInThisWorkspace } from "./signInSteps.js";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
-const ENV_TENANT = process.env.ADAS_TENANT || "";
-const ENV_API_KEY = process.env.ADAS_API_KEY || "";
 
 // Request timeout (120 seconds — deploys can take 60-90s)
 const REQUEST_TIMEOUT_MS = 120_000;
@@ -112,8 +113,10 @@ function adoptRecord(sessionId, record) {
 // Each user has a unique bearer. MCP clients create new sessions per tool call,
 // so we use the bearer as the persistent actor identity.
 //
-// When a user calls ateam_auth to override (e.g., switch tenants), the override
-// is stored per bearer and applied to all future sessions from that user.
+// When ateam_auth signs a bearer's session in to another key, and that key is
+// ACCEPTED, the override is stored per bearer and applied to all future
+// sessions of it, until it expires or a new sign-in on the A-Team page
+// (/authorize) for that bearer drops it (clearAuthOverride).
 const authOverrides = new Map();  // bearerToken → { tenant, apiKey, updatedAt }
 // sessionId → the session's OWNER: its bearer string, or PLATFORM_PRINCIPAL.
 // denySessionReuse (src/http.js) compares every request against it.
@@ -284,12 +287,12 @@ export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
   });
   const text = await res.text().catch(() => "");
   if (!res.ok) {
-    throw new Error(`whoami failed at ${baseUrl} (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    throw new Error(`whoami failed at ${shownBase(baseUrl)} (HTTP ${res.status}): ${text.slice(0, 300)}`);
   }
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${baseUrl}: ${text.slice(0, 200)}`); }
+  try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${shownBase(baseUrl)}: ${text.slice(0, 200)}`); }
   if (!json?.ok || !json?.tenant) {
-    throw new Error(`whoami did not name a tenant at ${baseUrl}: ${text.slice(0, 300)}`);
+    throw new Error(`whoami did not name a tenant at ${shownBase(baseUrl)}: ${text.slice(0, 300)}`);
   }
   return { tenant: json.tenant, env: json.env ?? null };
 }
@@ -315,6 +318,18 @@ export function envForBaseUrl(url) {
     if (norm === base) return env;
   }
   return null;
+}
+
+/**
+ * A BASE AS A SERVED TEXT OR FIELD MAY SHOW IT. Production's host and a
+ * self-hosted base as themselves; any other A-Team environment by its name only
+ * ("the dev API"). Public text names no non-production host (Arie, 2026-10-01),
+ * and that covers what a session on one is served: base_url, error targets,
+ * _where. Routing still uses the real base (getBaseUrl); this is display only.
+ */
+export function shownBase(base) {
+  const env = envForBaseUrl(base);
+  return env && env !== "prod" ? `the ${env} API` : base;
 }
 
 /**
@@ -485,50 +500,29 @@ export function isMasterMode(sessionId) {
 }
 
 /**
- * Get credentials for a session, falling back to env vars.
- * Resolution order:
- *   1. Per-session (from ateam_auth or seedCredentials)
- *   2. Environment variables (ADAS_API_KEY, ADAS_TENANT)
+ * THE CREDENTIALS A REQUEST CARRIES: the session's own record (ateam_auth, or
+ * the bearer seeded by http.js), and nothing else.
+ *
+ * It fell back to ADAS_API_KEY / ADAS_TENANT for a session with no record
+ * (3d8ec1c, 4fbe006). The auth gate never counted that as a sign-in, so the
+ * fallback served only the tools the gate let through — and a signed-out
+ * session's ateam_validate_solution went out with the environment's key: the
+ * Builder verified it, read that tenant's state and billed an LLM call to it.
+ * A key in the environment is no longer sent anywhere; envApiKeyPresent()
+ * only lets the refusal say it was found and why it does not count.
  */
 export function getCredentials(sessionId) {
-  // 1. Per-session credentials
   const session = sessionRecord(sessionId);
   if (session) {
     return { tenant: session.tenant, apiKey: session.apiKey };
   }
-
-  // 2. Environment variables
-  const apiKey = ENV_API_KEY || "";
-  let tenant = ENV_TENANT;
-  if (!tenant && apiKey) {
-    const parsed = parseApiKey(apiKey);
-    if (parsed.tenant) tenant = parsed.tenant;
-  }
-  // If apiKey is present but tenant couldn't be derived, the key is malformed.
-  // Previously fell back to "main" — this silently routed credentials to the
-  // wrong tenant. Now we fail loudly.
-  //
-  // UNLESS THE KEY IS SEALED, where no tenant in the string is the design and
-  // not a defect. Same split as setSessionCredentials: "not stated" is not
-  // "wrong". Requests still authenticate, because the tenant is inside the key
-  // and Core reads it; headers() omits X-ADAS-TENANT rather than guessing one.
-  if (apiKey && !tenant && !parseApiKey(apiKey).sealed) {
-    throw new Error(
-      `getCredentials: apiKey is present (env ADAS_API_KEY) but tenant could not be resolved ` +
-      `(missing ADAS_TENANT env and apiKey is malformed — expected format adas_<env>_<key>). ` +
-      `Refusing to fall back to a default tenant.`
-    );
-  }
-  // No apiKey at all = unauthenticated; return nulls (callers check apiKey.length).
-  return { tenant: tenant || null, apiKey };
+  // No record: not signed in. No key, no tenant (callers check apiKey.length).
+  return { tenant: null, apiKey: "" };
 }
 
-/**
- * Check if a session is authenticated (has an API key from any source).
- */
-export function isAuthenticated(sessionId) {
-  const { apiKey } = getCredentials(sessionId);
-  return apiKey.length > 0;
+/** Is there an ADAS_API_KEY in this process's environment? For the refusal text only — it signs nothing in. */
+export function envApiKeyPresent() {
+  return Boolean(process.env.ADAS_API_KEY);
 }
 
 /**
@@ -544,6 +538,60 @@ export function isExplicitlyAuthenticated(sessionId) {
   if (session?.authExplicit) return true;
   // Bearer has an active auth override from a previous session's ateam_auth
   return hasBearerAuth(sessionId);
+}
+
+/**
+ * WHICH ENVIRONMENT THIS SESSION'S SIGN-IN IS ON — one answer, read by
+ * ateam_auth's `environment` and by the `session` opening of ateam_bootstrap
+ * and the server instructions. They disagreed for a key that names no
+ * environment: ateam_auth said "unstated" while the opening said "prod",
+ * because the opening read served_by.
+ *
+ * The environment the key names; else the one the session's url names (a url
+ * given to ateam_auth, or kept from an earlier sign-in — the base its calls go
+ * to), or that url itself for a host that is neither; else "unstated". A key
+ * that names none lands on this server's default API, and calling that "prod"
+ * would turn a default into a claim.
+ *
+ * served_by answers a different question — which API answered a call — and
+ * stays separate (servedBy).
+ * @returns {string} "prod" | "dev" | a self-hosted base | "unstated"
+ */
+export function sessionEnvironment(sessionId) {
+  const record = sessionRecord(sessionId);
+  const keyEnv = parseApiKey(record?.apiKey).env;
+  if (keyEnv) return keyEnv;
+  // A url that is neither A-Team environment (localhost, a self-hosted
+  // deployment) is named by itself, as served_by names it: "unstated" would
+  // hide where the calls go.
+  return envForBaseUrl(record?.apiUrl) || record?.apiUrl || "unstated";
+}
+
+/**
+ * HOW THIS SESSION SIGNS IN AND MOVES — the facts signInSteps.js renders its
+ * steps from, read in one place:
+ *   - audience: "platform" for a session owned by PLATFORM_PRINCIPAL (the A-Team
+ *     app's builder, via ateam-proxy-mcp); else "stdio" when the call (or the
+ *     server being built) is on stdio — callTransport, the transport's own
+ *     owner; else "hosted". A null transport is NOT local (callTransport).
+ *   - signedIn: the gate's own test (isExplicitlyAuthenticated);
+ *   - tenant, environment (sessionEnvironment), masterMode.
+ * @param {string} sessionId
+ * @param {{ transport?: string|null }} [opts] — for a caller outside a tool call (createServer).
+ */
+export function signInContext(sessionId, { transport = callTransport() } = {}) {
+  const audience = sessionOwners.get(sessionId) === PLATFORM_PRINCIPAL ? "platform"
+    : transport === "stdio" ? "stdio"
+    : "hosted";
+  const signedIn = isExplicitlyAuthenticated(sessionId);
+  const record = signedIn ? sessionRecord(sessionId) : null;
+  return {
+    audience,
+    signedIn,
+    tenant: record?.tenant || null,
+    environment: signedIn ? sessionEnvironment(sessionId) : null,
+    masterMode: !!record?.masterKey,
+  };
 }
 
 /**
@@ -691,6 +739,32 @@ export function resetPlatformSession(sessionId) {
 }
 
 /**
+ * A REFUSED SIGN-IN CHANGES NOTHING. ateam_auth writes the new key into the
+ * session so its check request carries it; call this first, and call what it
+ * returns if the API refuses the key: the session — and this call — are back on
+ * exactly the record they had. It left a stdio session on the refused key, and
+ * the session's opening then said it was signed in.
+ *
+ * Only what THIS sign-in wrote is taken back: if another call signed the
+ * session in meanwhile (the store no longer holds this call's record), that
+ * sign-in stays. A platform session was reset before this (resetPlatformSession),
+ * so for it "as it was" is signed out, as that function documents.
+ */
+export function beginSignIn(sessionId) {
+  const call = toolCall.getStore();
+  const inCall = !!call && call.sessionId === sessionId;
+  const before = sessions.get(sessionId) || null;
+  const callBefore = inCall ? call.record : null;
+  return function refused() {
+    if (!inCall || (sessions.get(sessionId) || null) === call.record) {
+      if (before) sessions.set(sessionId, before);
+      else sessions.delete(sessionId);
+    }
+    if (inCall) call.record = callBefore;
+  };
+}
+
+/**
  * The owner a session is bound to — a bearer string or PLATFORM_PRINCIPAL — or
  * null if there is none. Used by the HTTP transport to enforce that a bound
  * session can only be reused by a request presenting the SAME owner: a
@@ -762,6 +836,20 @@ export function getAuthOverride(bearerToken) {
 }
 
 /**
+ * A NEW SIGN-IN ON THE A-TEAM PAGE DROPS THE OVERRIDE KEPT FOR THAT KEY.
+ * Called when /authorize issues a token (oauth.js exchangeAuthorizationCode).
+ * An override is per bearer and re-applied to every new session of it
+ * (http.js seedCredentials) for SESSION_TTL, so without this a user who signed
+ * in again with their key — to get back to its workspace — stayed on the
+ * workspace an earlier ateam_auth had moved that bearer to.
+ */
+export function clearAuthOverride(bearerToken) {
+  if (bearerToken && authOverrides.delete(bearerToken)) {
+    console.log("[Auth] Override dropped for bearer: a new sign-in on the A-Team page");
+  }
+}
+
+/**
  * Get the base URL for a session. Resolution order:
  *   1. Per-session apiUrl (set via ateam_auth url parameter)
  *   2. Bearer auth override apiUrl
@@ -793,7 +881,7 @@ export function getBaseUrl(sessionId) {
  *   dev-api.ateam-ai.com      → dev-app.ateam-ai.com      (our internal dev)
  *   anything else (self-host) → best-effort api→app swap, or the base itself
  */
-function apiToAppUrl(baseUrl) {
+export function apiToAppUrl(baseUrl) {
   try {
     const u = new URL(baseUrl);
     // host swaps: <x>api.<domain> → <x>app.<domain>; "api." prefix → "app."
@@ -827,7 +915,10 @@ export function getWhere(sessionId) {
   // resolved host actually looks public. Otherwise `_where` is just the
   // tenant, which is the part that is solution-scoped and that the agent
   // genuinely needs. (Arie, 2026-08-21, reading a raw error panel.)
-  const appUrl = apiToAppUrl(getBaseUrl(sessionId));
+  // A non-production A-Team environment's app is not named (shownBase).
+  const base = getBaseUrl(sessionId);
+  if (shownBase(base) !== base) return tenant ? { tenant } : {};
+  const appUrl = apiToAppUrl(base);
   const isPublic = /^https?:\/\/[^/]*\./.test(appUrl || "") && !/^https?:\/\/(localhost|127\.|\[?::1)/i.test(appUrl || "");
   if (!isPublic) return tenant ? { tenant } : {};
   return {
@@ -992,12 +1083,46 @@ export function actorNotFound(status, body) {
 }
 
 /**
+ * Does this 404 body say that a SOLUTION or SKILL is missing (as opposed to a
+ * file, job or connector inside one)? Read like actorNotFound: the structured
+ * code, or the top-level error/message sentence, never a token anywhere.
+ */
+const SOLUTION_OR_SKILL_MISSING_RX = /\b(?:solution|skill)\b[^.]{0,80}?\bnot found\b|^no (?:solution|skill)\b/i;
+function solutionOrSkillMissing(body) {
+  let obj = body && typeof body === "object" ? body : null;
+  if (!obj && typeof body === "string") {
+    try { obj = JSON.parse(body); } catch { return SOLUTION_OR_SKILL_MISSING_RX.test(body.trim()); }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  if (obj.code === "SOLUTION_NOT_FOUND" || obj.code === "SKILL_NOT_FOUND") return true;
+  if (obj.code) return false;
+  const said = [obj.error, obj.message].find((v) => typeof v === "string") || "";
+  return SOLUTION_OR_SKILL_MISSING_RX.test(said);
+}
+
+/**
  * Format an API error into a user-friendly message with actionable hints.
  *
  * Exported so the hints can be TESTED as behaviour rather than as source text.
  * A test that greps for the right-looking code passes on code that never runs.
  */
-export function formatError(method, path, status, body, baseUrl, { read = method === "GET" } = {}) {
+export function formatError(method, path, status, body, baseUrl, { read = method === "GET", signIn = null, refusedSignIn = false } = {}) {
+  // How this session signs in or moves (signInContext): request() passes it.
+  // A direct caller that passes none is told the hosted steps, with the
+  // environment of the base it called.
+  const ctx = signIn || { audience: "hosted", signedIn: true, environment: envForBaseUrl(baseUrl) || baseUrl || null };
+  // The base as a served text may show it (shownBase): no non-production host.
+  const shown = baseUrl ? shownBase(baseUrl) : baseUrl;
+  // A key given to ateam_auth that the API refused: ctx is the session AFTER
+  // beginSignIn put it back, so it says where the session still stands. The
+  // 401 text below is for a key the session signed in with, which this is not.
+  const signInRefused = () => {
+    const stands = ctx.signedIn
+      ? `still signed in to ${ctx.tenant ? `workspace "${ctx.tenant}"` : "the workspace it was on"}`
+      : "still not signed in";
+    return `The API refused the key given to ateam_auth (rotated, revoked, or not a key for this API). Nothing changed: this session is ${stands}.\n` +
+      (ctx.signedIn ? switchSteps(ctx) : connectSteps(ctx));
+  };
   // A WRITE IS NOT "TRY AGAIN IN A MINUTE". request() does not re-send one
   // that may have reached the server, and a hint telling the caller to re-send
   // it would undo that: it may already have run.
@@ -1006,8 +1131,15 @@ export function formatError(method, path, status, body, baseUrl, { read = method
     : "The call was not re-sent: check whether it took effect before issuing it again.";
   const hints = {
     400: "Bad request — see the error details above for what to fix.",
-    401: "Your API key may be invalid or expired. Get a valid key at https://mcp.ateam-ai.com/get-api-key then call ateam_auth(api_key: \"your_key\").",
-    403: "You don't have permission for this operation. Check your tenant and API key. Get a key at https://mcp.ateam-ai.com/get-api-key",
+    // 401/403 sent the user to …/get-api-key to bring the agent a key for
+    // ateam_auth (c6e7275): the agent asking for a key. The steps are
+    // signInSteps.js's, word for word, for how THIS session is connected.
+    401: refusedSignIn ? signInRefused()
+      : ctx.signedIn
+      ? `The API refused the key this session signed in with: it may have been rotated.\n${switchSteps(ctx)}`
+      : `The API refused this call: this session is not signed in to a workspace.\n${connectSteps(ctx)}`,
+    403: refusedSignIn ? signInRefused()
+      : `This key is not allowed to do this here. A key acts only in its own workspace; if the user meant another one:\n${switchSteps(ctx)}`,
     404: "Resource not found. Check the solution_id or skill_id you're using. Use ateam_list_solutions to see available solutions.",
     409: "Conflict — the resource may already exist or is in a conflicting state.",
     422: "Validation failed. Check the request payload against the spec (use ateam_get_spec).",
@@ -1019,8 +1151,9 @@ export function formatError(method, path, status, body, baseUrl, { read = method
 
   // A 401 IS NOT ALWAYS AN AUTH PROBLEM, AND SAYING SO COSTS A RUN.
   //
-  // The table below attaches "your API key may be invalid or expired — get a
-  // new key and call ateam_auth" to EVERY 401, by status code, never by cause.
+  // The table above answers EVERY 401 with a sign-in hint, by status code,
+  // never by cause (from c6e7275 to #38 that hint read "your API key may be
+  // invalid or expired — get a new key and call ateam_auth").
   // Core also returns 401 for `Actor "X" not found`, where the key is perfectly
   // valid and the actor is the problem. A PROD agent believed that hint this
   // morning, stopped, and asked the admin to paste an API key — for an error
@@ -1062,7 +1195,7 @@ export function formatError(method, path, status, body, baseUrl, { read = method
     const topic = String(path).replace(/^\/spec\/?/, "") || "(index)";
     hints[404] =
       `Nothing to do with solutions — /spec takes no solution_id or skill_id. The A-Team API at ` +
-      `${baseUrl || "this URL"} does not serve the topic "${topic}". Either the topic name is wrong (ateam_get_spec ` +
+      `${shown || "this URL"} does not serve the topic "${topic}". Either the topic name is wrong (ateam_get_spec ` +
       `with topic:"overview" lists what this deployment has), or this backend is OLDER than the tool you are ` +
       `calling from and the topic has not been deployed here yet. Retrying will not change either.`;
   }
@@ -1090,7 +1223,7 @@ export function formatError(method, path, status, body, baseUrl, { read = method
       const name = m[1] || m[2];
       hints[status] =
         `CONFIGURATION, not an outage: the server reports ${name} is not set. Retrying will not help and nothing is down — ` +
-        `this needs ${name} configured on the A-Team backend serving ${baseUrl || "this API"}. Other tools are unaffected.`;
+        `this needs ${name} configured on the A-Team backend serving ${shown || "this API"}. Other tools are unaffected.`;
     }
   }
 
@@ -1127,6 +1260,20 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // agent went hunting for a missing solution three times.
   const hasSpecificHint = /"code"\s*:/.test(bodyStr) && /"hint"\s*:/.test(bodyStr);
   const hint = hasSpecificHint ? "" : (hints[status] || "");
+  // A SOLUTION THIS WORKSPACE DOES NOT HAVE MAY BE IN ANOTHER ONE. Both 404
+  // hints — the table's "check the solution_id" and the Builder's own
+  // SOLUTION_NOT_FOUND hint ("this tenant has: …, use one of those ids") — read
+  // as "pick from what is here", so a user signed in to the wrong workspace was
+  // steered to a look-alike. This adds the cause neither can see; it
+  // contradicts neither, so it follows a specific hint too.
+  //
+  // Only where the BODY says a solution or skill is missing: the not-found
+  // codes, or a top-level error/message such as Core's "Skill 'x' not found" or
+  // the Builder's "Solution not found in Builder". Not on any 404 under a
+  // solution's path: a missing file, job or connector inside a solution that
+  // exists is not in another workspace, and a patch's NO_MATCH names its own
+  // cause.
+  const solutionMissing = status === 404 && solutionOrSkillMissing(body);
   // Truncated, never dropped. Before 4b36c4d a body of 2000+ chars was dropped
   // ENTIRELY, so the richer the error the less the caller was told — a 422
   // carrying the full diagnosis (ui.surfaceProbe's failures) arrived as a bare
@@ -1137,10 +1284,11 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // configurable base (prod default, dev/self-host overrides), so a bare
   // "POST /deploy/..." 404 is ambiguous: is the route missing, or did the
   // request go to the wrong base? The full URL disambiguates instantly.
-  const target = baseUrl ? `${baseUrl}${path}` : path;
+  const target = baseUrl ? (shown === baseUrl ? `${baseUrl}${path}` : `${path} on ${shown}`) : path;
   let msg = `A-Team API error: ${method} ${target} returned ${status}`;
   if (detail) msg += ` — ${detail}`;
   if (hint) msg += `\nHint: ${hint}`;
+  if (solutionMissing) msg += `\n${notInThisWorkspace(ctx)}`;
 
   return msg;
 }
@@ -1265,6 +1413,9 @@ async function request(method, path, body, sessionId, opts = {}) {
     await new Promise(r => setTimeout(r, wait));
   };
   const baseUrl = getBaseUrl(sessionId);
+  // What the messages below may show of it (shownBase): no non-production host.
+  const shown = shownBase(baseUrl);
+  const health = shown === baseUrl ? `${baseUrl}/health` : `/health on ${shown}`;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
@@ -1311,7 +1462,7 @@ async function request(method, path, body, sessionId, opts = {}) {
         // Attach the HTTP status so callers can distinguish a genuine 404
         // (resource absent) from a transient/5xx failure. ateam_patch relies
         // on this to NOT scaffold-clobber an existing skill on a read error.
-        const e = new Error(formatError(method, path, res.status, text, baseUrl, { read: isRead(method, opts.idempotent) }));
+        const e = new Error(formatError(method, path, res.status, text, baseUrl, { read: isRead(method, opts.idempotent), signIn: signInContext(sessionId) }));
         e.status = res.status;
         // Keep the RAW body on the error. formatError truncates for humans, and
         // an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe's 422
@@ -1336,7 +1487,7 @@ async function request(method, path, body, sessionId, opts = {}) {
       return res.text().then((text) => {
         if (text.trim()) return JSON.parse(text);
         throw Object.assign(new Error(
-          `A-Team API ${method} ${path} answered ${res.status} with an empty body: there is no result to read (server: ${baseUrl}).\n` +
+          `A-Team API ${method} ${path} answered ${res.status} with an empty body: there is no result to read (server: ${shown}).\n` +
           `Hint: the server answered success with no body.` +
           (isRead(method, opts.idempotent) ? "" : " This write was not re-sent, and it may have taken effect: check before issuing it again.")
         ), { code: "EMPTY_RESPONSE", status: res.status, method, path, body: text });
@@ -1350,7 +1501,7 @@ async function request(method, path, body, sessionId, opts = {}) {
         const t = new Error(
           `A-Team API timeout: ${method} ${path} did not respond within ${timeoutMs / 1000}s.\n` +
           (isRead(method, opts.idempotent) ? "" : "It was NOT re-sent: a write that got no answer may still have run. Check its effect before issuing it again.\n") +
-          `Hint: The A-Team API at ${baseUrl} may be down. Check ${baseUrl}/health`
+          `Hint: The A-Team API at ${shown} may be down. Check ${health}`
         );
         t.timedOut = true; // read by isTimeoutError — never the message
         throw t;
@@ -1364,13 +1515,13 @@ async function request(method, path, body, sessionId, opts = {}) {
           continue;
         }
         throw Object.assign(new Error(
-          `Cannot connect to A-Team API at ${baseUrl}. Nothing was sent.\n` +
-          `Hint: The service may be down. Check ${baseUrl}/health`
+          `Cannot connect to A-Team API at ${shown}. Nothing was sent.\n` +
+          `Hint: The service may be down. Check ${health}`
         ), { neverSent: true });
       }
       if (err.cause?.code === "ENOTFOUND") {
         throw Object.assign(new Error(
-          `Cannot resolve A-Team API host: ${baseUrl}. Nothing was sent.\n` +
+          `Cannot resolve A-Team API host: ${shown}. Nothing was sent.\n` +
           `Hint: Check your internet connection and ADAS_API_URL setting.`
         ), { neverSent: true });
       }

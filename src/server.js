@@ -10,8 +10,29 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { tools, coreTools, handleToolCall, MCP_VERSION } from "./tools.js";
+import { tools, coreTools, handleToolCall, MCP_VERSION, openingFor } from "./tools.js";
 import { runToolCall } from "./api.js";
+
+/**
+ * The MCP `instructions` for a session, built when its server is created: on
+ * HTTP after the bearer or the platform secret seeded the session (http.js
+ * seedCredentials runs before createServer), so a browser-authorized session
+ * is told its workspace at connect. It OPENS with where the session is and how
+ * to move, for the transport this server is built for (tools.js openingFor —
+ * the same text ateam_bootstrap opens with); ateam_bootstrap restates it for
+ * the moment it is called.
+ */
+function serverInstructions(sessionId, transport) {
+  return [
+    openingFor(sessionId, { transport }),
+    [
+      "You are connected to A-Team MCP — an AI Team Solution Platform.",
+      "IMPORTANT: On first user message, ALWAYS call the ateam_bootstrap tool before responding.",
+      "Use its structured output to introduce the platform, explain core concepts, and ask discovery questions.",
+      "Do NOT improvise an introduction from tool names. The bootstrap tool contains the canonical onboarding narrative.",
+    ].join(" "),
+  ].join("\n\n");
+}
 
 /**
  * @param {string} sessionId — identifier for credential isolation.
@@ -30,12 +51,7 @@ export function createServer(sessionId = "stdio", { transport = null } = {}) {
     { name: "ateam-mcp", version: MCP_VERSION },
     {
       capabilities: { tools: {} },
-      instructions: [
-        "You are connected to A-Team MCP — an AI Team Solution Platform.",
-        "IMPORTANT: On first user message, ALWAYS call the ateam_bootstrap tool before responding.",
-        "Use its structured output to introduce the platform, explain core concepts, and ask discovery questions.",
-        "Do NOT improvise an introduction from tool names. The bootstrap tool contains the canonical onboarding narrative.",
-      ].join(" "),
+      instructions: serverInstructions(sessionId, transport),
     }
   );
 

@@ -177,7 +177,7 @@ Builder and its reply says so (NOT_WRITTEN_TO_GITHUB); until it is placed, \`ate
 it to \`${BRANCH_WORKFLOW.write_branch}\` (solution.json and every skill); \`ateam_github_pull(solution_id, discard_builder_changes: true)\`
 drops it for \`${BRANCH_WORKFLOW.write_branch}\`'s copy.
 
-**First tool call every session:** \`ateam_auth(api_key: "adas_${tenantHint || "<tenant>"}_<hex>")\`.
+**First tool call every session:** \`ateam_bootstrap\` — its \`session\` field says which workspace this session is on, and how to sign in or switch for the way it is connected. Never put a key in the chat.
 
 ---
 

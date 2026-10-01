@@ -16,7 +16,10 @@
 // returns `environment` itself.
 //
 // Environments are checked against KEY_ENVIRONMENTS, the one map of them, and
-// on_connect's field names against the results they are read from.
+// on_connect's field names against the results they are read from. Since
+// 2026-10-01 a served text names the production environment only (Arie: the
+// package is public); the steps themselves are pinned by
+// test/sign-in-and-switch.test.mjs.
 //
 // Run: node --test test/sign-in-texts.test.mjs
 import { test, before, after } from "node:test";
@@ -46,7 +49,7 @@ const namedEnvironments = (text) => Object.fromEntries([...text.matchAll(/adas_(
 test("A1: the gate's refusal sends the user to the browser sign-in, not to fetch a key", async () => {
   const text = await gateText();
   assert.ok(text.includes(HOSTED), `no hosted connector in:\n${text}`);
-  assert.match(text, /authorize it in the browser/);
+  assert.match(text, /The A-Team sign-in page opens in the browser/);
   assert.doesNotMatch(text, /get-api-key/, "still tells the user to go get a key");
   assert.doesNotMatch(text, /adas_<tenant>_<32hex>/, "still teaches the key format bff5934 replaced");
 });
@@ -58,22 +61,27 @@ test("A1: the refusal keeps the contract a proxy replays on", async () => {
   assert.match(r.content[0].text, /^Authentication required/);
 });
 
-test("A1: ateam_auth's description names the browser sign-in and no key page", () => {
+// The description is served to every transport, and the steps differ per
+// transport (a local process cannot use the browser sign-in), so it names the
+// browser sign-in and sends the agent to the session's own steps rather than
+// restating one transport's (review of #38).
+test("A1: ateam_auth's description names the browser sign-in, points at the session's steps, and no key page", () => {
   const d = tool("ateam_auth").description;
-  assert.ok(d.includes(HOSTED), d);
-  assert.match(d, /authorize it in the browser/);
+  assert.match(d, /the hosted connector signs in in the browser, with no ateam_auth call/);
+  assert.match(d, /ateam_bootstrap's `session` field/);
   assert.doesNotMatch(d, /get-api-key/);
 });
 
-test("A31: every text that names environments names exactly KEY_ENVIRONMENTS, with their hosts", async () => {
+test("A31: a text that names an environment names production only, with its host", async () => {
   const t = tool("ateam_auth");
   for (const [where, text] of [
     ["ateam_auth.description", t.description],
     ["ateam_auth.api_key", t.inputSchema.properties.api_key.description],
-    ["the auth gate", await gateText()],
   ]) {
-    assert.deepEqual(namedEnvironments(text), { ...KEY_ENVIRONMENTS }, `${where}: ${text}`);
+    assert.deepEqual(namedEnvironments(text), { prod: KEY_ENVIRONMENTS.prod }, `${where}: ${text}`);
   }
+  // The gate gives the sign-in steps, which pick no environment by name.
+  assert.deepEqual(namedEnvironments(await gateText()), {});
 });
 
 test("A31: `url` is not taught as the way to reach an A-Team environment", () => {
