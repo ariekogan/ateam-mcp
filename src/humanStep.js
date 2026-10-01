@@ -14,15 +14,26 @@
 // still carrying state.pendingQuestion — Core cp.chain_api
 // getActiveChainsForActor), so chain_done is true while pending_question is
 // set. The answer is a NEW chain on the same actor_id, which Core's continuity
-// routing lands on the skill that asked: Core removed /api/job/:id/respond
+// routing lands on the skill that asked — within its continuity window
+// (skillLoader.js: 60 s, 5 min for a short answer, and no topic-shift verb),
+// else through the gateway's pending-question hint (detectIntent.js; CORE
+// review M41r3-L4): Core removed /api/job/:id/respond
 // (Chain Additions D2), and the web chat answers the same way. PRE-1
 // (2026-10-01) watched it live. ateam_conversation, ateam_chain_status and
 // bootstrap's conversation_flow each said "stop when chain_done === true (or
 // pending_question is set …)", which reads as two different ends of a poll and
 // says nothing about how to answer. Arie, 2026-10-01: "human step is simply
-// another message" — one plain sentence, human_step_testing.rule.
+// another message" — one plain sentence, human_step_testing.rule. A skill
+// can also ask in its reply text, with no pending_question (Core treats a
+// reply ending in "?" as pending: detectIntent.js, highLevelPlan.js), so the
+// sentence names both (CORE review B112r3-3).
 export const WAITING_ON_THE_USER =
-  "A step that waits for a person is just your next message: when pending_question is set, send ateam_conversation(same actor_id, the answer that person would give).";
+  "A step that waits for a person is just your next message: when pending_question is set, or the reply asks the person something, send ateam_conversation(same actor_id, the answer that person would give).";
+
+// How to be that person — human_step_testing.play_the_person. It was written
+// four ways across ateam-mcp and the Builder (CORE review M41r3-L2).
+export const PLAY_THE_PERSON =
+  "Play the person with an input you wrote, so you know the answer that person would give — never invent one for a real record.";
 
 // What ateam_test_connector must never write — human_step_testing.never.
 // ateam_test_connector's description said "on a record your test did not

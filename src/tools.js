@@ -131,7 +131,7 @@ import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused } from "./api.js";
 
 // A step that waits for a person: the Builder's human_step_testing words, verbatim.
-import { WAITING_ON_THE_USER, TEST_CONNECTOR_NEVER } from "./humanStep.js";
+import { WAITING_ON_THE_USER, PLAY_THE_PERSON, TEST_CONNECTOR_NEVER } from "./humanStep.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -1452,7 +1452,7 @@ export const tools = [
       "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
       "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true. That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
       "Multi-turn: each call starts a new chain; pass the reply's actor_id (the thread) back in to continue that thread. " + WAITING_ON_THE_USER + " " +
-      "You play the person, with an input you wrote, so you know the right answer — never invent one for a real record. " +
+      PLAY_THE_PERSON + " " +
       "Who the job runs as: see actor_id. " + RAN_AS_IN_REPLY + "\n\n" +
       "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
     inputSchema: {
@@ -2463,7 +2463,7 @@ export const tools = [
     // until Builder #115 (CORE review M41-1).
     description:
       "Call ONE tool on a running connector DIRECTLY and get its raw result — no skill, no guardrails, no user turn. It proves a tool's plumbing (arguments in, result out). " +
-      "It can NOT prove a step that waits for a person — a confirmation, an approval, a value only the user knows: test those with ateam_conversation, multi-turn, playing the person with an input you wrote (ateam_get_spec('skill') → agent_guide.key_concepts.testing_and_runtime.human_step_testing). " +
+      "It can NOT prove a step that waits for a person — a confirmation, an approval, a value only the user knows: test those with ateam_conversation (ateam_get_spec('skill') → agent_guide.key_concepts.testing_and_runtime.human_step_testing). " +
       TEST_CONNECTOR_NEVER + " " +
       "This call runs as " + KEY_PERSON + ". " +
       "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",

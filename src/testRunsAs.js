@@ -43,18 +43,23 @@
  * fixed (CORE review M41-1) — so ateam_test_connector is in the list below.
  * The in-app builder still read its own admin's id in ran_as as a synthetic test
  * id, because "the person" did not say WHICH person. This does, with no name
- * or email lookup. Rendered in ran_as below and in ateam_test_connector's
- * description.
+ * or email lookup: the key's OWNER. Core keeps ONE agent key per tenant and
+ * records whoever minted it (storage/agentApiKey.js ownerActorId), and every
+ * agent path — the in-app builder included — signs in with that one key. It
+ * said "— the person you are talking to", true in PRE-1's one-person tenant
+ * and false for every other admin (CORE review M41r3-2 / B112r3-2). Rendered
+ * in ran_as below and in ateam_test_connector's description; the Builder's
+ * capabilitySpecs.js KEY_PERSON is the same bytes.
  */
 export const KEY_PERSON =
-  "the person whose key started the test — the person you are talking to";
+  "the person whose key started the test (the key's owner)";
 
 /**
  * The reply field. Part of TEST_RUNS_AS below (not a second wording of it), and
  * rendered alone where an ateam-mcp result or description names the field.
  */
 export const RAN_AS_IN_REPLY =
-  "Every reply's ran_as is the actor the job ran as: " + KEY_PERSON + " — or null for an anonymous run.";
+  "Every reply's ran_as is the actor the job ran as: " + KEY_PERSON + ", or null for an anonymous run.";
 
 /**
  * A KEY WHOSE PERSON IS GONE (Builder #117, Core 9f32bac37): Core's
@@ -73,7 +78,8 @@ export const TEST_RUNS_AS =
   "in Tokens & Keys — so the job, its memory and its per-user data are that person's and show in that person's " +
   "product. actor_id never picks the identity: it names the conversation thread, and with a person on the key the " +
   "thread IS that person (Core keys a conversation by its actor), so a different actor_id is not honoured. Only a " +
-  "key no person minted (a service-provisioned key) still runs as before: anonymously, under the test_ thread that " +
-  "actor_id names or a fresh one. " + KEY_OWNER_GONE + " " + RAN_AS_IN_REPLY + " A voice test (ateam_test_voice) runs as the person only " +
+  "key no person minted (a service-provisioned key) runs anonymously, as the platform's service identity — Core " +
+  "ignores actor_id then, so all anonymous tests in a tenant share one conversation. " + KEY_OWNER_GONE + " " + RAN_AS_IN_REPLY +
+  " A voice test (ateam_test_voice) runs as the person only " +
   "once the voice backend verifies the API key the Builder sends it (Core follow-up); until then it is anonymous — " +
   "or, given a phone_number, the phone caller (phone::<number>) — and its ran_as says so.";

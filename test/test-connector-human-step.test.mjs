@@ -38,6 +38,8 @@ const waitingText = () => {
 // The Builder's /spec/skill human_step_testing.never, byte for byte (#112) —
 // the one wording of what ateam_test_connector must never write.
 const NEVER = "Never call a write tool with ateam_test_connector on a record your test did not create.";
+// human_step_testing.play_the_person, byte for byte.
+const PLAY = "Play the person with an input you wrote, so you know the answer that person would give — never invent one for a real record.";
 
 test("ateam_test_connector: DIRECTLY, plumbing only, a person's step goes to ateam_conversation", () => {
   const d = description("ateam_test_connector");
@@ -64,7 +66,9 @@ test("ateam_test_connector points at the key the Builder actually serves", () =>
 test("ateam_test_connector says who the call runs as — what PRE-1 saw, never _system_service", () => {
   const d = description("ateam_test_connector");
   assert.ok(testRunsAs.KEY_PERSON, "testRunsAs.js exports no KEY_PERSON");
-  assert.equal(testRunsAs.KEY_PERSON, "the person whose key started the test — the person you are talking to");
+  // The key's OWNER — one agent key per tenant, so not necessarily the person
+  // chatting (CORE review M41r3-2). The Builder's KEY_PERSON is the same bytes.
+  assert.equal(testRunsAs.KEY_PERSON, "the person whose key started the test (the key's owner)");
   assert.ok(d.includes("This call runs as " + testRunsAs.KEY_PERSON + "."), "ateam_test_connector does not say who it runs as");
   assert.doesNotMatch(d, /_system_service/);
 });
@@ -78,12 +82,18 @@ test("ateam_conversation: a person's step is your next message, and you play the
   const d = description("ateam_conversation");
   const multi = d.slice(d.indexOf("Multi-turn:"));
   assert.ok(multi.includes(waitingText()), "the multi-turn paragraph does not say a person's step is your next message");
-  assert.ok(multi.includes("You play the person, with an input you wrote, so you know the right answer — never invent one for a real record."));
+  assert.equal(humanStep.PLAY_THE_PERSON, PLAY, "humanStep.js does not hold the Builder's human_step_testing.play_the_person");
+  assert.ok(multi.includes(PLAY), "the multi-turn paragraph does not say how to play the person");
+  // One copy (CORE review M41r3-L2): no hand-written variant anywhere in the tools.
+  const all = tools.map((t) => t.description).join("\n");
+  assert.doesNotMatch(all, /You play the person|playing the person with an input you wrote/);
 });
 
 // Arie, 2026-10-01: "human step is simply another message." One plain
 // sentence — the same words /spec/skill human_step_testing.rule leads with.
-const LEAD = "A step that waits for a person is just your next message: when pending_question is set, send ateam_conversation(same actor_id, the answer that person would give).";
+// A skill can also ask in its reply text, with no pending_question (CORE
+// review B112r3-3), so the sentence names both.
+const LEAD = "A step that waits for a person is just your next message: when pending_question is set, or the reply asks the person something, send ateam_conversation(same actor_id, the answer that person would give).";
 
 test("WAITING_ON_THE_USER is one plain sentence, in every place that says when to stop polling", async () => {
   const text = waitingText();
@@ -97,8 +107,9 @@ test("WAITING_ON_THE_USER is one plain sentence, in every place that says when t
   assert.doesNotMatch(served, /or pending_question is set|OR when pending_question is set/);
 });
 
-test("ran_as names the person you are talking to", () => {
-  assert.ok(testRunsAs.RAN_AS_IN_REPLY.includes("ran_as is the actor the job ran as: the person whose key started the test — the person you are talking to"));
+test("ran_as names the key's owner, never 'the person you are talking to'", () => {
+  assert.equal(testRunsAs.RAN_AS_IN_REPLY, "Every reply's ran_as is the actor the job ran as: the person whose key started the test (the key's owner), or null for an anonymous run.");
+  assert.doesNotMatch(testRunsAs.TEST_RUNS_AS, /the person you are talking to/);
   assert.ok(testRunsAs.TEST_RUNS_AS.includes(testRunsAs.RAN_AS_IN_REPLY));
 });
 

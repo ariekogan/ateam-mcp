@@ -38,9 +38,10 @@ test("TEST_RUNS_AS says what the Builder's /spec says", () => {
     /generated it in Tokens & Keys/,
     /actor_id never picks the identity/,
     /a different actor_id is not honoured/,
-    /key no person minted[^.]*runs as before/,
+    // CORE review B112r3-L1: Core drops the test_ thread from an API-key caller.
+    /key no person minted[^.]*runs anonymously, as the platform's service identity — Core ignores actor_id then, so all anonymous tests in a tenant share one conversation/,
     /ran_as is the actor the job ran as/,
-    /ran_as is the actor the job ran as: the person whose key started the test — the person you are talking to — or null for an anonymous run/,
+    /ran_as is the actor the job ran as: the person whose key started the test \(the key's owner\), or null for an anonymous run/,
     /ateam_test_voice\) runs as the person only once the voice backend verifies the API key/,
     /Core follow-up/,
     /until then it is anonymous/,
