@@ -2698,7 +2698,7 @@ export const tools = [
         },
         message: {
           type: "string",
-          description: "Optional commit message (default: 'Update <path>')",
+          description: "Optional commit message (default: 'Update <path>'; search/replace mode: 'Edit <path> (N replacements)')",
         },
         ref: {
           type: "string",
@@ -2733,7 +2733,8 @@ export const tools = [
     description:
       "Write a file to the solution's GitHub repo. Use this to create new connector files or replace existing ones — one file per call. " +
       "This is the PRIMARY way to write connector code after first deploy. " +
-      "Write each file individually (server.js, package.json, UI assets), then call ateam_github_promote() to ship to prod (dev→main), then ateam_build_and_run() to deploy.\n\n" +
+      "Write each file individually under connectors/<connector-id>/ (server.js, package.json, ui-dist/… assets), then call ateam_github_promote() to ship to prod (dev→main), then ateam_build_and_run() to deploy. " +
+      "Core deploys connectors/<connector-id>/ only, so a connector file written anywhere else (a root server.js, package.json or ui-dist/) is refused with CONNECTOR_FILE_OUTSIDE_CONNECTOR.\n\n" +
       "DEFAULTS TO `dev` BRANCH.",
     inputSchema: {
       type: "object",
@@ -2752,7 +2753,7 @@ export const tools = [
         },
         message: {
           type: "string",
-          description: "Optional commit message (default: 'Write <path>')",
+          description: "Optional commit message (default: 'Update <path>')",
         },
         ref: {
           type: "string",
