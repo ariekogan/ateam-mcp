@@ -1219,7 +1219,17 @@ export const tools = [
     // it times out the run proceeds with no capability guidance at all.
     monitoring: { safe: true, cost: "normal", latency_ms_p95: 25000, output: "bounded" },
     description:
-      "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the /spec topic to read next (via ateam_get_spec) and the tool to wire it. Also returns 'missing' hints (capabilities your goal implies but the design hasn't wired) and lifecycle hints (e.g. connect GitHub when the project will iterate). ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call; consult it as often as you like as the design evolves. If the reply carries `truncated: true`, the answer ran past the length budget and was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search, before concluding the platform lacks something.",
+      "CONSULT THIS DURING DESIGN — before and while you design a skill/solution. Describe what you're building; it returns POINTERS to the platform capabilities that fit (per-actor storage, widgets, triggers, sub-agents, mobile data, run-scripts, multi-skill, GitHub, …), each with the /spec topic to read next (via ateam_get_spec) and the tool to wire it. Also returns 'missing' hints (capabilities your goal implies but the design hasn't wired) and lifecycle hints (e.g. connect GitHub when the project will iterate). ADVISORY ONLY — you decide and own the design. Stateless: pass the current design_state each call; consult it as often as you like as the design evolves. If the reply carries `truncated: true`, the answer ran past the length budget and was CUT OFF: what is there is correct, but a capability's ABSENCE proves nothing — ask again with a narrower goal, or use ateam_spec_search, before concluding the platform lacks something. " +
+      // BUILDER-2. job_wfkgyg5o (2026-09-28) asked this with the store already
+      // chosen ("Use an in-memory / JSON store in a custom MCP connector"); the
+      // call failed with Core's "circuit open for <tenant>::ateam-proxy-mcp;
+      // cooling down" before it left Core, nothing pushed back, and the build
+      // wrote that store. This text is the one channel that reaches an agent
+      // whose call never got an answer. That error names no cool-down time
+      // (Core utils/circuitBreaker.js), so this does not promise one.
+      "If the reply carries `conflicts_with_platform_rules`, your goal or design_state already chose a store the platform forbids: each entry names what you said, the rule, and what to use instead. " +
+      "If this call fails, your design is unchecked: do not write storage code on a store you picked before asking. Retry after a short wait (a 'circuit open … cooling down' error names no time; the breaker lets a call through again after its cool-down). " +
+      "ateam_get_spec('connector-multi-user') → storage_decision answers storage with no LLM, and a failure the advisor itself answers carries it as `storage_decision`.",
     inputSchema: {
       type: "object",
       properties: {
