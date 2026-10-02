@@ -71,16 +71,35 @@ test("a connector with a file pull-bundle could not read: refused, not deployed 
   assert.deepEqual(result.connectors_unreadable, ["walk-api"]);
 });
 
-test("pull-bundle's own refusal reaches the caller as the Builder said it — no 'deploy with mcp_store first'", async () => {
-  const said = { ok: false, code: "TREE_TRUNCATED", error: "GitHub cut the listing of main short (truncated), so what it holds cannot all be seen." };
+// pull-bundle's REAL answer to a listing that failed (a 403 rate limit on
+// main), as Builder #144 (b560e75a) serves it — recovery included. Its
+// recovery is build_and_run's own: a fixture that carried ateam_github_pull,
+// which deploys dev, would have shown the agent sent to unpromoted work
+// (CORE on #144, B144R-11).
+const PULL_BUNDLE_NOT_READ = {
+  "ok": false,
+  "code": "BRANCH_NOT_READ",
+  "error": "Refusing to deploy: main could not be read (its listing failed: GitHub API GET /repos/ateam-tenants-test/trail-repo/git/trees/main?recursive=1 → 403: API rate limit exceeded). Deploying now would ship a solution without what the branch holds there. Nothing was deployed.",
+  "why": "its listing failed: GitHub API GET /repos/ateam-tenants-test/trail-repo/git/trees/main?recursive=1 → 403: API rate limit exceeded",
+  "hint": "Retry the deploy; GitHub reads are usually back within a minute.",
+  "recovery": "ateam_build_and_run(solution_id)"
+};
+
+test("pull-bundle's own refusal reaches the caller as the Builder said it, recovery included — no 'deploy with mcp_store first'", async () => {
+  const said = PULL_BUNDLE_NOT_READ;
   const { result } = await deployFrom({ status: 502, body: said });
-  assert.equal(result.code, "TREE_TRUNCATED");
-  assert.equal(result.error, said.error);
+  assert.deepEqual(
+    { code: result.code, error: result.error, hint: result.hint, recovery: result.recovery },
+    { code: said.code, error: said.error, hint: said.hint, recovery: said.recovery },
+  );
+  assert.equal(result.recovery, "ateam_build_and_run(solution_id)");
+  assert.doesNotMatch(JSON.stringify(result), /ateam_github_pull/, "the agent is sent to a pull that deploys dev");
   assert.doesNotMatch(JSON.stringify(result), /mcp_store first/, "the refusal was overruled by a guess that sends the agent to re-send code inline");
 });
 
 test("an ok:false answer with a code is passed through too, hint and recovery included", async () => {
-  const said = { ok: false, code: "BRANCH_NOT_READ", error: "Refusing to deploy: main could not be read.", hint: "Retry the pull.", recovery: "ateam_github_pull(solution_id)" };
+  // The same refusal, answered as a 2xx ok:false: the other path a refusal takes here.
+  const said = PULL_BUNDLE_NOT_READ;
   const { result } = await deployFrom({ body: said });
   assert.deepEqual({ code: result.code, hint: result.hint, recovery: result.recovery }, { code: said.code, hint: said.hint, recovery: said.recovery });
   assert.doesNotMatch(JSON.stringify(result), /mcp_store first/);
