@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.112 — 2026-10-02
 
 ### The browser sign-in belongs to the host the request addressed
 
