@@ -1284,15 +1284,6 @@ function kickFallsBackToSync(err) {
  */
 const CONNECTOR_UPLOAD_P95_MS = 75_000;
 
-/**
- * How a WRONG lesson is corrected — one text, quoted by ateam_log_lesson and
- * ateam_get_lessons. The Builder's lessons store states the same rule
- * (LESSON_CORRECTION_RULE in its store/solutions.js) and owns the behaviour.
- */
-export const LESSON_CORRECTION_RULE =
-  'A lesson that proved WRONG is corrected, never edited: log the corrected lesson with ' +
-  'supersedes:"<its id>". The wrong one stays in the history but is no longer returned as a lesson.';
-
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -2058,17 +2049,20 @@ export const tools = [
   {
     name: "ateam_log_lesson",
     core: true,
-    // CORE CUTS EVERY TOOL DESCRIPTION AT 1200 CHARACTERS for an agent run,
-    // and the in-app builder logs lessons inside one: this text stays whole
-    // within the cut (test/lesson-supersede.test.mjs).
+    // HOW A WRONG LESSON IS CORRECTED is stated in ONE place: the Builder's
+    // lessons GET returns it in every answer as `correction_rule`. This text
+    // declares the argument and points there; it keeps no copy that could
+    // drift (CORE on #54). Core cuts every description at 1200 characters for
+    // an agent run (test/core-description-cut.test.mjs).
     description:
       "Record ONE lesson this run learned, so the NEXT run — which starts empty " +
       "— does not relearn it. Log it the moment a tool misleads you AND you find " +
       "a way through.\n\n" +
-      "APPEND-ONLY: earlier lessons are never edited or deleted, and the server " +
-      "stamps the id and the time. " + LESSON_CORRECTION_RULE + " An unknown id " +
-      "is refused (404); a lesson already superseded is refused (409) naming the " +
-      "current one.\n\n" +
+      "You cannot edit or delete earlier lessons; supersede them: `supersedes` " +
+      "takes the `id` of the lesson to replace, from ateam_get_lessons, whose " +
+      "`correction_rule` says when and how. An unknown id is refused (404); a " +
+      "lesson already superseded is refused (409) naming the current one. The " +
+      "server stamps the id and the time.\n\n" +
       "PROVENANCE: `job_id` and `actor` are usually null (an agent calling this " +
       "tool sends no x-adas-job-id / x-adas-actor-id): a lesson cannot be traced " +
       "to its run, nor 'three runs hit this' told from 'one run, three times'. " +
@@ -2093,7 +2087,7 @@ export const tools = [
         },
         supersedes: {
           type: "string",
-          description: "Only to correct a lesson that proved WRONG: its `id` from ateam_get_lessons. This lesson replaces it; the wrong one stays in the history but is no longer returned as a lesson.",
+          description: "The `id` of the lesson this one supersedes, from ateam_get_lessons — see `correction_rule` in its answer",
         },
       },
       required: ["solution_id", "tool", "error"],
@@ -2110,9 +2104,11 @@ export const tools = [
       "and it is cheap. Each entry says which tool misled a previous run, the " +
       "verbatim error, what was tried instead, and whether that worked. An empty " +
       "list is a real answer (nothing learned yet).\n\n" +
-      LESSON_CORRECTION_RULE + " A superseded lesson is counted in " +
-      "`superseded_count`, never listed in `lessons`; include_superseded:true " +
-      "returns it in a separate `superseded` list, each with `superseded_by`.",
+      "Every answer carries `correction_rule`: how a lesson that proved wrong " +
+      "is corrected. A superseded lesson is counted in `superseded_count`, " +
+      "never listed in `lessons`; include_superseded:true returns it in a " +
+      "separate `superseded` list, each with `superseded_by`. A correction " +
+      "carries `corrects`: the tool and error the lesson it replaced quoted.",
     inputSchema: {
       type: "object",
       properties: {

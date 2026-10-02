@@ -5,19 +5,22 @@
 // behaviour: a lesson logged with supersedes:<id> replaces that one, the wrong
 // one stays in the history, and GET no longer returns it as a lesson. These
 // tools must carry both fields to it — the handler destructured a fixed list,
-// so an unlisted field was dropped before any request — and the texts must
-// reach an in-app agent whole: Core cuts every tool description at 1200
-// characters (ai-dev-assistant anthropicAgentBackend.js, openaiAgentBackend.js,
-// sys.callAiWithTools.js), and ateam_log_lesson was already 1292.
+// so an unlisted field was dropped before any request.
+//
+// THE RULE ITSELF HAS ONE HOME: the Builder's GET answer, as `correction_rule`.
+// The texts declare the arguments and point at that field; nothing here keeps
+// a copy of the rule, and no test does either — the one below reads the field
+// off a (mocked) GET answer. Whether the texts fit Core's 1200-character cut
+// is test/core-description-cut.test.mjs.
 //
 // Run: node --test test/lesson-supersede.test.mjs
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setSessionCredentials } from "../src/api.js";
-import { handleToolCall, tools, LESSON_CORRECTION_RULE } from "../src/tools.js";
+import * as toolsModule from "../src/tools.js";
 
-const CORE_DESCRIPTION_CUT = 1200;
+const { handleToolCall, tools } = toolsModule;
 const SID = "sess-lesson-supersede";
 let hits = [];
 let reply = null;
@@ -90,24 +93,33 @@ test("both schemas declare the new fields", () => {
   assert.equal(tool("ateam_get_lessons").inputSchema.properties.include_superseded?.type, "boolean");
 });
 
-test("both texts quote the ONE correction rule, whole, inside Core's 1200-character cut", () => {
-  for (const name of ["ateam_log_lesson", "ateam_get_lessons"]) {
-    const desc = tool(name).description;
-    assert.ok(desc.length <= CORE_DESCRIPTION_CUT, `${name}: ${desc.length} characters; an in-app agent sees only the first ${CORE_DESCRIPTION_CUT}`);
-    assert.ok(desc.includes(LESSON_CORRECTION_RULE), `${name} does not quote the rule`);
-  }
-  // The log text no longer claims a wrong lesson can only be added to.
-  assert.doesNotMatch(tool("ateam_log_lesson").description, /You cannot edit or delete earlier lessons/);
-  assert.match(tool("ateam_get_lessons").description, /never listed in `lessons`/);
+test("the texts point at the GET's `correction_rule` and declare the arguments — no copy of the rule", () => {
+  assert.equal(toolsModule.LESSON_CORRECTION_RULE, undefined, "ateam-mcp keeps a copy of the rule again");
+  const log = tool("ateam_log_lesson").description;
+  const get = tool("ateam_get_lessons").description;
+  assert.ok(log.includes("You cannot edit or delete earlier lessons; supersede them"), log);
+  assert.match(log, /`supersedes`/);
+  assert.match(log, /`correction_rule`/);
+  assert.match(get, /Every answer carries `correction_rule`/);
+  assert.match(get, /include_superseded:true/);
+  assert.match(get, /never listed in `lessons`/);
+  assert.match(tool("ateam_log_lesson").inputSchema.properties.supersedes.description, /`correction_rule`/);
+  // The old wording, which said no correction was possible, is gone.
+  assert.doesNotMatch(log, /APPEND-ONLY/);
 });
 
-// THE SAME RULE AS THE BUILDER'S, byte for byte (===): the Builder's lessons
-// store (apps/backend/src/store/solutions.js LESSON_CORRECTION_RULE) owns the
-// behaviour and quotes this text in GET /lessons' `_note`. A change on one side
-// fails here until the other carries it too.
-const BUILDER_LESSON_CORRECTION_RULE =
-  'A lesson that proved WRONG is corrected, never edited: log the corrected lesson with ' +
-  'supersedes:"<its id>". The wrong one stays in the history but is no longer returned as a lesson.';
-test("LESSON_CORRECTION_RULE is the Builder's, byte for byte", () => {
-  assert.equal(LESSON_CORRECTION_RULE, BUILDER_LESSON_CORRECTION_RULE);
+test("the rule reaches the caller as the GET answered it — the tool neither drops nor rewrites `correction_rule`", async () => {
+  // Whatever the Builder says is the rule is what the agent reads: this
+  // mocked answer's value is not the rule, on purpose — the tool must pass
+  // the field through, not supply one of its own.
+  const answer = { ok: true, lessons: [], count: 0, superseded_count: 0, correction_rule: "the field as the lessons GET answered it" };
+  const { res, text } = await call("ateam_get_lessons", { solution_id: "sol-a" }, { status: 200, body: answer });
+  assert.equal(res.isError, undefined);
+  assert.equal(JSON.parse(text).correction_rule, answer.correction_rule, text);
+
+  // A refused read answers with the field too, and the caller sees it.
+  const refused = { ok: false, code: "INVALID_SOLUTION_ID", error: "getLessons: id required (string)", correction_rule: "the field on a refused read" };
+  const r = await call("ateam_get_lessons", { solution_id: "sol-a" }, { status: 400, body: refused });
+  assert.equal(r.res.isError, true);
+  assert.match(r.text, /the field on a refused read/);
 });
