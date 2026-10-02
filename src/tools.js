@@ -140,6 +140,49 @@ import { createHash, randomUUID } from "node:crypto";
 // ateam-mcp POINTS at it; it never carries a copy of the decision or of store().
 const STORAGE_DECISION_AT = "ateam_get_spec('connector-multi-user') → storage_decision";
 
+// Where a plugin's data rules are read WHOLE — the Builder's DATA_FIDELITY_AT
+// (uiPluginRules.js), the same call. /spec/widgets is larger than one
+// ateam_get_spec response (MAX_RESPONSE_CHARS below; 53,368 characters
+// pretty-printed on production, 2026-10-02), so a plain read stubs its largest
+// section, `sections`, and data_fidelity with it. `search` goes to
+// GET /spec/widgets?search=…, which returns the matching branch whole: 7,494
+// characters, with MEANING_FIELDS_RULE, ACTIONABLE_STATE_RULE and the
+// TEST_ROW_DONE_RULE that MEANING_FIELDS_RULE ends with. ateam-mcp POINTS at
+// those rules; it carries no copy.
+const DATA_FIDELITY_AT = 'ateam_get_spec({ topic: "widgets", search: "data_fidelity" })';
+
+// WHAT CONTINUES A CONVERSATION, and the window an answer has — what Core does
+// today, from Core and Builder origin/dev (2026-10-02). The Builder serves no
+// constant for this, so these are ateam-mcp's words, rendered in
+// ateam_conversation's description, its kickoff result and bootstrap's
+// conversation_flow, and written nowhere else.
+//   - Each call is a new chain. The Builder's startChat sends no chainRouting
+//     (adasCoreClient.js:686-693), so Core's POST /api/chat starts a new job
+//     every time (server.js:2628-2635, 2748), and sys.askUser ENDS its chain:
+//     the answer is an ordinary new message (server.js:2771-2776).
+//   - actor_id continues nothing. Core drops a body actorId from an API-key or
+//     JWT caller (server.js:2578-2580, utils/callerContext.js:149-154); the job
+//     runs as X-ADAS-ACTOR-ID, the key's person (Builder testIdentity,
+//     routes/solutions.js:101-105, 2776-2777), or as _system_service for a key
+//     no person minted. Core keys the conversation by that actor.
+//   - The window. Core's continuity routing (skills/skillLoader.js:216-251)
+//     sends a message to the skill of that actor's last turn only when the turn
+//     ended within FOLLOWUP_TTL_MS (60 s) — FOLLOWUP_SHORT_TTL_MS (5 min) for a
+//     message of SHORT_MSG_THRESHOLD (25) characters or fewer — and never when
+//     it opens with a TOPIC_SHIFT_VERBS verb. Otherwise the message goes
+//     through the entry routing a first message takes (skillLoader.js:259-300).
+//     No deployment sets CONTINUITY_TTL_MS / CONTINUITY_SHORT_TTL_MS (checked
+//     2026-10-02), so the defaults are what runs.
+// Before this, ateam_conversation said "pass the reply's actor_id (the thread)
+// back in to continue that thread" and its actor_id "to continue it"
+// (7d44113); before that, "the same actor_id maintains conversation context"
+// (ff1cbd2). Whether an answer must always reach the question it answers is
+// CORE's decision; this only says what happens today.
+const CONVERSATION_CONTINUES =
+  "Each call is a new chain, and your key, not actor_id, continues the conversation: Core keys it by the actor the job runs as (passing the reply's actor_id back is harmless).";
+const REPLY_WINDOW =
+  "Core sends a message to the skill of that actor's last turn only within 60 s of it (5 min if the message is 25 characters or fewer), never when it starts with a new-task verb (build, create, make, …); later it is routed like a first message, so an answer can miss its question.";
+
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
 // three different things here (the mac1 container, npm, and each developer's local
 // checkout+process), and a stale local PROCESS is indistinguishable from a broken
@@ -1154,11 +1197,24 @@ export const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        // Three lines below POINT at the Builder's homes rather than copy them:
+        // - 'widgets' (2fc571c) and 'ui-plugins' never named the read that
+        //   returns data_fidelity whole: DATA_FIDELITY_AT, above.
+        // - 'ui-plugins' said "the DEEP React Native (mobile) plugin build
+        //   guide … before authoring any MOBILE widget" (d7b92aa). The page
+        //   (Builder spec.js buildUIPluginsSpec) is the build guide for iframe,
+        //   react-native and adaptive: overview.render_modes, manifest_schema,
+        //   device_tools, react_native_plugin_guide, iframe_plugin_guide,
+        //   deployment.
+        // - 'triggers' (a05eb2b) said only that a time word is a trigger. A
+        //   recurring check the user gave no cadence for is answered by
+        //   /spec/triggers decision_guide.implied_repetition_without_cadence
+        //   (Builder #128, 3bc59da6): ask, add no trigger.
         topic: {
           type: "string",
           enum: ["capabilities", "realizations", "overview", "skill", "solution", "enums", "connector-multi-user", "python_helpers", "widgets", "ui-plugins", "actor-storage", "voice", "voice-native", "triggers", "sub-agent", "consumer-roles", "mobile-connector", "device-capabilities", "host-contract", "platform-connectors", "platform-truth", "sdk", "workflows", "monitoring"],
           description:
-            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), and rules for declaring ui_plugins. Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the DEEP React Native (mobile) plugin build guide: author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export — read this before authoring any MOBILE widget. 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'mobile-connector' = building functional connectors (background services) for ateam-mobile that use device capabilities through the Native Bridge SDK. 'actor-storage' = per-actor storage (production): a per-(tenant, actor, skill) SQLite database served by the actorstore-mcp platform connector — read this instead of hand-rolling per-user isolation in a connector. 'consumer-roles' = role-based access for your solution's END-USERS: you declare the config, the platform resolves and enforces one RoleProfile per request (roles decide WHO may act; actor-storage decides WHOSE data they touch). 'triggers' = the ONLY way a skill acts proactively — on a schedule or an event, with no user message; read before designing anything that must happen by itself, decision_guide first: any time word in a requirement (every day, at 8, weekly) is a trigger, and it is done only when ateam_get_solution(view:'triggers') shows it registered:true with a next run and system_halted:false — anything less is not done: report what that result's done_rule says. 'sub-agent' = sub-agents are a TOOL CALL (sys.callAiWithTools with a curated toolNames set), not a definition-level construct; caveats stated inline. 'voice' = the voice channel: phone (Twilio) and web/mobile callers reach the SAME skill runtime as chat — what you control (solution.voice, routing.voice.default_skill, a per-skill voice block, ateam_test_voice) and what you do not. 'voice-native' = the exception to that model: a `voice_native` block puts a skill inside the live audio loop (persona layer, one server skill tool, plus local device tools), with the boundaries that come with it. 'platform-connectors' = the built-in platform connectors (memory, browser, gmail, whatsapp, …) with their LIVE tool schemas and the inter-connector calling pattern — read before writing a connector that duplicates one. 'sdk' = the @ateam/sdk runtime API reference (platform, context, memory, progress, log, llm) for custom connector and skill code. 'host-contract' = the normative boundary between a host shell (mobile app, web shell, kiosk, watch) and the solutions it renders: ownership matrix, forbidden host behaviours, host capability allow-list — read when reviewing a host or designing a portable solution. 'platform-truth' = does this deployment's published sys.* tools and platform connectors agree with what the RUNNING Core exposes (including planner visibility)? Answers agrees:null when Core cannot be reached, never silence. 'workflows' = the Builder's step-by-step state machines for building skills and solutions (the same document ateam_get_workflows returns). 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
+            "What to fetch: 'realizations' = HOW to build a capability: for each one the valid physical routes with use_when / do_not_use_when / execution / freshness, so device-dependent design picks a route deliberately instead of by accident. 'capabilities' = START HERE IF YOU ARE NEW — the capability index, organised by what a solution DOES rather than by our build artifacts: can I see what the user sees? talk with them out loud? know where they are and that they are moving? act while they sleep? remember each user? show them something? Each question gets a one-word answer (yes / yes-with-gaps / not yet / unknown) and the topics to read next. Every other topic below is named after an ARTIFACT, so if you do not already know our vocabulary this is the only door you can find by thinking about your own problem. 'overview' = API overview + endpoints, 'skill' = full skill spec, 'solution' = full solution spec, 'enums' = all enum values, 'connector-multi-user' = multi-user connector guide, 'python_helpers' = adas.* helper namespace for run_python_script orchestration (read this when designing personas that read state → call tools → checkpoint → status; without it, scripts hand-roll JSON parsing and tool delegation = 5-10x larger and brittler), 'widgets' = widget (UI plugin) spec: catalog model, how_to_use block shape (solution.json snippet + opener_call + persona_phrasing + binding_notes), rules for declaring ui_plugins, and sections.data_fidelity: what a plugin that shows data must render, and when a test that wrote records is done. A plain read can arrive with that section stubbed (one response holds 50,000 characters), so read it whole with " + DATA_FIDELITY_AT + ". Pair with ateam_get_widget_catalog for the live per-tenant inventory. 'ui-plugins' = the UI plugin BUILD guide for every render mode: iframe (HTML under ui-dist/, rendered by the web and by the phone's WebView), react-native (phone only) and adaptive (both) — the manifest schema, the postMessage protocol, device tools, deployment, and the deep React Native build (author in rn-src/, compile with a build:rn esbuild script (format=cjs, target=es2015, external react/react-native/@adas/plugin-sdk) to rn-bundle/index.bundle.js, plain-object export). Read it before authoring any widget. What a plugin that shows data must render is read whole with " + DATA_FIDELITY_AT + " (that page only points there). 'device-capabilities' = THE DEVICE CAPABILITY MATRIX, GENERATED from the mobile SDK's own artefacts and stamped with their hashes: every native.* API (mechanical one-shot verbs), every deviceState.* domain (semantic state a reasoning loop reads, with freshness + confidence) and every server-called device.* tool, each with status (done / partial / shape-only / missing) and what is left. READ THIS before concluding the phone cannot do something — camera, video, scanning, vision, sensors, location, on-device storage. Absence from any other spec topic is NOT evidence. 'mobile-connector' = building functional connectors (background services) for ateam-mobile that use device capabilities through the Native Bridge SDK. 'actor-storage' = per-actor storage (production): a per-(tenant, actor, skill) SQLite database served by the actorstore-mcp platform connector — read this instead of hand-rolling per-user isolation in a connector. 'consumer-roles' = role-based access for your solution's END-USERS: you declare the config, the platform resolves and enforces one RoleProfile per request (roles decide WHO may act; actor-storage decides WHOSE data they touch). 'triggers' = the ONLY way a skill acts proactively — on a schedule or an event, with no user message; read before designing anything that must happen by itself, decision_guide first: any time word in a requirement (every day, at 8, weekly) is a trigger; a recurring check the user gave no cadence for gets none (ask, add no trigger: decision_guide.implied_repetition_without_cadence); and a trigger is done only when ateam_get_solution(view:'triggers') shows it registered:true with a next run and system_halted:false — anything less is not done: report what that result's done_rule says. 'sub-agent' = sub-agents are a TOOL CALL (sys.callAiWithTools with a curated toolNames set), not a definition-level construct; caveats stated inline. 'voice' = the voice channel: phone (Twilio) and web/mobile callers reach the SAME skill runtime as chat — what you control (solution.voice, routing.voice.default_skill, a per-skill voice block, ateam_test_voice) and what you do not. 'voice-native' = the exception to that model: a `voice_native` block puts a skill inside the live audio loop (persona layer, one server skill tool, plus local device tools), with the boundaries that come with it. 'platform-connectors' = the built-in platform connectors (memory, browser, gmail, whatsapp, …) with their LIVE tool schemas and the inter-connector calling pattern — read before writing a connector that duplicates one. 'sdk' = the @ateam/sdk runtime API reference (platform, context, memory, progress, log, llm) for custom connector and skill code. 'host-contract' = the normative boundary between a host shell (mobile app, web shell, kiosk, watch) and the solutions it renders: ownership matrix, forbidden host behaviours, host capability allow-list — read when reviewing a host or designing a portable solution. 'platform-truth' = does this deployment's published sys.* tools and platform connectors agree with what the RUNNING Core exposes (including planner visibility)? Answers agrees:null when Core cannot be reached, never silence. 'workflows' = the Builder's step-by-step state machines for building skills and solutions (the same document ateam_get_workflows returns). 'monitoring' = THE MONITORING CONTRACT: which tools are safe to call in a poll loop (with cost / poll interval / whether output stays bounded as the run grows), which are not and what to use instead, plus the running ateam-mcp version. Read this BEFORE writing any loop that watches a build — the safe poll is ateam_chain_status, never ateam_get_chain.",
         },
         section: {
           type: "string",
@@ -1447,14 +1503,18 @@ export const tools = [
   {
     name: "ateam_conversation",
     core: true,
+    // CORE CUTS A TOOL DESCRIPTION AT 1200 CHARACTERS for an agent run
+    // (ai-dev-assistant anthropicAgentBackend.js:618, openaiAgentBackend.js:242,
+    // sys.callAiWithTools.js:157), and the in-app builder makes every ateam_*
+    // call inside one. This one was 1,489, so that agent never read its last
+    // ~290 characters (who a job runs as, attachments). It now fits whole
+    // (test/conversation-continues.test.mjs). Parameter descriptions are not
+    // cut there (agentSdk/toolSchema.js), so actor_id carries TEST_RUNS_AS.
     description:
-      "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
-      "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
-      "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true. That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
-      "Multi-turn: each call starts a new chain; pass the reply's actor_id (the thread) back in to continue that thread. " + WAITING_ON_THE_USER + " " +
-      PLAY_THE_PERSON + " " +
-      "Who the job runs as: see actor_id. " + RAN_AS_IN_REPLY + "\n\n" +
-      "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
+      "Chat with a deployed solution (auto-routed; no skill_id).\n\n" +
+      "ALWAYS ASYNC: returns a chain_id at once; the reply is NOT here. Poll ateam_chain_status(chain_id) every ~2s until chain_done === true (by chain, never by job); ateam_get_chain(chain_id) once at the end.\n\n" +
+      "Multi-turn: " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW + " " + WAITING_ON_THE_USER + " " +
+      PLAY_THE_PERSON + " " + RAN_AS_IN_REPLY,
     inputSchema: {
       type: "object",
       properties: {
@@ -1468,7 +1528,11 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "Optional: the conversation thread — the actor_id from a previous response, to continue it. " + TEST_RUNS_AS,
+          description:
+            "Optional. It picks no identity and continues nothing: your key does both (the description says what continues a conversation, and the window an answer has). " +
+            "What it does: with no person on the key, the reply's actor_id echoes it (or is a test_ id when you pass none); with a person, the reply's actor_id is that person whatever you pass. " +
+            "ateam-mcp keeps the actor_id you pass, and the one the reply returns (a test_ id excepted), as this session's actor for later job reads such as ateam_chain_status, so pass only a real one: an id Core does not know makes those reads fail (401). " +
+            TEST_RUNS_AS,
         },
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
@@ -2419,8 +2483,24 @@ export const tools = [
   {
     name: "ateam_test_abort",
     core: true,
+    // WHO THE ABORT ACTS AS. actor_id came in with 852b373 as a copy of the
+    // read tools' "WHO is asking … Pass it to inspect a job run by a DIFFERENT
+    // actor", and the handler below never read it. The abort is no read: the
+    // Builder's DELETE …/test/:jobId (routes/solutions.js:3056-3059, 986b2b8d)
+    // sends Core testIdentity(req).ranAs — the API key's person, null for a key
+    // no person minted — and nothing the caller names. Core's
+    // POST /api/job/:id/abort (server.js:3006) refuses an actor that may not
+    // access the job (utils/actors.js canAccessActor: itself, a platform admin,
+    // or a _system_service job), answered as 403 JOB_ACCESS_DENIED. A key with
+    // no person reaches Core with no actor, read as _system_service
+    // (middleware/attachActor.js). What actor_id still does is the dispatcher's
+    // (handleToolCall → api.js touchSession): it becomes the session's actor,
+    // which the chain_id form's chain read (GET /deploy/jobs/:id/chain → Core
+    // /api/job/:id/chain, a per-actor read) carries. Kept and described for that,
+    // since an undeclared actor_id would be latched all the same.
     description:
-      "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Stops at the next iteration boundary. (Advanced.)",
+      "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Stops at the next iteration boundary. " +
+      "The abort acts as your API key's person, as the test's start did (its ran_as), whatever actor_id says: Core stops a job that person may access and refuses any other with 403 JOB_ACCESS_DENIED. A key no person minted acts as the platform's service identity, which may stop only anonymous runs. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -2432,7 +2512,7 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional. WHO is asking. A job belongs to an actor and Core enforces that on per-job reads, so a tenant key alone is refused. Usually unnecessary — the session remembers the actor from ateam_conversation/ateam_test_skill. Pass it to inspect a job run by a DIFFERENT actor (e.g. a real user's).",
+            "Optional, and NOT who aborts: the abort acts as your API key's person (see the description). What it does is what actor_id does on any call: ateam-mcp keeps it (a test_ thread id excepted) as this session's actor and sends it on later calls, and the chain_id form reads the chain's jobs as that actor before aborting them. The session already holds it after ateam_conversation / ateam_test_skill; in a new session, pass the ran_as of the reply that started the run.",
         },
         solution_id: {
           type: "string",
@@ -3053,7 +3133,9 @@ export const tools = [
         solution_id: { type: "string", description: "The solution id." },
         plugin_id: {
           type: "string",
-          description: "The ui_plugin id to probe, e.g. 'mcp:accounting-mcp:spending-dashboard'.",
+          // Was "e.g. 'mcp:accounting-mcp:spending-dashboard'" (242048d): one
+          // domain as the only example. The id's form says it for every solution.
+          description: "The ui_plugin id to probe: 'mcp:<connector-id>:<plugin-name>'.",
         },
         // values: Core's ui.surfaceProbe has taken expect.values since 2984d2a60
         // (2026-08-13; the on-screen half since 77a44bbbb) — its own schema and
@@ -3061,14 +3143,25 @@ export const tools = [
         // ui.surfaceProbe.js. 242048d defined this schema with tools only, so no
         // agent was told it could prove a number came from the data. The
         // handler forwards `expect` whole, so only the schema was missing.
+        //
+        // WHEN SUCH A TEST IS DONE. a1fd01f said "Use a value from a record you
+        // created" and stopped there, so the record stayed in the person's data:
+        // the 2026-10-02 release gate's in-app build reported done with its test
+        // row still live. The rule is the Builder's TEST_ROW_DONE_RULE
+        // (uiPluginRules.js; served in /spec/widgets sections.data_fidelity and
+        // /spec/skill human_step_testing.test_data). This names its two demands
+        // and POINTS at it, never a copy. The example values ('37.50',
+        // 'Groceries') named one domain only; a placeholder names none.
         expect: {
           type: "object",
           description:
             "Optional assertion. { tools: ['memory.get', ...] } — each listed tool MUST be called by the plugin, else ok:false. " +
-            "{ values: ['37.50', 'Groceries'] } — each string must appear in visible_text AND must DISAPPEAR when the data " +
+            "{ values: ['<a value as the widget shows it>', ...] } — each string must appear in visible_text AND must DISAPPEAR when the data " +
             "path is disabled: the probe renders the plugin a second time with every data call answered by an error, and a " +
             "value still rendered then is hardcoded in the plugin, so the probe fails it. Use a value from a record you " +
-            "created, formatted as the widget shows it.",
+            "created, formatted as the widget shows it. Then finish: delete that record through the solution's own delete, " +
+            "and show it gone with the SAME read that showed it after you created it. The whole rule, TEST_ROW_DONE_RULE: " +
+            DATA_FIDELITY_AT + ".",
           properties: {
             tools: { type: "array", items: { type: "string" } },
             values: { type: "array", items: { type: "string" } },
@@ -4557,7 +4650,7 @@ export const handlers = {
         // and list promote + build_and_run, so the loop an agent follows most
         // often told it to ship every change.
         { step: 4, action: "Iterate", description: `Change it on \`${BRANCH_WORKFLOW.write_branch}\` and deploy it from \`${BRANCH_WORKFLOW.write_branch}\` to test it, with no promote. Connector code: ateam_github_patch, ONE FILE AT A TIME, then ateam_upload_connector(solution_id, connector_id, github:true). Skill or solution definitions: ateam_patch, which writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call. ${BRANCH_WORKFLOW.iterate_note} NEVER re-pass all connector code inline after first deploy.`, tools: ["ateam_github_patch", "ateam_upload_connector", "ateam_patch", "ateam_redeploy"] },
-        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; multi-turn via actor_id, the thread; who it runs as: conversation_flow.who_it_runs_as). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
+        { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; the next turn: conversation_flow.steps[3]; who it runs as: conversation_flow.who_it_runs_as). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
         { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} Then ateam_build_and_run(solution_id) deploys \`${BRANCH_WORKFLOW.deploy_branch}\`. ${BRANCH_WORKFLOW.the_silent_mistake} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
@@ -4567,14 +4660,14 @@ export const handlers = {
         "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id, ran_as } immediately (what actor_id and ran_as are: who_it_runs_as below). The reply is NOT here.",
         "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true. " + WAITING_ON_THE_USER + " (step 4)",
         "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
-        "4. CONTINUE THE THREAD — reply / next turn: ateam_conversation(solution_id, message, actor_id: <the reply's actor_id>). New chain, same thread. Repeat from step 2.",
+        "4. NEXT TURN — a reply or the next message: ateam_conversation(solution_id, message). " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW + " Repeat from step 2.",
       ],
       who_it_runs_as: TEST_RUNS_AS,
       example: {
         kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "usr_you", ran_as: "usr_you" }  (a key no person minted: actor_id "test_x", ran_as null)',
         poll: 'ateam_chain_status(chain_id: "job_ab12") → { chain_status: "running", chain_done: false } … repeat … → { chain_status: "completed", chain_done: true, result: "…" }',
         full_tree: 'ateam_get_chain(chain_id: "job_ab12") → { chainJobs: [ {jobId, skill, status, relation, depth} … ], executionSteps: [ … ] }',
-        continue: 'ateam_conversation(solution_id: "ada", message: "yes", actor_id: "usr_you")',
+        continue: 'ateam_conversation(solution_id: "ada", message: "yes")  (inside the window in steps[3])',
       },
     },
     // RENDERED FROM BRANCH_WORKFLOW — do not restate the model here.
@@ -6008,7 +6101,9 @@ export const handlers = {
             slim: `ateam_chain_status(chain_id: "${chainId}")  → cheap chip-quick poll; loop ~2s until chain_done===true (whole chain terminal, not just one job). Then read result.`,
             waiting_on_the_user: WAITING_ON_THE_USER,
             full: `ateam_get_chain(job_id: "${chainId}")  → full tree + per-job detail (heavier; use once, not in a poll loop)`,
-            continue: kickoff?.actor_id ? `ateam_conversation(actor_id: "${kickoff.actor_id}", ...) to continue the thread` : undefined,
+            // It said "ateam_conversation(actor_id: …) to continue the thread"
+            // (a793b34): actor_id continues nothing (CONVERSATION_CONTINUES).
+            continue: "ateam_conversation(solution_id, message). " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW,
             // The Builder's ran_as rides in ...kickoff above; name it, so an agent
             // reads WHO the job ran as and not only the thread.
             who_it_ran_as: RAN_AS_IN_REPLY,

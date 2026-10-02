@@ -102,11 +102,15 @@ test("ateam_test_skill: actor_id states it; the description names ran_as", () =>
   assertCurrent("ateam_test_skill description", d);
 });
 
-test("ateam_conversation: actor_id states it; multi-turn names the thread and ran_as", () => {
+// It asserted /actor_id \(the thread\)/ — "pass the reply's actor_id (the
+// thread) back in to continue that thread" (7d44113). Core drops actor_id from
+// an agent key; the key continues the conversation
+// (test/conversation-continues.test.mjs).
+test("ateam_conversation: actor_id states it; multi-turn says the key continues it, and names ran_as", () => {
   assertStatesIt("ateam_conversation actor_id", actorParam("ateam_conversation"));
   const d = tool("ateam_conversation").description;
   assert.ok(d.includes(RAN_AS_IN_REPLY), "ateam_conversation description does not name ran_as");
-  assert.match(d, /actor_id \(the thread\)/);
+  assert.match(d, /your key, not actor_id, continues the conversation/);
   assertCurrent("ateam_conversation description", d);
 });
 
