@@ -97,7 +97,7 @@ test("ateam_upload_connector says what replace:true deletes — and where it doe
   // CORE (LOW-MED): the branch loses what the upload leaves out whether Core
   // ever ran it or not — a file written with ateam_github_patch included.
   assert.match(replaceLine, /deployed or not — files written with ateam_github_patch included/);
-  assert.match(replaceLine, /not known text is kept \(repo\.kept\)/);
+  assert.match(replaceLine, /Some files are kept — repo\.kept names each with its reason\./);
   assert.match(replaceLine, /Never from main/);
   assert.match(replaceLine, /github:true \+ replace:true leaves the repo as it is/);
   assert.doesNotMatch(t.description, /Wipes connector dir \+ writes only the provided files/, "the old, incomplete claim is still served");
@@ -106,6 +106,10 @@ test("ateam_upload_connector says what replace:true deletes — and where it doe
   assert.match(param, /from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch \(dev\)/);
   assert.match(param, /deployed or not, files written with ateam_github_patch included/);
   assert.match(param, /Main is never touched/);
+  // CORE on #50: repo.kept also holds regenerated files, binaries and too-large
+  // ones — not only files that are not known text. The text names no one kind.
+  assert.match(param, /some files are kept — repo\.kept names each with its reason/);
+  assert.doesNotMatch(JSON.stringify(t), /not known text is kept/, "the text says only not-known-text files are kept");
   assert.match(param, /With github:true the repo is left as it is/);
 });
 
