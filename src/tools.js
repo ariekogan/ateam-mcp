@@ -2343,7 +2343,7 @@ export const tools = [
       "Modes:\n" +
       "  • github:true — deploy connectors/<id>/ from the repo at `ref` (default 'dev'); add files:[] to overlay yours on it.\n" +
       "  • files:[] — MERGE (default): your files over the repo at `ref`, over the files Core ALREADY runs, so a file you leave out is kept. Refused when there is no base at all.\n" +
-      "  • files:[] + replace:true — the connector becomes EXACTLY these files. Every other file is DELETED from Core, from the Builder's source and from the repo's working branch (dev) — never from main; a promote carries it there. The reply names each (dropped, authored.removed, repo.deleted). github:true + replace:true leaves the repo as it is.\n\n" +
+      "  • files:[] + replace:true — the connector becomes EXACTLY these files. Every other file is DELETED from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev): every file under connectors/<connector-id>/ you leave out, deployed or not — files written with ateam_github_patch included. A file that is not known text is kept (repo.kept). Never from main; a promote carries it there. The reply names each (dropped, authored.removed, repo.deleted, repo.branch_only). github:true + replace:true leaves the repo as it is.\n\n" +
       "Multi-file connectors: pass each file as content_base64 (single-line, escape-safe) instead of content. This is the canonical path for a full connector — do not curl the raw endpoint (it skips connector registration and PAT provisioning).",
     inputSchema: {
       type: "object",
@@ -2379,7 +2379,7 @@ export const tools = [
         },
         replace: {
           type: "boolean",
-          description: "FULL REPLACE: the connector becomes exactly `files`. Every other file is deleted from Core, from the Builder's source and from the repo's working branch (dev); main is never touched (a promote carries it). With github:true the repo is left as it is. Default: false (= merge). An incomplete file set with replace:true deletes the rest of the connector.",
+          description: "FULL REPLACE: the connector becomes exactly `files`. Every other file is deleted from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev) — every file under connectors/<connector-id>/ you leave out, deployed or not, files written with ateam_github_patch included (a file that is not known text is kept). Main is never touched (a promote carries it). With github:true the repo is left as it is. Default: false (= merge). An incomplete file set with replace:true deletes the rest of the connector.",
         },
         force: {
           type: "boolean",
