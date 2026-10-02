@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.113 — 2026-10-02
+
+### Tool texts say what really happens (#55)
+
+- `ateam_test_abort`: drops the description of an `actor_id` that the abort
+  never used.
+- `ateam_conversation`: says what `actor_id` does and does not do, what
+  continues a conversation, and how long a pending question waits for its
+  answer.
+- `ateam_verify_surface`, `ateam_get_spec`: point at the one served rule for
+  data fidelity and for finishing a test with the solution's own delete. They
+  name the `search` form, which returns that section whole even when a page
+  is over the response cap.
+- `ateam_get_spec` (triggers): points at the rule for a recurring check that
+  has no cadence from the user (ask; add no trigger until they answer).
+
+### Served examples fit any solution (#56)
+
+- The examples in `ateam_verify_surface`, `ateam_connector_logs`, the
+  attachment helper and the scaffolded connector's comments are now varied
+  and domain-neutral.
+- A test fails if a served string or key, or a string literal in `src/`,
+  names the scenario a release was tested with.
+
 ## 0.4.112 — 2026-10-02
 
 ### The browser sign-in belongs to the host the request addressed
