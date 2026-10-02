@@ -155,6 +155,76 @@ const DATA_FIDELITY_AT = 'ateam_get_spec({ topic: "widgets", search: "data_fidel
 // also_available, read by its search form (Builder #144, BL-21).
 const PUSH_WRITES_AT = 'ateam_get_spec({ topic: "overview", search: "github/push" })';
 
+/**
+ * build_and_run's answer when pull-bundle refused. A refusal that names its
+ * `code` is the Builder's verdict: its error, hint and recovery go through as
+ * they are (CORE on #58, B58R-3). The guess "the repo may not exist yet —
+ * deploy with mcp_store first" contradicted those (a branch that could not be
+ * read, a file that does not parse) and sent the agent to re-send connector
+ * code inline. It stays only for an answer with no code (a 404 with no repo).
+ * @param {{ code?: string, error?: string, hint?: string, recovery?: string }} said
+ * @param {string} error
+ */
+function pullRefused(said, error) {
+  if (typeof said.code === "string" && said.code) {
+    return {
+      ok: false,
+      phase: "github_pull",
+      code: said.code,
+      error: said.error || error,
+      ...(said.hint && { hint: said.hint }),
+      ...(said.recovery && { recovery: said.recovery }),
+    };
+  }
+  return {
+    ok: false,
+    phase: "github_pull",
+    error,
+    hint: said.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
+    message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+  };
+}
+
+/**
+ * A bundle pull-bundle could not read in full is refused, never deployed in
+ * part (Builder #144, B144R-6): `solution_unreadable` names the first
+ * definition file (solution.json, a skill) that could not be read or parsed;
+ * `connectors_unreadable` the connectors with a file that could not be read.
+ * @param {object} pull  pull-bundle's answer
+ * @returns {object|null}
+ */
+function bundleNotRead(pull) {
+  const branch = BRANCH_WORKFLOW.deploy_branch;
+  const u = pull.solution_unreadable;
+  if (u) {
+    const path = u.path || "solution.json";
+    const parse = u.stage === "parse";
+    return {
+      ok: false,
+      phase: "github_pull",
+      code: parse ? "SOLUTION_JSON_INVALID" : "BRANCH_NOT_READ",
+      path,
+      ...(u.code && { cause_code: u.code }),
+      error: `${path} on ${branch} ${parse ? "does not parse" : "could not be read"}: ${u.error}. Nothing was deployed.`,
+      hint: parse
+        ? `Fix it with ateam_github_patch(solution_id, path:'${path}'), ship it with ateam_github_promote, then deploy again.`
+        : "Retry the deploy; GitHub reads are usually back within a minute.",
+    };
+  }
+  const ids = Array.isArray(pull.connectors_unreadable) ? pull.connectors_unreadable : [];
+  if (ids.length > 0) {
+    return {
+      ok: false,
+      phase: "github_pull",
+      code: "BRANCH_NOT_READ",
+      connectors_unreadable: ids,
+      error: `GitHub did not let every file of ${ids.join(", ")} be read on ${branch}; deploying now would ship ${ids.length === 1 ? "that connector" : "those connectors"} without them. Nothing was deployed.`,
+      hint: "Retry the deploy; GitHub reads are usually back within a minute.",
+    };
+  }
+  return null;
+}
+
 // WHAT CONTINUES A CONVERSATION, and the window an answer has — what Core does
 // today, from Core and Builder origin/dev (2026-10-02). The Builder serves no
 // constant for this, so these are ateam-mcp's words, rendered in
@@ -4055,15 +4125,13 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
         // idempotent, so one lost answer does not fail the whole deploy.
         { timeoutMs: 60_000, idempotent: true },
       );
-      if (!pullResult.ok) {
-        return {
-          ok: false,
-          phase: "github_pull",
-          error: pullResult.error || "Failed to pull bundle from GitHub",
-          hint: pullResult.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
-          message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
-        };
-      }
+      if (!pullResult.ok) return pullRefused(pullResult, pullResult.error || "Failed to pull bundle from GitHub");
+      // A LISTED FILE THE BUILDER COULD NOT READ OR PARSE IS NOT ABSENT
+      // (Builder #144, B144R-6). The bundle comes back without it, and saying
+      // so in a note while deploying the rest shipped the solution without a
+      // skill, without its solution.json, or with a connector short of a file.
+      const notRead = bundleNotRead(pullResult);
+      if (notRead) return notRead;
       effectiveMcpStore = pullResult.mcp_store || {};
       pulledMcpStore = true;
       // Use solution from GitHub if not passed inline
@@ -4101,8 +4169,6 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
       // the Builder's store; what it can no longer do is disappear.
       const missingSource = Array.isArray(pullResult.connectors_missing_source)
         ? pullResult.connectors_missing_source : [];
-      const unreadable = Array.isArray(pullResult.connectors_unreadable)
-        ? pullResult.connectors_unreadable : [];
       if (!connectors?.length && (Object.keys(effectiveMcpStore).length > 0 || missingSource.length > 0)) {
         const connIds = [...new Set([
           ...Object.keys(effectiveMcpStore).map((k) => {
@@ -4129,15 +4195,9 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
           connectors_missing_source: missingSource,
           note: "These connectors are declared but the repo carries no source for them. They are still deployed if the Builder holds their authored source; if it does not, validation refuses and ateam_get_connector_source / ateam_recover_connector_source tell you which.",
         }),
-        ...(unreadable.length > 0 && { connectors_unreadable: unreadable }),
       });
     } catch (err) {
-      return {
-        ok: false,
-        phase: "github_pull",
-        error: err.message,
-        message: "Failed to pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
-      };
+      return pullRefused(jsonVerdictOf(err.body) || {}, err.message);
     }
   }
 
