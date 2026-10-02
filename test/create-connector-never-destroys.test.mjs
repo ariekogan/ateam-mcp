@@ -93,13 +93,19 @@ test("ateam_upload_connector says what replace:true deletes — and where it doe
   const t = tools.find((x) => x.name === "ateam_upload_connector");
   const replaceLine = t.description.split("\n").find((l) => l.includes("replace:true —"));
   assert.ok(replaceLine, "the replace:true mode is not described");
-  assert.match(replaceLine, /from Core, from the Builder's source and from the repo's working branch \(dev\)/);
-  assert.match(replaceLine, /never from main/);
+  assert.match(replaceLine, /from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch \(dev\)/);
+  // CORE (LOW-MED): the branch loses what the upload leaves out whether Core
+  // ever ran it or not — a file written with ateam_github_patch included.
+  assert.match(replaceLine, /deployed or not — files written with ateam_github_patch included/);
+  assert.match(replaceLine, /not known text is kept \(repo\.kept\)/);
+  assert.match(replaceLine, /Never from main/);
   assert.match(replaceLine, /github:true \+ replace:true leaves the repo as it is/);
   assert.doesNotMatch(t.description, /Wipes connector dir \+ writes only the provided files/, "the old, incomplete claim is still served");
   assert.ok(t.description.length <= CORE_DESCRIPTION_CUT, `${t.description.length} characters; an in-app agent sees only the first ${CORE_DESCRIPTION_CUT}`);
   const param = t.inputSchema.properties.replace.description;
-  assert.match(param, /from Core, from the Builder's source and from the repo's working branch \(dev\); main is never touched/);
+  assert.match(param, /from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch \(dev\)/);
+  assert.match(param, /deployed or not, files written with ateam_github_patch included/);
+  assert.match(param, /Main is never touched/);
   assert.match(param, /With github:true the repo is left as it is/);
 });
 
