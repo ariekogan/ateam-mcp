@@ -35,14 +35,6 @@ test("verify_surface expect: after proving a value, delete the record through th
   assert.match(e, /must appear in visible_text AND must DISAPPEAR when the data path is disabled/);
 });
 
-test("verify_surface: no single-domain example values or plugin id", () => {
-  const t = tool("ateam_verify_surface");
-  const all = JSON.stringify(t.inputSchema);
-  assert.doesNotMatch(all, /37\.50|Groceries|accounting-mcp|spending-dashboard/);
-  assert.equal(t.inputSchema.properties.plugin_id.description, "The ui_plugin id to probe: 'mcp:<connector-id>:<plugin-name>'.");
-  assert.ok(t.description.length <= CORE_DESCRIPTION_CUT);
-});
-
 test("'widgets' names the read that returns data_fidelity whole, and why a plain read is not it", () => {
   const w = line("widgets", "ui-plugins");
   assert.ok(w.includes("sections.data_fidelity: what a plugin that shows data must render, and when a test that wrote records is done."), w);

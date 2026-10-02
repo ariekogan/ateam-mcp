@@ -3133,9 +3133,7 @@ export const tools = [
         solution_id: { type: "string", description: "The solution id." },
         plugin_id: {
           type: "string",
-          // Was "e.g. 'mcp:accounting-mcp:spending-dashboard'" (242048d): one
-          // domain as the only example. The id's form says it for every solution.
-          description: "The ui_plugin id to probe: 'mcp:<connector-id>:<plugin-name>'.",
+          description: "The ui_plugin id to probe, e.g. 'mcp:accounting-mcp:spending-dashboard'.",
         },
         // values: Core's ui.surfaceProbe has taken expect.values since 2984d2a60
         // (2026-08-13; the on-screen half since 77a44bbbb) — its own schema and
@@ -3150,13 +3148,13 @@ export const tools = [
         // row still live. The rule is the Builder's TEST_ROW_DONE_RULE
         // (uiPluginRules.js; served in /spec/widgets sections.data_fidelity and
         // /spec/skill human_step_testing.test_data). This names its two demands
-        // and POINTS at it, never a copy. The example values ('37.50',
-        // 'Groceries') named one domain only; a placeholder names none.
+        // and POINTS at it, never a copy. The example values and plugin_id's
+        // example are the bias audit's (M7), in their own PR.
         expect: {
           type: "object",
           description:
             "Optional assertion. { tools: ['memory.get', ...] } — each listed tool MUST be called by the plugin, else ok:false. " +
-            "{ values: ['<a value as the widget shows it>', ...] } — each string must appear in visible_text AND must DISAPPEAR when the data " +
+            "{ values: ['37.50', 'Groceries'] } — each string must appear in visible_text AND must DISAPPEAR when the data " +
             "path is disabled: the probe renders the plugin a second time with every data call answered by an error, and a " +
             "value still rendered then is hardcoded in the plugin, so the probe fails it. Use a value from a record you " +
             "created, formatted as the widget shows it. Then finish: delete that record through the solution's own delete, " +
