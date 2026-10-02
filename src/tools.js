@@ -1284,6 +1284,15 @@ function kickFallsBackToSync(err) {
  */
 const CONNECTOR_UPLOAD_P95_MS = 75_000;
 
+/**
+ * How a WRONG lesson is corrected — one text, quoted by ateam_log_lesson and
+ * ateam_get_lessons. The Builder's lessons store states the same rule
+ * (LESSON_CORRECTION_RULE in its store/solutions.js) and owns the behaviour.
+ */
+export const LESSON_CORRECTION_RULE =
+  'A lesson that proved WRONG is corrected, never edited: log the corrected lesson with ' +
+  'supersedes:"<its id>". The wrong one stays in the history but is no longer returned as a lesson.';
+
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -2049,26 +2058,26 @@ export const tools = [
   {
     name: "ateam_log_lesson",
     core: true,
+    // CORE CUTS EVERY TOOL DESCRIPTION AT 1200 CHARACTERS for an agent run,
+    // and the in-app builder logs lessons inside one: this text stays whole
+    // within the cut (test/lesson-supersede.test.mjs).
     description:
-      "Record ONE lesson this run learned, so the NEXT run does not relearn it. " +
-      "A building agent starts every run empty — it does not know which tool " +
-      "misled the last run or the workaround that got past it. Log a lesson the " +
-      "moment a tool misleads you AND you find a way through.\n\n" +
-      "APPEND-ONLY. You cannot edit or delete earlier lessons, and you do not supply " +
-      "the timestamp — the server stamps it, so it cannot be forged.\n\n" +
-      "PROVENANCE CAVEAT, stated because the earlier wording over-promised: `job_id` " +
-      "and `actor` are recorded ONLY when the caller supplies x-adas-job-id / " +
-      "x-adas-actor-id. An agent calling this tool does not, so those fields are " +
-      "usually null — a lesson cannot currently be traced back to the run that " +
-      "produced it, and the file cannot tell 'three runs hit this' from 'one run hit " +
-      "it three times'. Do not put a job id in `error` to compensate; keep that field " +
-      "verbatim.\n\n" +
-      "LOG ONLY WHAT YOU OBSERVED. Quote the error VERBATIM; never paraphrase it " +
-      "and never write a theory about platform internals. A wrong lesson is worse " +
-      "than no lesson, because the next run cannot check it and will act on it.\n\n" +
-      "Use kind='misleading_success' when a call REPORTED success while the thing " +
-      "you wanted did not happen — that class is the most expensive to rediscover " +
-      "and it is invisible to a failures-only log.",
+      "Record ONE lesson this run learned, so the NEXT run — which starts empty " +
+      "— does not relearn it. Log it the moment a tool misleads you AND you find " +
+      "a way through.\n\n" +
+      "APPEND-ONLY: earlier lessons are never edited or deleted, and the server " +
+      "stamps the id and the time. " + LESSON_CORRECTION_RULE + " An unknown id " +
+      "is refused (404); a lesson already superseded is refused (409) naming the " +
+      "current one.\n\n" +
+      "PROVENANCE: `job_id` and `actor` are usually null (an agent calling this " +
+      "tool sends no x-adas-job-id / x-adas-actor-id): a lesson cannot be traced " +
+      "to its run, nor 'three runs hit this' told from 'one run, three times'. " +
+      "Do not put a job id in `error`; keep it verbatim.\n\n" +
+      "LOG ONLY WHAT YOU OBSERVED, a correction too. Quote the error VERBATIM; " +
+      "never a paraphrase, never a theory about platform internals. A wrong " +
+      "lesson is worse than no lesson: the next run will act on it.\n\n" +
+      "kind='misleading_success': a call REPORTED success while the effect you " +
+      "wanted did not happen — the class a failures-only log cannot hold.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2082,6 +2091,10 @@ export const tools = [
           enum: ["failure", "surprise", "misleading_success"],
           description: "failure = it errored; surprise = it worked but not as documented; misleading_success = it REPORTED success while the intended effect did not happen",
         },
+        supersedes: {
+          type: "string",
+          description: "Only to correct a lesson that proved WRONG: its `id` from ateam_get_lessons. This lesson replaces it; the wrong one stays in the history but is no longer returned as a lesson.",
+        },
       },
       required: ["solution_id", "tool", "error"],
     },
@@ -2091,16 +2104,21 @@ export const tools = [
     name: "ateam_get_lessons",
     core: true,
     description:
-      "Read what EARLIER runs on this solution learned — newest first, bounded. " +
-      "Call this during orientation, BEFORE planning: it is the only thing that " +
-      "carries context across runs, and it is cheap. Each entry says which tool " +
-      "misled a previous run, the verbatim error, what was tried instead, and " +
-      "whether that worked. An empty list is a real answer (nothing learned yet).",
+      "Read what EARLIER runs on this solution learned — the CURRENT lessons, " +
+      "newest first, bounded, each with its `id`. Call this during orientation, " +
+      "BEFORE planning: it is the only thing that carries context across runs, " +
+      "and it is cheap. Each entry says which tool misled a previous run, the " +
+      "verbatim error, what was tried instead, and whether that worked. An empty " +
+      "list is a real answer (nothing learned yet).\n\n" +
+      LESSON_CORRECTION_RULE + " A superseded lesson is counted in " +
+      "`superseded_count`, never listed in `lessons`; include_superseded:true " +
+      "returns it in a separate `superseded` list, each with `superseded_by`.",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: { type: "string", description: "The solution ID" },
-        limit: { type: "number", description: "Max entries, newest first (default 20)" },
+        limit: { type: "number", description: "Max current lessons, newest first (default 20)" },
+        include_superseded: { type: "boolean", description: "Also return the superseded lessons, in their own `superseded` list (default false)" },
       },
       required: ["solution_id"],
     },
@@ -7489,13 +7507,15 @@ export const handlers = {
     };
   },
 
-  ateam_log_lesson: async ({ solution_id, tool, error, workaround, worked, kind }, sid) => {
+  ateam_log_lesson: async ({ solution_id, tool, error, workaround, worked, kind, supersedes }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
     if (!tool) throw new Error("tool required — the tool that misled you");
     if (!error) throw new Error("error required — quote it VERBATIM, do not paraphrase");
+    // The Builder validates `supersedes` (a current lesson of THIS solution);
+    // a refusal comes back as its 404/409, naming the current lesson.
     return await post(
       apiPath`/deploy/solutions/${solution_id}/lessons`,
-      { tool, error, workaround, worked, kind },
+      { tool, error, workaround, worked, kind, supersedes },
       sid,
     );
   },
@@ -7517,10 +7537,13 @@ export const handlers = {
     return await get(apiPath`/deploy/solutions/${solution_id}/progress${rawQuery(qs)}`, sid);
   },
 
-  ateam_get_lessons: async ({ solution_id, limit }, sid) => {
+  ateam_get_lessons: async ({ solution_id, limit, include_superseded }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
-    const qs = Number.isFinite(limit) ? `?limit=${limit}` : "";
-    return await get(apiPath`/deploy/solutions/${solution_id}/lessons${rawQuery(qs)}`, sid);
+    const qs = new URLSearchParams();
+    if (Number.isFinite(limit)) qs.set("limit", String(limit));
+    if (include_superseded === true) qs.set("include_superseded", "true");
+    const qsStr = qs.toString() ? `?${qs}` : "";
+    return await get(apiPath`/deploy/solutions/${solution_id}/lessons${rawQuery(qsStr)}`, sid);
   },
 
   ateam_show_solution_minimal: async ({ solution_id }, sid) => {
