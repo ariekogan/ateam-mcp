@@ -151,6 +151,10 @@ const STORAGE_DECISION_AT = "ateam_get_spec('connector-multi-user') → storage_
 // those rules; it carries no copy.
 const DATA_FIDELITY_AT = 'ateam_get_spec({ topic: "widgets", search: "data_fidelity" })';
 
+// WHERE THE BUILDER STATES WHAT ateam_github_push WRITES — /spec
+// also_available, read by its search form (Builder #144, BL-21).
+const PUSH_WRITES_AT = 'ateam_get_spec({ topic: "overview", search: "github/push" })';
+
 // WHAT CONTINUES A CONVERSATION, and the window an answer has — what Core does
 // today, from Core and Builder origin/dev (2026-10-02). The Builder serves no
 // constant for this, so these are ateam-mcp's words, rendered in
@@ -2721,8 +2725,15 @@ export const tools = [
   {
     name: "ateam_github_push",
     core: true,
+    // A POINTER, NOT A COPY. What the push writes, and what it keeps as the
+    // branch holds it, is stated once by the Builder: /spec also_available
+    // "POST /deploy/solutions/:solutionId/github/push" (Builder #144, BL-21).
+    // This said "Commits the full bundle (solution + skills + connector
+    // source)" (c98addc), which stopped being true when the push began writing
+    // only what it changes.
     description:
-      "Push the current deployed solution to GitHub. Auto-creates the repo on first use. Commits the full bundle (solution + skills + connector source) atomically. Use after ateam_build_and_run to version your solution, or anytime you want to snapshot the current state.",
+      "Push the solution to its GitHub repo. What it writes, and what it keeps as the branch holds it: " +
+      PUSH_WRITES_AT + ". ateam_build_and_run runs it after a deploy with inline connector code.",
     inputSchema: {
       type: "object",
       properties: {
