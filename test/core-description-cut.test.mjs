@@ -9,8 +9,10 @@
 // it unseen. This checks every tool the server lists (coreTools).
 //
 // OVER_THE_CUT names the texts that were already past it when this test was
-// written. They are owed a shortening pass of their own; the list can only
-// shrink: a listed text that fits must leave it, and no text may join it.
+// written, each with its length then. They are owed a shortening pass of
+// their own. The debt can only shrink: a listed text may not grow past the
+// length pinned here (lower the pin when you shorten one), a listed text that
+// fits must leave the list, and no text may join it.
 //
 // Run: node --test test/core-description-cut.test.mjs
 import { test } from "node:test";
@@ -19,18 +21,18 @@ import { coreTools } from "../src/tools.js";
 
 const CORE_DESCRIPTION_CUT = 1200;
 
-const OVER_THE_CUT = new Set([
-  "ateam_auth",
-  "ateam_build_and_run",
-  "ateam_test_skill",
-  "ateam_test_notification",
-  "ateam_test_voice",
-  "ateam_patch",
-  "ateam_delete_solution",
-  "ateam_log_progress",
-  "ateam_create_plugin",
-  "ateam_upload_connector",
-  "ateam_github_patch",
+const OVER_THE_CUT = new Map([
+  ["ateam_auth", 1385],
+  ["ateam_build_and_run", 2469],
+  ["ateam_test_skill", 1223],
+  ["ateam_test_notification", 1331],
+  ["ateam_test_voice", 1780],
+  ["ateam_patch", 2993],
+  ["ateam_delete_solution", 1246],
+  ["ateam_log_progress", 1295],
+  ["ateam_create_plugin", 2017],
+  ["ateam_upload_connector", 1695],
+  ["ateam_github_patch", 2568],
 ]);
 
 const length = (t) => String(t.description || "").length;
@@ -42,8 +44,16 @@ test("every core tool's description fits in Core's 1200-character cut (the liste
   assert.deepEqual(over, []);
 });
 
+test("the debt only shrinks: no listed text grows past its pinned length", () => {
+  const byName = new Map(coreTools.map((t) => [t.name, t]));
+  const grew = [...OVER_THE_CUT]
+    .filter(([name, pinned]) => byName.has(name) && length(byName.get(name)) > pinned)
+    .map(([name, pinned]) => `${name}: ${length(byName.get(name))} characters, pinned at ${pinned}`);
+  assert.deepEqual(grew, [], "a text already past Core's cut grew: shorten it back");
+});
+
 test("the debt list only shrinks: each listed tool exists, and is still over the cut", () => {
   const byName = new Map(coreTools.map((t) => [t.name, t]));
-  const stale = [...OVER_THE_CUT].filter((name) => !byName.has(name) || length(byName.get(name)) <= CORE_DESCRIPTION_CUT);
+  const stale = [...OVER_THE_CUT.keys()].filter((name) => !byName.has(name) || length(byName.get(name)) <= CORE_DESCRIPTION_CUT);
   assert.deepEqual(stale, [], "these fit now (or are gone): take them off OVER_THE_CUT");
 });
