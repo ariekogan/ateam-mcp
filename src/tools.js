@@ -1343,7 +1343,7 @@ export const tools = [
     name: "ateam_build_and_run",
     core: true,
     description:
-      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → on a FIRST deploy (no repo yet) creates the GitHub repo and pushes to it.\n\n" +
+      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → then ateam_github_push (when it runs: its /spec entry).\n\n" +
       `OVER A HOSTED CONNECTION (HTTP), which is cut off after ~100s without an answer, the call answers within ${HOSTED_CALL_BUDGET_MS / 1000}s. A run not finished by then answers status:"running" with a run_id and goes on: nothing is stopped or sent again. ` +
       "ateam_build_and_run(solution_id, resume:true, run_id) then answers with THAT run's result (waiting up to the same time again) and deploys nothing. A local (stdio) connection waits for the whole run.\n\n" +
       "🌳 DEV/PROD WORKFLOW:\n" +
@@ -2732,8 +2732,8 @@ export const tools = [
     // source)" (c98addc), which stopped being true when the push began writing
     // only what it changes.
     description:
-      "Push the solution to its GitHub repo. What it writes, and what it keeps as the branch holds it: " +
-      PUSH_WRITES_AT + ". ateam_build_and_run runs it after a deploy with inline connector code.",
+      "Push the solution to its GitHub repo. When it runs, what it writes, and what it keeps as the branch holds it: " +
+      PUSH_WRITES_AT + ".",
     inputSchema: {
       type: "object",
       properties: {
@@ -3258,7 +3258,11 @@ export const tools = [
     name: "ateam_sync_all",
     core: true,
     description:
-      "Sync ALL tenants: push Builder FS → GitHub, then pull GitHub → Core MongoDB. Requires master key authentication. Returns a summary table with results for each tenant/solution.",
+      // A POINTER, NOT A COPY (CORE on #58, B58R-1): the push half is
+      // ateam_github_push's call (github/push), which on a branch holding the
+      // solution sends nothing from the Builder's disk but what the branch lacks.
+      "Sync ALL tenants: ateam_github_push for each solution (what it writes, and what it keeps: " + PUSH_WRITES_AT +
+      "), then pull GitHub → Core MongoDB. Requires master key authentication. Returns a summary table with results for each tenant/solution.",
     inputSchema: {
       type: "object",
       properties: {
