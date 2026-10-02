@@ -61,7 +61,7 @@ export const ATTACHMENTS_INPUT_SCHEMA = {
       data: { type: "string", description: "The file's bytes, base64-encoded, without a data: prefix." },
       url: { type: "string", description: "http(s) URL of the file. Local stdio only; the hosted server refuses it." },
       mimeType: { type: "string", description: "The file's MIME type. Required with data. With url, overrides the type the server answered with." },
-      name: { type: "string", description: "File name shown to the skill (e.g. invoice.pdf). With url, defaults to the URL's last path segment." },
+      name: { type: "string", description: "File name shown to the skill (e.g. photo.jpg, notes.pdf, recipe.png). With url, defaults to the URL's last path segment." },
     },
     additionalProperties: false,
   },
