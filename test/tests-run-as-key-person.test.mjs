@@ -38,13 +38,42 @@ test("TEST_RUNS_AS says what the Builder's /spec says", () => {
     /generated it in Tokens & Keys/,
     /actor_id never picks the identity/,
     /a different actor_id is not honoured/,
-    /key no person minted[^.]*runs as before/,
+    // CORE review B112r3-L1: Core drops the test_ thread from an API-key caller.
+    /key no person minted[^.]*runs anonymously, as the platform's service identity — Core ignores actor_id then, so all anonymous tests in a tenant share one conversation/,
     /ran_as is the actor the job ran as/,
+    /ran_as is the actor the job ran as: the person whose key started the test \(the key's owner\), or null for an anonymous run/,
     /ateam_test_voice\) runs as the person only once the voice backend verifies the API key/,
     /Core follow-up/,
     /until then it is anonymous/,
+    // CORE review M41-3: a voice test given a phone_number reports the phone caller.
+    /until then it is anonymous — or, given a phone_number, the phone caller \(phone::<number>\) — and its ran_as says so/,
   ]) assert.match(TEST_RUNS_AS, rx);
   assert.ok(TEST_RUNS_AS.includes(RAN_AS_IN_REPLY), "RAN_AS_IN_REPLY must be a part of TEST_RUNS_AS, not a second wording");
+});
+
+// THE WHOLE STATEMENT, byte for byte (===) the Builder's capabilitySpecs.js
+// TEST_RUNS_AS on origin/dev 6c37ae6a (#112's text with #117's KEY_OWNER_GONE).
+// The phrase checks above say what it must mean; this says it is the SAME text,
+// so a change on one side fails here until the other side carries it too.
+const BUILDER_TEST_RUNS_AS =
+  "WHO A TEST RUNS AS: a test an agent starts through the Builder with an API key (ateam_conversation, " +
+  "ateam_test_skill, ateam_test_connector, ateam_test_voice) runs AS THE PERSON that key belongs to — the " +
+  "signed-in user who generated it in Tokens & Keys — so the job, its memory and its per-user data are that " +
+  "person's and show in that person's product. actor_id never picks the identity: it names the conversation " +
+  "thread, and with a person on the key the thread IS that person (Core keys a conversation by its actor), " +
+  "so a different actor_id is not honoured. Only a key no person minted (a service-provisioned key) runs " +
+  "anonymously, as the platform's service identity — Core ignores actor_id then, so all anonymous tests in " +
+  "a tenant share one conversation. A key whose person has since been deleted, or is no longer active in " +
+  "the workspace, runs nothing: it is refused (401 KEY_OWNER_DELETED or KEY_OWNER_INACTIVE) and never run " +
+  "as anyone else, until a workspace owner or admin rotates the key in Tokens & Keys (the new key belongs " +
+  "to whoever rotated it) or reactivates that person. Every reply's ran_as is the actor the job ran as: the " +
+  "person whose key started the test (the key's owner), or null for an anonymous run. A voice test " +
+  "(ateam_test_voice) runs as the person only once the voice backend verifies the API key the Builder sends " +
+  "it (Core follow-up); until then it is anonymous — or, given a phone_number, the phone caller " +
+  "(phone::<number>) — and its ran_as says so.";
+test("TEST_RUNS_AS is the Builder's TEST_RUNS_AS, byte for byte", () => {
+  assert.equal(TEST_RUNS_AS.length, 1473);
+  assert.equal(TEST_RUNS_AS, BUILDER_TEST_RUNS_AS);
 });
 
 // Any of these on a surface is the pre-#103 claim.
@@ -144,7 +173,7 @@ test("ateam_conversation's result keeps the Builder's ran_as and names it in _po
 
 // ONE copy of the fact: its distinctive words appear in no other source file.
 test("the statement is written once, in src/testRunsAs.js", () => {
-  const phrases = ["runs AS THE PERSON that key belongs to", "is the actor the job ran as"];
+  const phrases = ["runs AS THE PERSON that key belongs to", "is the actor the job ran as", "the person whose key started the test"];
   for (const f of readdirSync(SRC).filter((n) => n.endsWith(".js") && n !== "testRunsAs.js")) {
     const text = readFileSync(join(SRC, f), "utf8");
     for (const p of phrases) assert.ok(!text.includes(p), `src/${f} restates "${p}" — render TEST_RUNS_AS instead`);

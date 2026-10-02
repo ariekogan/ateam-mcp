@@ -123,12 +123,15 @@ import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
 // Who a test job runs as: ONE statement (the Builder's /spec wording), rendered where it is read.
-import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "./testRunsAs.js";
+import { TEST_RUNS_AS, RAN_AS_IN_REPLY, KEY_PERSON } from "./testRunsAs.js";
 // Signing in and switching workspace: ONE statement of the steps, rendered where it is read.
 import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused } from "./api.js";
+
+// A step that waits for a person: the Builder's human_step_testing words, verbatim.
+import { WAITING_ON_THE_USER, PLAY_THE_PERSON, TEST_CONNECTOR_NEVER } from "./humanStep.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -1447,8 +1450,10 @@ export const tools = [
     description:
       "Send a chat message to a deployed solution. No skill_id needed — the system auto-routes to the right skill.\n\n" +
       "ALWAYS ASYNC: returns a chain_id immediately — the assistant's reply is NOT in this response (a conversation can run for minutes across handoffs + subcalls, so a synchronous wait would hit the 100s edge timeout → 524).\n\n" +
-      "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true (or pending_question is set — the assistant is waiting on the user). That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
-      "Multi-turn: each call starts a new chain; pass the reply's actor_id (the thread) back in to continue that thread (e.g. reply to a confirmation prompt). Who the job runs as: see actor_id. " + RAN_AS_IN_REPLY + "\n\n" +
+      "POLL BY CHAIN, NEVER BY JOB: an individual job can terminate while the chain is still running, so poll ateam_chain_status(chain_id) on a loop (~2s) and stop when chain_done === true. That is the cheap chip-quick poll (Core's whole-chain computeChainStatus — the same thing the standard chat uses). Use ateam_get_chain(chain_id) only ONCE at the end if you want the full tree / per-job detail — it's too heavy to loop on.\n\n" +
+      "Multi-turn: each call starts a new chain; pass the reply's actor_id (the thread) back in to continue that thread. " + WAITING_ON_THE_USER + " " +
+      PLAY_THE_PERSON + " " +
+      "Who the job runs as: see actor_id. " + RAN_AS_IN_REPLY + "\n\n" +
       "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).",
     inputSchema: {
       type: "object",
@@ -2346,7 +2351,7 @@ export const tools = [
     description:
       "SLIM chain status — the chip-quick poll. Given a chain_id (from ateam_conversation), returns the WHOLE-CHAIN aggregate status cheaply: chain_status + chain_done (true only when the ENTIRE chain — root job + every handoff + askAnySkill subcall — is terminal), plus pending_question, result, and a short progress line.\n\n" +
       "This is what you poll on a loop after ateam_conversation — NOT ateam_get_chain (that returns the full tree; too heavy for periodic polling). A single job can finish while the chain is still running, so poll chain_done, not a job's status.\n\n" +
-      "Loop: call every ~2s until chain_done === true (or pending_question is set — the assistant is waiting on the user). Then read `result` / fetch the full tree once via ateam_get_chain if you need per-job detail.",
+      "Loop: call every ~2s until chain_done === true. " + WAITING_ON_THE_USER + " Otherwise read `result` / fetch the full tree once via ateam_get_chain if you need per-job detail.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2448,8 +2453,24 @@ export const tools = [
   {
     name: "ateam_test_connector",
     core: true,
+    // It said only "Call a tool on a running connector and get the result"
+    // (179ecf1, 2026-03-22) — no word that the call skips the skill. On
+    // 2026-09-28 a build (job_zare1ton, call #23) "tested" a person's
+    // confirmation by calling invoice.confirm_held here with an amount nobody
+    // supplied. Who it runs as: the key's person — PRE-1 (2026-10-01) saw it
+    // only after a conversation had latched the session's actor; on a fresh
+    // session the Builder sent Core no actor and it ran as _system_service
+    // until Builder #115 (CORE review M41-1).
     description:
-      "Call a tool on a running connector and get the result. Use this to test individual connector tools (e.g., triggers.list, entities.list, google.command) without deploying to a client. The connector must be connected and running.",
+      "Call ONE tool on a running connector DIRECTLY and get its raw result — no skill, no guardrails, no user turn. It proves a tool's plumbing (arguments in, result out). " +
+      "It can NOT prove a step that waits for a person — a confirmation, an approval, a value only the user knows: test those with ateam_conversation (ateam_get_spec('skill') → agent_guide.key_concepts.testing_and_runtime.human_step_testing). " +
+      TEST_CONNECTOR_NEVER + " " +
+      // CORE review M41x-L3: the key's person is what an API key gets
+      // (Builder #115). A master_key session has no key person: the Builder
+      // passes its own actor through, and with none Core uses its service
+      // identity.
+      "With an API key this call runs as " + KEY_PERSON + "; a master_key session runs as the actor it holds, or the platform's service identity when it holds none. " +
+      "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",
     inputSchema: {
       type: "object",
       properties: {
@@ -4544,7 +4565,7 @@ export const handlers = {
       _important: "ateam_conversation is ASYNC and CHAIN-based. A conversation runs across handoffs + askAnySkill subcalls for possibly minutes — a synchronous wait would hit the 100s edge timeout (524). ALWAYS poll by CHAIN, NEVER by a single job (a job can terminate while the chain is still active).",
       steps: [
         "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id, ran_as } immediately (what actor_id and ran_as are: who_it_runs_as below). The reply is NOT here.",
-        "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true, OR when pending_question is set (the assistant is asking the user something — answer via step 4).",
+        "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true. " + WAITING_ON_THE_USER + " (step 4)",
         "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
         "4. CONTINUE THE THREAD — reply / next turn: ateam_conversation(solution_id, message, actor_id: <the reply's actor_id>). New chain, same thread. Repeat from step 2.",
       ],
@@ -5985,6 +6006,7 @@ export const handlers = {
         ? {
             _note: "Conversation started (async). The reply is NOT in this response — poll the CHAIN for it.",
             slim: `ateam_chain_status(chain_id: "${chainId}")  → cheap chip-quick poll; loop ~2s until chain_done===true (whole chain terminal, not just one job). Then read result.`,
+            waiting_on_the_user: WAITING_ON_THE_USER,
             full: `ateam_get_chain(job_id: "${chainId}")  → full tree + per-job detail (heavier; use once, not in a poll loop)`,
             continue: kickoff?.actor_id ? `ateam_conversation(actor_id: "${kickoff.actor_id}", ...) to continue the thread` : undefined,
             // The Builder's ran_as rides in ...kickoff above; name it, so an agent
