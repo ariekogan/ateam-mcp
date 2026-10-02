@@ -12,8 +12,8 @@ import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { InvalidTokenError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import { parseApiKey, clearAuthOverride, KEY_ENVIRONMENTS, mcpUrlForEnv, envForMcpHost } from "./api.js";
-import { KEY_IS_THE_WORKSPACE, whereTheKeyIs, KEY_PAGE_URL } from "./signInSteps.js";
+import { parseApiKey, clearAuthOverride, mcpUrlForEnv, envForMcpHost, keyPageForEnv } from "./api.js";
+import { KEY_IS_THE_WORKSPACE, whereTheKeyIsAt } from "./signInSteps.js";
 
 // ─── TTLs ─────────────────────────────────────────────────────────
 const AUTH_CODE_TTL = 5 * 60 * 1000;   // 5 minutes
@@ -141,10 +141,11 @@ class ATeamClientsStore {
 
 // ONE PROVIDER PER ENVIRONMENT (mountOAuth): its sign-in page, its pending
 // sign-ins and the codes it issues belong to that environment's MCP host, so a
-// code is redeemed only at the issuer that issued it.
+// code is redeemed only at the issuer that issued it. `keyPage` is the key page
+// its sign-in page may link (api.js keyPageForEnv), or null for none.
 class ATeamOAuthProvider {
-  constructor(environment) {
-    this.environment = environment;
+  constructor(keyPage) {
+    this.keyPage = keyPage;
     this._clientsStore = new ATeamClientsStore();
     this.codes = new Map();     // code -> { client, params, apiKey, expiresAt }
     this.pending = new Map();   // pendingId -> { client, params, expiresAt }
@@ -175,7 +176,7 @@ class ATeamOAuthProvider {
       expiresAt: Date.now() + PENDING_TTL,
     });
     res.setHeader("Content-Type", "text/html");
-    res.send(generateAuthPage(pendingId, requester, { environment: this.environment }));
+    res.send(generateAuthPage(pendingId, requester, { keyPage: this.keyPage }));
   }
 
   async challengeForAuthorizationCode(_client, authorizationCode) {
@@ -262,15 +263,16 @@ const accessTokens = {
 // words of signInSteps.js, with Core's key page linked. It said "Don't have a
 // key? Get your API key" (293c43b), a link to /get-api-key, which landed on
 // the app's home page: nothing in the app read the ?admin=tokens it sent.
-// `environment` is the one the addressed host names (mountOAuth): production's
-// page links production's key page; any other environment's says "your
-// environment's own A-Team app", with no URL (signInSteps.js whereTheKeyIs).
-// It took no environment, so the dev MCP's page sent people to production for
-// a key.
-function keyHintHtml(environment) {
-  const where = escapeHtml(whereTheKeyIs(environment)).replace(
-    escapeHtml(KEY_PAGE_URL),
-    `<a href="${escapeHtml(KEY_PAGE_URL)}" target="_blank" rel="noopener">${escapeHtml(KEY_PAGE_URL)}</a>`,
+// `keyPage` is the key page of the environment the addressed host names
+// (mountOAuth, api.js keyPageForEnv): production's on production, a
+// self-hosted box's own on that box, and null on any other environment, whose
+// page says "your environment's own A-Team app" with no URL. Until #51 it was
+// production's on every host, so the dev MCP's page sent people to production
+// for a key.
+function keyHintHtml(keyPage) {
+  const where = !keyPage ? escapeHtml(whereTheKeyIsAt(null)) : escapeHtml(whereTheKeyIsAt(keyPage)).replace(
+    escapeHtml(keyPage),
+    `<a href="${escapeHtml(keyPage)}" target="_blank" rel="noopener">${escapeHtml(keyPage)}</a>`,
   );
   return `${escapeHtml(KEY_IS_THE_WORKSPACE)} ${where}`;
 }
@@ -278,7 +280,7 @@ function keyHintHtml(environment) {
 // `requester` is redirectRequester(redirect_uri): who the code goes to, by the
 // redirect's host. Never the client_name, which the caller chooses.
 // Exported so the page's words can be tested as rendered.
-export function generateAuthPage(pendingId, requester, { error = null, environment = null } = {}) {
+export function generateAuthPage(pendingId, requester, { error = null, keyPage = null } = {}) {
   const errorHtml = error
     ? `<div style="background:#3a1c1c;border:1px solid #7f1d1d;color:#fca5a5;padding:12px;border-radius:8px;margin-bottom:16px;font-size:14px">${escapeHtml(error)}</div>`
     : "";
@@ -360,7 +362,7 @@ export function generateAuthPage(pendingId, requester, { error = null, environme
       <input type="text" id="api_key" name="api_key"
              placeholder="adas_…" required autofocus
              autocomplete="off" spellcheck="false">
-      <div class="hint">${keyHintHtml(environment)}</div>
+      <div class="hint">${keyHintHtml(keyPage)}</div>
       <div class="actions">
         <button type="submit" id="submitBtn" class="btn-primary">Authorize</button>
       </div>
@@ -424,25 +426,28 @@ function refuseUnnamedHost(res) {
  * process-wide base (ATEAM_BASE_URL, 293c43b), which the Dockerfile set to
  * production's MCP, so the dev MCP's 401 challenge, metadata, issuer, and
  * authorize and token endpoints all named production, and a browser sign-in
- * started on dev bound a production workspace. Now each environment
- * (KEY_ENVIRONMENTS, via mcpUrlForEnv) gets its own SDK router and provider,
- * built from that environment's URL, and each request is dispatched by the
- * environment its host names: req.hostname, which is X-Forwarded-Host under
- * http.js's `trust proxy`, else Host, classified by envForMcpHost.
+ * started on dev bound a production workspace. Now each environment of
+ * `environments` (api.js hostEnvironments: KEY_ENVIRONMENTS, plus a
+ * self-hosted box's own from DOMAIN) gets its own SDK router and provider,
+ * built from that environment's URL (mcpUrlForEnv), and each request is
+ * dispatched by the environment its host names: req.hostname, which is
+ * X-Forwarded-Host under http.js's `trust proxy`, else Host, classified by
+ * envForMcpHost.
  *
  * A HOST THIS SERVER CANNOT NAME (a forged X-Forwarded-Host, a local run on
- * localhost, a self-hosted domain) gets no browser sign-in: every sign-in path
+ * localhost, a self-hosted domain DOMAIN does not name) gets no browser sign-in: every sign-in path
  * answers 421 with no URL, and the bearer gate's 401 names no metadata. It is
  * never echoed and never given production's URLs. A client there sends the
  * key as an Authorization: Bearer header, which the gate accepts on any host.
  *
  * @param {express.Application} app
+ * @param {Readonly<Record<string, string>>} environments - api.js hostEnvironments(), read once at startup
  * @returns {{ providers: Record<string, ATeamOAuthProvider>, bearerMiddlewareFor: (mountPath: string) => express.RequestHandler }}
  *   bearerMiddlewareFor("/") / ("/mcp"): the bearer gate for that mount, whose
  *   401 challenge names that mount's protected-resource metadata on the
  *   addressed host, or none on a host this server cannot name.
  */
-export function mountOAuth(app) {
+export function mountOAuth(app, environments) {
   // The PRM document for the resource mounted at `mountPath` ("/" or "/mcp").
   // The SDK's own rule: /.well-known/oauth-protected-resource + the resource's
   // path. One function for the route that serves it and the challenge that
@@ -450,11 +455,11 @@ export function mountOAuth(app) {
   const prmUrlFor = (serverUrl, mountPath) => getOAuthProtectedResourceMetadataUrl(new URL(mountPath, serverUrl));
 
   const hosts = new Map(); // environment → { provider, router, serverUrl }
-  for (const environment of Object.keys(KEY_ENVIRONMENTS)) {
-    const origin = mcpUrlForEnv(environment);
+  for (const environment of Object.keys(environments)) {
+    const origin = mcpUrlForEnv(environment, environments);
     if (!origin) continue;
     const serverUrl = new URL(origin);
-    const provider = new ATeamOAuthProvider(environment);
+    const provider = new ATeamOAuthProvider(keyPageForEnv(environment, environments));
     const router = express.Router();
 
     // SDK OAuth router (/.well-known/*, /authorize, /token, /register)
@@ -491,7 +496,7 @@ export function mountOAuth(app) {
       if (!entry || entry.expiresAt < Date.now()) {
         provider.pending.delete(pending_id);
         res.status(400).send(generateAuthPage("expired", null, {
-          environment,
+          keyPage: provider.keyPage,
           error: "Authorization request expired. Please close this page and try connecting again.",
         }));
         return;
@@ -501,8 +506,8 @@ export function mountOAuth(app) {
       if (!parsed.isValid) {
         // Re-render the page with an error
         res.status(400).send(generateAuthPage(pending_id, redirectRequester(entry.params.redirectUri), {
-          environment,
-          error: `That is not an A-Team API key. ${whereTheKeyIs(environment)}`,
+          keyPage: provider.keyPage,
+          error: `That is not an A-Team API key. ${whereTheKeyIsAt(provider.keyPage)}`,
         }));
         return;
       }
@@ -531,7 +536,7 @@ export function mountOAuth(app) {
 
   // Dispatch by the addressed host. Every other path goes on untouched.
   app.use((req, res, next) => {
-    const host = hosts.get(envForMcpHost(req.hostname));
+    const host = hosts.get(envForMcpHost(req.hostname, environments));
     if (host) return host.router(req, res, next);
     if (isSignInPath(req.path)) return refuseUnnamedHost(res);
     next();
@@ -558,7 +563,7 @@ export function mountOAuth(app) {
       resourceMetadataUrl: prmUrlFor(serverUrl, mountPath),
     })]));
     const unnamed = requireBearerAuth({ verifier: accessTokens, requiredScopes: [] });
-    return (req, res, next) => (gates.get(envForMcpHost(req.hostname)) || unnamed)(req, res, next);
+    return (req, res, next) => (gates.get(envForMcpHost(req.hostname, environments)) || unnamed)(req, res, next);
   };
 
   // ─── Periodic cleanup of expired entries ────────────────────────
