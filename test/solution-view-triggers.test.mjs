@@ -81,6 +81,18 @@ test('every text that says when a schedule is done says registered:true — the 
   }
 });
 
+// Builder #128 (3bc59da6): a recurring check the user gave no cadence for gets
+// no trigger — the in-app builder had given an untimed check every:"PT5M".
+// /spec/triggers decision_guide.implied_repetition_without_cadence is the one
+// home; this line POINTS at it (a05eb2b's line named only time words).
+test('the get_spec triggers line points at the no-cadence row, without copying it', () => {
+  const spec = TOOLS.tools.find((t) => t.name === 'ateam_get_spec').inputSchema.properties.topic.description;
+  const triggersLine = spec.slice(spec.indexOf("'triggers' ="), spec.indexOf("'sub-agent' ="));
+  assert.ok(triggersLine.includes('a recurring check the user gave no cadence for gets none (ask, add no trigger: decision_guide.implied_repetition_without_cadence)'), triggersLine);
+  // A pointer: none of the row's own wording, and no interval offered.
+  assert.doesNotMatch(triggersLine, /reasonable" interval|how often, and in which time zone|PT5M/);
+});
+
 test('every skill\'s registry is read, and each trigger says which skill it belongs to', async () => {
   const { out } = await view({});
   assert.deepEqual(hits, [
