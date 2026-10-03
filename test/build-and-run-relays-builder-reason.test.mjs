@@ -109,15 +109,16 @@ test("M2 control: the first deploy (no repo, no solution) keeps the pass-it-inli
 
 const SOLUTION = { id: "walkmate", name: "Walkmate", skills: [{ id: "guide" }] };
 
-test("M2 (skills): main holds a solution but no skills in an EXISTING repo: says so, nothing promoted, the same roads — never 'pass skills inline'", async () => {
+test("M2 (skills): main holds a solution but no skills in an EXISTING repo: says main lacks skills (not that nothing was promoted), the same roads — never 'pass skills inline'", async () => {
   const { result, wentOn } = await deployFrom({ body: { ok: true, solution: SOLUTION, skills: [], mcp_store: {} } });
   assert.deepEqual(wentOn, [], "a deploy with no skills went on");
   assert.equal(result.ok, false);
   assert.equal(result.phase, "pre_check");
   const said = JSON.stringify(result);
   assert.doesNotMatch(said, /pass skills inline/i, `the stale first-deploy advice: ${said}`);
-  assert.match(result.error, /`main`.*holds no skills/, result.error);
-  assert.match(result.error, /nothing has been promoted/, result.error);
+  // A main that holds a solution has had something promoted to it: this answer says what is missing, not "nothing promoted".
+  assert.match(result.error, /`main`.*lacks skills \(skills\/<id>\/skill\.json\)/, result.error);
+  assert.doesNotMatch(result.error, /promoted/, result.error);
   assert.match(result.message, /ateam_github_promote\(solution_id\) ships it/);
   assert.match(result.message, /ateam_upload_connector\(solution_id, connector_id, github:true\)/);
   // ONE helper: the solution and the skills answers carry the same roads, word for word.

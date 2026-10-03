@@ -94,7 +94,8 @@ function signInRefusal(err, base, sessionId, path = "/deploy/solutions") {
 // ateam_build_and_run Phase 5 … must promote", and every later run read it
 // first. What the code does (Builder origin/dev dd24337e, Core 3a9ba8f13): the
 // Builder's introspection runs in the full deploy (POST /deploy/solution —
-// ateam_build_and_run, ateam_deploy_solution) on EVERY run, and in the
+// ateam_build_and_run, ateam_deploy_solution) on EVERY run (unless the solution
+// sets _skip_introspection:true, the Builder's opt-out, deploy.js), and in the
 // whole-solution redeploy only while ui_plugins is empty; the connector upload
 // and a one-skill redeploy never run it. Core (cp.listContextPlugins) asks
 // every connected connector the solution uses for its ui.listPlugins live, so a
@@ -200,6 +201,12 @@ function pullRefused(said, error) {
   };
 }
 
+// What `main` is said to lack, per part (deployBranchHoldsNo).
+const WHAT_MAIN_LACKS = Object.freeze({
+  solution: "holds no solution.json: nothing has been promoted to it.",
+  skills: "lacks skills (skills/<id>/skill.json).",
+});
+
 /**
  * build_and_run's answer when it read an EXISTING repo's deploy branch and
  * that branch lacks a part of the definition: the solution (`solution.json`)
@@ -211,15 +218,21 @@ function pullRefused(said, error) {
  * recreates what the repo already holds on `dev`. ONE helper for both parts:
  * the roads are the same. The first-deploy answers (no repo) stay where the
  * guards are.
- * @param {string} missing  what `main` does not hold, as the error names it
+ * What it says depends on what is missing. No solution at all means nothing
+ * has been promoted. No skills does NOT: a `main` that lacks skills may hold a
+ * solution (or the caller sent one inline), so it says only that the skills
+ * are not there.
+ * @param {"solution"|"skills"} missing  what `main` does not hold
  * @returns {object}
  */
 function deployBranchHoldsNo(missing) {
+  const said = WHAT_MAIN_LACKS[missing];
+  if (!said) throw new Error(`deployBranchHoldsNo: unknown part "${missing}"`);
   const { deploy_branch: deploy, write_branch: write, promote_tool: promote } = BRANCH_WORKFLOW;
   return {
     ok: false,
     phase: "pre_check",
-    error: `\`${deploy}\`, the branch ateam_build_and_run deploys, holds no ${missing}: nothing has been promoted to it.`,
+    error: `\`${deploy}\`, the branch ateam_build_and_run deploys, ${said}`,
     message:
       `Ship what is on \`${write}\`: ${promote}(solution_id, dry_run:true) previews it, ${promote}(solution_id) ships it, then run this call again. ` +
       `Or deploy \`${write}\` work without shipping it: ateam_upload_connector(solution_id, connector_id, github:true) for a connector's code, ` +
@@ -4265,7 +4278,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // Guard: solution required (either inline or from GitHub)
   if (!solution) {
     // Phase 0 READ an existing repo's deploy branch and it holds no solution.
-    if (pulledMcpStore) return deployBranchHoldsNo("solution.json");
+    if (pulledMcpStore) return deployBranchHoldsNo("solution");
     return {
       ok: false,
       phase: "pre_check",
@@ -4277,7 +4290,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // Guard: skills required (either inline or from GitHub)
   if (!effectiveSkills?.length) {
     // Same as the solution guard: Phase 0 read an existing repo's deploy branch.
-    if (pulledMcpStore) return deployBranchHoldsNo("skills (skills/<id>/skill.json)");
+    if (pulledMcpStore) return deployBranchHoldsNo("skills");
     return {
       ok: false,
       phase: "pre_check",
@@ -4778,7 +4791,7 @@ export const handlers = {
         "skill.access_policy — defaults",
         "solution orchestrator skill — Phase 6: generated when routing_mode:auto",
         "solution.handoffs[] — Phase 6: orchestrator → each worker",
-        `solution.ui_plugins[] — recorded from each connector's ui.listPlugins + ui.getPlugin by ateam_build_and_run's deploy on every run, and by ateam_redeploy of the whole solution only while the list is empty; it is the list a connector not started yet is shown from. ${PLUGIN_LISTED_LIVE}`,
+        `solution.ui_plugins[] — recorded from each connector's ui.listPlugins + ui.getPlugin by ateam_build_and_run's deploy on every run (not when the solution sets _skip_introspection: true), and by ateam_redeploy of the whole solution only while the list is empty; it is the list a connector not started yet is shown from. ${PLUGIN_LISTED_LIVE}`,
         "Style block prepended to every skill persona — Phase 1",
       ],
       replace_rule: "REPLACE wins per-field. Any field you write explicitly overrides the platform-generated equivalent. Delete it to opt back into automation.",

@@ -70,7 +70,7 @@ test("bootstrap lists solution.ui_plugins[] as recorded by ateam_build_and_run's
   const line = list.find((l) => /^solution\.ui_plugins\[\]/.test(l));
   assert.ok(line, "bootstrap lost its solution.ui_plugins[] line");
   assert.doesNotMatch(line, /Phase 5/, line);
-  assert.match(line, /ateam_build_and_run's deploy on every run/, line);
+  assert.match(line, /ateam_build_and_run's deploy on every run \(not when the solution sets _skip_introspection: true\)/, line);
   assert.match(line, /ateam_redeploy of the whole solution only while the list is empty/, line);
   assert.match(line, LIVE, line);
 });
