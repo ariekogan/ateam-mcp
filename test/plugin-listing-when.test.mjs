@@ -70,7 +70,14 @@ test("bootstrap lists solution.ui_plugins[] as recorded by ateam_build_and_run's
   const line = list.find((l) => /^solution\.ui_plugins\[\]/.test(l));
   assert.ok(line, "bootstrap lost its solution.ui_plugins[] line");
   assert.doesNotMatch(line, /Phase 5/, line);
-  assert.match(line, /ateam_build_and_run's deploy on every run \(not when the solution sets _skip_introspection: true\)/, line);
+  assert.match(line, /ateam_build_and_run's deploy on every run, and by ateam_redeploy/, line);
+  assert.doesNotMatch(line, /_skip_introspection/, line);
   assert.match(line, /ateam_redeploy of the whole solution only while the list is empty/, line);
   assert.match(line, LIVE, line);
+});
+
+test("the Builder's test-only _skip_introspection switch is taught nowhere: not in bootstrap, not in any tool's texts", async () => {
+  const boot = (await handleToolCall("ateam_bootstrap", {}, SID)).content[0].text;
+  assert.doesNotMatch(boot, /_skip_introspection/);
+  assert.doesNotMatch(JSON.stringify(tools), /_skip_introspection/);
 });

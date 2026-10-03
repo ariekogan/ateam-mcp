@@ -94,8 +94,9 @@ function signInRefusal(err, base, sessionId, path = "/deploy/solutions") {
 // ateam_build_and_run Phase 5 … must promote", and every later run read it
 // first. What the code does (Builder origin/dev dd24337e, Core 3a9ba8f13): the
 // Builder's introspection runs in the full deploy (POST /deploy/solution —
-// ateam_build_and_run, ateam_deploy_solution) on EVERY run (unless the solution
-// sets _skip_introspection:true, the Builder's opt-out, deploy.js), and in the
+// ateam_build_and_run, ateam_deploy_solution) on EVERY run (the Builder has a
+// TEST-ONLY switch, solution._skip_introspection, deploy.js; it is deliberately
+// not taught in any served text), and in the
 // whole-solution redeploy only while ui_plugins is empty; the connector upload
 // and a one-skill redeploy never run it. Core (cp.listContextPlugins) asks
 // every connected connector the solution uses for its ui.listPlugins live, so a
@@ -4791,7 +4792,7 @@ export const handlers = {
         "skill.access_policy — defaults",
         "solution orchestrator skill — Phase 6: generated when routing_mode:auto",
         "solution.handoffs[] — Phase 6: orchestrator → each worker",
-        `solution.ui_plugins[] — recorded from each connector's ui.listPlugins + ui.getPlugin by ateam_build_and_run's deploy on every run (not when the solution sets _skip_introspection: true), and by ateam_redeploy of the whole solution only while the list is empty; it is the list a connector not started yet is shown from. ${PLUGIN_LISTED_LIVE}`,
+        `solution.ui_plugins[] — recorded from each connector's ui.listPlugins + ui.getPlugin by ateam_build_and_run's deploy on every run, and by ateam_redeploy of the whole solution only while the list is empty; it is the list a connector not started yet is shown from. ${PLUGIN_LISTED_LIVE}`,
         "Style block prepended to every skill persona — Phase 1",
       ],
       replace_rule: "REPLACE wins per-field. Any field you write explicitly overrides the platform-generated equivalent. Delete it to opt back into automation.",
