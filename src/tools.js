@@ -793,14 +793,16 @@ function _summarizeDef(def) {
     ...(def.connectors && { connectors: pick(def.connectors, "id") }),
     ...(def.platform_connectors && { platform_connectors: pick(def.platform_connectors, "id") }),
     ...(def.ui_plugins && { ui_plugins: pick(def.ui_plugins, "id") }),
-    // OPEN-20: `tools` here are the DECLARED tools only. A skill's REAL callable
-    // set also includes every tool of each connector in `connectors[]` — Core
-    // auto-imports those at deploy, so they're callable at runtime even though
-    // they're NOT listed here. So this summary UNDER-reports the toolset; don't
-    // read a connector tool's absence as "missing".
+    // OPEN-20: `tools_declared` is THIS FILE's tools[], which can differ from
+    // what is deployed. The note says the one thing a reader gets wrong from
+    // it: a deployed non-empty tools[] is a WHITELIST (Core 1f2513ff1), so a
+    // linked connector's tool it does not name is not callable. ad5b085 said
+    // "tools_declared + ALL tools from linked connectors", which made a refused
+    // tool read as callable (RUN5-3). How the list is built and refreshed has
+    // one home, the skill spec; the note points there and keeps no copy.
     ...(def.tools && { tools_declared: pick(def.tools, "name") }),
-    ...((Array.isArray(def.connectors) && def.connectors.length > 0) && {
-      _tools_note: `Callable tools = tools_declared + ALL tools from linked connectors [${pick(def.connectors, "id").join(", ")}] (Core auto-imports them at deploy — NOT listed above). For the real runtime set use ateam_get_solution(view:"connectors_health") or a live ateam_test_skill; a connector tool (e.g. 'connector.foo.get') is callable via the LINK even if it isn't in tools_declared.`,
+    ...((Array.isArray(def.connectors) && def.connectors.length > 0 && !def.skills && !def.linked_skills) && {
+      _tools_note: `tools[] is a WHITELIST once deployed: Core lets this skill call only the connector tools the deployed tools[] names (or a "<connector-id>:*" / "<prefix>.*" entry matches); a tool of [${pick(def.connectors, "id").join(", ")}] not in it is NOT callable. tools_declared is this file's copy and can differ from the deployed list. How the list is built and refreshed: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools. The Builder's copy of the list (not necessarily what Core runs): ateam_get_solution(solution_id, skill_id:"${def.id}", section:"tools").`,
     }),
     _fields: Object.keys(def),
     _note: "compact summary — pass include_definition:true to ateam_patch for the full definition.",
@@ -2182,7 +2184,7 @@ export const tools = [
     core: true,
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
-      "Upload connector code to Core and restart — WITHOUT redeploying skills.\n\n" +
+      "Upload connector code to Core and restart it. Then the skills that import this connector's tools are redeployed when they need it — a redeploy of the WHOLE skill as the Builder holds it, so its other connectors' tools and any saved edit not yet deployed go live too. The reply's skill_tools says, per skill and per connector, what changed in what Core runs; stages.skills is its verdict. A tools[] you wrote yourself is never changed. The rule: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools.when_the_connector_changes.\n\n" +
       "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
       "Modes:\n" +
       "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
@@ -4517,7 +4519,20 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
           sid,
           { timeoutMs: 120_000 },
         );
-        connectorResults.push({ id: connId, ok: true, tools: uploadResult.tools || 0 });
+        // THE UPLOAD'S OWN VERDICT. This recorded ok:true for every answer, so
+        // an upload whose stages said PARTIAL or FAILED read as a clean restart
+        // — among them stages.skills: a skill that imports this connector did
+        // not get its new tool list, and Core still refuses the new tool to it
+        // (RUN5-3). Its stage and its report ride along.
+        const skillsStage = uploadResult?.stages?.skills;
+        connectorResults.push({
+          id: connId,
+          ok: uploadResult?.ok !== false,
+          tools: uploadResult?.tools || 0,
+          ...(skillsStage && { skills: skillsStage }),
+          ...(skillsStage && skillsStage !== "NOT_RUN" && uploadResult.skill_tools && { skill_tools: uploadResult.skill_tools }),
+          ...(uploadResult?.ok === false && uploadResult.failed_steps && { failed_steps: uploadResult.failed_steps }),
+        });
       } catch (err) {
         connectorResults.push({ id: connId, ok: false, error: err.message });
       }
