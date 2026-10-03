@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.114 — 2026-10-03
+
+### Tools that reach the connector upload say how long they take (#59)
+
+- `ateam_create_plugin`, `ateam_create_connector`, `ateam_upload_connector`
+  and `ateam_build_and_run` declare `monitoring.latency_ms_p95` (75 s). Core
+  sizes an in-app call's timeout from it (×4, up to 300 s), so creating a
+  plugin or a connector through the in-app builder is no longer cut off at
+  30 s.
+
 ## 0.4.113 — 2026-10-02
 
 ### Tool texts say what really happens (#55)
