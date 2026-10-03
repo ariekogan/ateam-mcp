@@ -1,5 +1,7 @@
 # ateam-mcp
 
+[![MCP Queen operational grade](https://mcpqueen.com/badge/io.github.ariekogan/ateam-mcp.svg)](https://mcpqueen.com/s/io.github.ariekogan/ateam-mcp)
+
 **Give any AI the ability to build, validate, and deploy production multi-agent systems.**
 
 This is an MCP server that connects AI assistants — ChatGPT, Claude, Gemini, Copilot, Cursor, Windsurf, and any MCP-compatible environment — directly to the [ADAS](https://ateam-ai.com) platform.
