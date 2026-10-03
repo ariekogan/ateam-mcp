@@ -156,5 +156,140 @@ const TWO_BAD = WRAP(`
 check("duplicate findings are collapsed",
   _widgetProtocolProblems(TWO_BAD).filter((p) => p.includes('"tool.call"')).length === 1);
 
+
+// ─── Messages to the PARENT are judged whatever they say about themselves ────
+// RUN5-16. ateam_create_plugin's scaffold sent
+//   window.parent?.postMessage({ type:"adas-plugin", action:"mcpCall", ... })
+// The linter only judged objects carrying source:"adas-plugin", so a message
+// that got the SOURCE wrong was never looked at — the host drops it, silently —
+// and the same page passed ateam_verify and create_plugin's "it will render".
+// The receiver decides, not the sender's own label. Host rules: Core
+// packages/widget-surface/src/attachHostBridge.js:42 (source), :45-56 (action,
+// payload.requestId), mcpProxy.js:26 (connectorId + tool).
+console.log("messages to the parent");
+
+// The scaffold's send AND receive, verbatim from ae85a46 (unchanged to this fix).
+const OLD_SCAFFOLD = WRAP(`
+  const listener = (e) => {
+    if (e?.data?.type !== "adas-host") return;
+    if (e?.data?.requestId !== id) return;
+  };
+  window.parent?.postMessage({
+    type: "adas-plugin",
+    action: "mcpCall",
+    requestId: id,
+    tool, args, connectorId,
+  }, "*");
+  window.parent?.postMessage({ type: "adas-plugin", action: "ready" }, "*");
+`);
+const scaffoldProblems = _widgetProtocolProblems(OLD_SCAFFOLD);
+check("the shipped scaffold's send is flagged", scaffoldProblems.length >= 3);
+check("  names the missing source", scaffoldProblems.some((p) => p.includes('without source:"adas-plugin"')));
+check("  names the action the host does not know", scaffoldProblems.some((p) => p.includes('action:"mcpCall"')));
+check("  names the receive side comparing type to adas-host", scaffoldProblems.some((p) => p.includes('"adas-host"') && p.includes("never matches")));
+
+check("a flat message to window.parent with no source is flagged",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({action:"mcp-call",requestId:1,tool:"t"},"*")`))
+    .some((p) => p.includes('without source:"adas-plugin"')));
+check("  also to bare parent?.",
+  _widgetProtocolProblems(WRAP(`parent?.postMessage({type:"adas-plugin",action:"x"},"*")`)).length >= 2);
+check("  also to window.top.",
+  _widgetProtocolProblems(WRAP(`window.top.postMessage({foo:1},"*")`)).some((p) => p.includes("without source")));
+check("a wrong ACTION is flagged even with the right source",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"mcpCall",payload:{requestId:1,connectorId:"c",tool:"t"}}},"*")`))
+    .some((p) => p.includes('action:"mcpCall"') && p.includes("hyphen")));
+
+console.log("not the parent, not judged");
+check("postMessage to a sibling frame with no source is NOT flagged",
+  _widgetProtocolProblems(WRAP(`panel.contentWindow.postMessage({type:"theme",value:"dark"},"*")`)).length === 0);
+check("a name that merely ends in 'parent' is NOT the parent",
+  _widgetProtocolProblems(WRAP(`myparent.postMessage({type:"theme"},"*"); grandparent.postMessage({a:1},"*")`)).length === 0);
+check("a message built elsewhere and passed by name is not judged",
+  _widgetProtocolProblems(WRAP(`const m = {type:"adas-plugin"}; window.parent.postMessage(m,"*")`)).length === 0);
+
+console.log("every message the host acts on stays clean");
+const MCP_OK = `source:"adas-plugin",message:{action:"mcp-call",payload:{requestId:r,connectorId:c,tool:t,args:a}}`;
+check("mcp-call with all three keys", _widgetProtocolProblems(WRAP(`window.parent.postMessage({${MCP_OK}},"*")`)).length === 0);
+check("close (phone only)", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",action:"close"},"*")`)).length === 0);
+check("select-actor", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"select-actor",payload:{actorId:a}}},"*")`)).length === 0);
+check("plugin.event", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.event",payload:{event:"e"}}},"*")`)).length === 0);
+check("open-job", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"open-job",payload:{jobId:j}}},"*")`)).length === 0);
+// A command reply carries the COMMAND's correlationId: it is its protocol, not a mislabelled requestId.
+check("plugin.command.result with correlationId is NOT 'the request id as correlationId'",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{correlationId:cid,result:r}}},"*")`)).length === 0);
+
+console.log("an mcp-call the host cannot route");
+const noConnector = _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"mcp-call",payload:{requestId:r,tool:t,args:a}}},"*")`));
+check("no connectorId in an inline payload is flagged", noConnector.length === 1 && noConnector[0].includes("connectorId"));
+check("  naming what the host answers", (noConnector[0] || "").includes("Missing connectorId or tool"));
+check("no requestId is flagged",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"mcp-call",payload:{connectorId:c,tool:t}}},"*")`)).some((p) => p.includes("requestId")));
+check("a payload with a spread is NOT judged (its keys are not all visible)",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"mcp-call",payload:{...base,requestId:r}}},"*")`)).length === 0);
+check("a payload passed by name is NOT judged",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"mcp-call",payload}},"*")`)).length === 0);
+
+// ─── A plugin that ANSWERS plugin.command ────────────────────────────────────
+// The host pushes { type:"plugin.command", action:"plugin.command", payload:{
+// command, args, correlationId } } (Core WidgetSurface.jsx dispatchToIframe;
+// the phone's usePluginBridge.ts dispatchToWebView the same) and the widget MUST
+// reply { type:"plugin.command.result", payload:{ correlationId, result, error }
+// } with the SAME correlationId — the host reads payload.correlationId
+// (attachHostBridge.js:50) and ignores a reply without it. The RECEIVE check
+// below used to flag every such widget, because it read payload.correlationId
+// off the host's command: "reads payload.correlationId from the host response —
+// the host sends payload.requestId". Its fix_with would have steered an author
+// to rewrite a working command handler. The host side of each case is run for
+// real in plugin-scaffold-host-protocol.test.mjs.
+console.log("a widget that answers plugin.command");
+const CMD_REPLY_OK = `window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{correlationId:cid,result:{ok:true}}}},"*");`;
+const CMD_WIDGET = (body) => WRAP(`
+  window.addEventListener("message",function(e){var m=e.data&&e.data.message;
+    if(m&&m.type==="plugin.command"){var cid=m.payload.correlationId; ${body}}});
+`);
+check("the correct widget (reads the command's correlationId, echoes it) is NOT flagged",
+  _widgetProtocolProblems(CMD_WIDGET(CMD_REPLY_OK)).length === 0);
+check("  destructured: const { correlationId, command } = payload",
+  _widgetProtocolProblems(WRAP(`
+    window.addEventListener("message",function(e){var m=e.data.message;
+      if(m.type==="plugin.command"){const { correlationId, command } = m.payload;
+        window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{correlationId,result:command}}},"*");}});`)).length === 0);
+check("  matched on message.action (the renderer convention) and optional chaining",
+  _widgetProtocolProblems(WRAP(`
+    window.addEventListener("message",function(e){var m=e.data.message;
+      if(m.action==="plugin.command"){var cid=m.payload?.correlationId;
+        window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{correlationId:cid,error:"nope"}}},"*");}});`)).length === 0);
+check("  flat reply form (the host reads d.type / d.payload too)",
+  _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",type:"plugin.command.result",payload:{correlationId:cid,error:"x"}},"*");`)).length === 0);
+check("  a widget that also makes a correct tool call stays clean",
+  _widgetProtocolProblems(CMD_WIDGET(CMD_REPLY_OK + ` window.parent.postMessage({${MCP_OK}},"*");`)).length === 0);
+check("  early return on a different type (!==) still counts as handling commands",
+  _widgetProtocolProblems(WRAP(`
+    window.addEventListener("message",function(e){var m=e.data.message; if(m.type!=="plugin.command") return;
+      var cid=m.payload.correlationId; ${CMD_REPLY_OK}});`)).length === 0);
+check("a page that handles NO command and reads payload.correlationId is still flagged",
+  _widgetProtocolProblems(WRAP(`window.addEventListener("message",function(e){pend.get(e.data.message.payload.correlationId);}); window.parent.postMessage({${MCP_OK}},"*");`))
+    .some((p) => p.includes("reads payload.correlationId")));
+
+console.log("a command reply the host cannot match");
+const noId = _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{requestId:cid,result:{ok:true}}}},"*");`));
+check("a reply keyed by requestId (not correlationId) is flagged", noId.length === 1 && noId[0].includes("no correlationId"));
+check("  and says what happens", (noId[0] || "").includes("times out after 15 s"));
+check("a reply with no id at all is flagged",
+  _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{result:{ok:true}}}},"*");`)).some((p) => p.includes("no correlationId")));
+const actionShape = _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{action:"plugin.command.result",payload:{correlationId:cid,result:{ok:true}}}},"*");`));
+check("a reply sent as message.ACTION (the host matches message.TYPE) is flagged",
+  actionShape.length === 1 && (actionShape[0] || "").includes('message.ACTION:"plugin.command.result"') && (actionShape[0] || "").includes("message.TYPE"));
+check("a reply under another type name is flagged",
+  _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.response",payload:{correlationId:cid}}},"*");`))
+    .some((p) => p.includes('type:"plugin.command.response"')));
+check("a reply that is not signed source:\"adas-plugin\" is flagged",
+  _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({type:"adas-plugin",message:{type:"plugin.command.result",payload:{correlationId:cid}}},"*");`))
+    .some((p) => p.includes("without source")));
+check("a reply payload built elsewhere is NOT judged",
+  _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload}},"*");`)).length === 0);
+check("a reply payload with a spread is NOT judged",
+  _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{...base,result:r}}},"*");`)).length === 0);
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

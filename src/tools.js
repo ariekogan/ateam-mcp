@@ -861,6 +861,26 @@ function _widgetHasRender(r) {
 //
 // Detected here rather than left to a person noticing an empty panel, and
 // reported with the repair attached — a signal the reasoning engine can act on.
+
+// Index of the character after the `}` that closes the `{` at `open`, or -1
+// when it never closes (minified truncation, template weirdness).
+function _closingBrace(html, open) {
+  let depth = 0, inStr = null, esc = false;
+  for (let i = open; i < html.length; i++) {
+    const c = html[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === "\\") { esc = true; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { inStr = c; continue; }
+    if (c === "{") depth++;
+    else if (c === "}") { depth--; if (depth === 0) return i + 1; }
+  }
+  return -1;
+}
+
 // Extract the FULL argument object of each postMessage(...) call by matching
 // braces, so every call is judged on its own text. The previous version took a
 // fixed 400-character window and concatenated all of them: a send object longer
@@ -868,32 +888,55 @@ function _widgetHasRender(r) {
 // could make an unrelated postMessage elsewhere on the page be judged as the
 // ADAS protocol. Both were rejected in review, correctly — an approximate
 // boundary is not a structural one.
+//
+// Each entry also says whether the call is addressed to the PARENT window
+// (`window.parent.`, `parent?.`, `window.top.`): the only place the host ever
+// listens. A message to the parent is the protocol whatever it says about
+// itself; that is how a scaffold that signed itself `type:"adas-plugin"`
+// (RUN5-16, ateam_create_plugin since ae85a46) was judged by nobody.
 function _postMessageObjects(html) {
   const out = [];
-  const re = /postMessage\s*\(\s*\{/g;
+  const re = /((?:[\w$]+\s*(?:\?\.|\.)\s*)*)postMessage\s*\(\s*\{/g;
   let m;
   while ((m = re.exec(html)) !== null) {
-    const open = html.indexOf("{", m.index);
-    let depth = 0, i = open, inStr = null, esc = false;
-    for (; i < html.length; i++) {
-      const c = html[i];
-      if (inStr) {
-        if (esc) { esc = false; continue; }
-        if (c === "\\") { esc = true; continue; }
-        if (c === inStr) inStr = null;
-        continue;
-      }
-      if (c === '"' || c === "'" || c === "`") { inStr = c; continue; }
-      if (c === "{") depth++;
-      else if (c === "}") { depth--; if (depth === 0) { i++; break; } }
+    const open = html.indexOf("{", m.index + m[1].length);
+    const end = _closingBrace(html, open);
+    // Unbalanced → skip rather than guess. A message we cannot delimit is one
+    // we must not judge. (So is one built elsewhere and passed by name:
+    // postMessage(msg, "*") is not judged.)
+    if (end !== -1) {
+      out.push({ obj: html.slice(open, end), toParent: /(?:^|[.?\s])(?:parent|top)\s*(?:\?\.|\.)\s*$/.test(m[1]) });
+      re.lastIndex = Math.max(re.lastIndex, end);
+    } else {
+      re.lastIndex = Math.max(re.lastIndex, open + 1);
     }
-    // Unbalanced (minified truncation, template weirdness) → skip rather than
-    // guess. A message we cannot delimit is one we must not judge.
-    if (depth === 0) out.push(html.slice(open, i));
-    re.lastIndex = Math.max(re.lastIndex, i);
   }
   return out;
 }
+
+// What the hosts act on when a plugin sends it. Core
+// packages/widget-surface/src/attachHostBridge.js KNOWN_ACTIONS / KNOWN_TYPES
+// (select-actor, mcp-call | plugin.command.result, plugin.event, open-job); the
+// phone's usePluginBridge.ts also honours action "close" (the web host has no
+// such action: it is accepted here, since sending it harms nothing).
+const _HOST_SEND_ACTIONS = ["mcp-call", "select-actor", "close"];
+const _HOST_SEND_TYPES = ["plugin.command.result", "plugin.event", "open-job"];
+const _keyIs = (key, value) => new RegExp(`\\b${key}\\s*:\\s*["']${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`);
+
+// The inline `payload: { ... }` literal of a message object, or null when there
+// is none to read: built elsewhere (`payload` by name), or it spreads another
+// object (its keys are not all visible). A key we cannot see is not one we may
+// report missing.
+function _inlinePayload(obj) {
+  const at = /payload\s*:\s*\{/.exec(obj);
+  if (!at) return null;
+  const open = obj.indexOf("{", at.index);
+  const end = _closingBrace(obj, open);
+  if (end === -1) return null;
+  const payload = obj.slice(open, end);
+  return /[{,]\s*\.\.\.\s*[\w$({[]/.test(payload) ? null : payload;
+}
+const _hasKey = (payload, key) => new RegExp(`(?:^|[{,\\s])${key}\\s*[:,}]`).test(payload);
 
 export function _widgetProtocolProblems(html) {
   if (typeof html !== "string" || !html.includes("postMessage")) return [];
@@ -903,33 +946,87 @@ export function _widgetProtocolProblems(html) {
   const add = (p) => { if (!seen.has(p)) { seen.add(p); problems.push(p); } };
 
   // Judge each host-directed send INDEPENDENTLY. A page may legitimately
-  // postMessage to other targets; only objects that identify themselves as the
-  // ADAS plugin channel are the protocol.
-  for (const obj of _postMessageObjects(html)) {
-    if (!/source\s*:\s*["']adas-plugin["']/.test(obj)) continue;
+  // postMessage to other targets (an analytics frame, a sibling iframe); only a
+  // message that signs itself as the ADAS plugin channel, or that goes to the
+  // PARENT window, is the protocol.
+  for (const { obj, toParent } of _postMessageObjects(html)) {
+    const signed = /source\s*:\s*["']adas-plugin["']/.test(obj);
+    if (!signed && !toParent) continue;
 
+    if (!signed) {
+      add('posts to the parent without source:"adas-plugin" — the host drops every message that lacks it, so nothing reaches the app and the call never settles (it is "source", not "type"). Send { source:"adas-plugin", message:{ action:"mcp-call", payload:{ requestId, connectorId, tool, args } } }.');
+    }
+
+    const sendsKnown = _HOST_SEND_ACTIONS.some((a) => _keyIs("action", a).test(obj)) ||
+      _HOST_SEND_TYPES.some((t) => _keyIs("type", t).test(obj));
     if (/type\s*:\s*["']tool\.call["']/.test(obj)) {
       add('sends message.type:"tool.call" — the host has NEVER accepted it, at any version (silent timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
-    } else if (!/action\s*:\s*["']mcp-call["']/.test(obj)) {
+    } else if (!sendsKnown) {
+      const actionIsAType = _HOST_SEND_TYPES.find((t) => _keyIs("action", t).test(obj));
       if (/type\s*:\s*["']mcp-call["']/.test(obj)) {
         add('sends message.TYPE:"mcp-call" — the host matches on message.ACTION for sends, so this is ignored. Use message:{action:"mcp-call",payload:{...}}.');
+      } else if (actionIsAType) {
+        add(`sends message.ACTION:"${actionIsAType}" — the host matches "${actionIsAType}" on message.TYPE (only mcp-call and select-actor are matched on message.ACTION), so this is ignored. Use message:{type:"${actionIsAType}",payload:{...}}.`);
       } else {
-        add('never sends action:"mcp-call" — the host ignores the message entirely.');
+        const act = /\baction\s*:\s*["']([^"']+)["']/.exec(obj);
+        const typ = /\btype\s*:\s*["']([^"']+)["']/.exec(obj);
+        const what = act ? `action:"${act[1]}"` : typ ? `type:"${typ[1]}"` : "no message.action and no message.type";
+        add(`sends ${what} — not a message the host acts on, so it is ignored (silent timeout, no error). The host acts on message.action "mcp-call" | "select-actor" | "close" (phone only), and message.type "plugin.command.result" | "plugin.event" | "open-job". A tool call is message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}} — action "mcp-call" with a hyphen.`);
       }
     }
-    if (/payload\s*:\s*\{[^}]*correlationId/.test(obj) || /correlationId\s*:\s*correlationId/.test(obj)) {
+
+    // A plugin.command.result REPLIES to a command and carries the command's
+    // correlationId: that is its protocol. Only a tool call keys on requestId.
+    const repliesToCommand = _keyIs("type", "plugin.command.result").test(obj) || _keyIs("action", "plugin.command.result").test(obj);
+    if (!repliesToCommand && (/payload\s*:\s*\{[^}]*correlationId/.test(obj) || /correlationId\s*:\s*correlationId/.test(obj))) {
       add('sends the request id as correlationId — the host echoes payload.requestId, so responses never match the pending request and every call times out even when the host answered.');
+    }
+
+    // An mcp-call the host cannot route: it needs requestId (else it is ignored)
+    // and connectorId + tool (else it answers "Missing connectorId or tool").
+    // Judged only when the payload is an inline literal without a spread: a
+    // payload built elsewhere is not one we can see into.
+    if (_keyIs("action", "mcp-call").test(obj)) {
+      const payload = _inlinePayload(obj);
+      const missing = payload ? ["requestId", "connectorId", "tool"].filter((k) => !_hasKey(payload, k)) : [];
+      if (missing.length) {
+        add(`sends an mcp-call whose payload has no ${missing.join(" / ")} — the host ignores a call without requestId and answers "Missing connectorId or tool" to one without those, so the call never succeeds. Take connectorId from the host's init message (payload.connectorId).`);
+      }
+    }
+
+    // A command reply the host cannot match to the command: it reads
+    // payload.correlationId and ignores the message without it (Core
+    // attachHostBridge.js:50), so the command waits out its 15 s and the
+    // CALLING skill gets "Plugin command timeout" — nothing fails in the widget.
+    if (_keyIs("type", "plugin.command.result").test(obj)) {
+      const payload = _inlinePayload(obj);
+      if (payload && !_hasKey(payload, "correlationId")) {
+        add('sends plugin.command.result whose payload has no correlationId — the host ignores a reply without it (it reads payload.correlationId; a reply to a command keys on correlationId, not requestId), so the command times out after 15 s in the calling skill. Echo the correlationId the plugin.command carried.');
+      }
     }
   }
 
-  // RECEIVE side: only reading correlationId OFF THE HOST PAYLOAD counts.
-  if (/payload\s*(\?\.|\.)\s*correlationId/.test(html) ||
+  // RECEIVE side: only reading correlationId OFF THE HOST PAYLOAD counts — and
+  // only where that payload answers a tool call. The host's plugin.command
+  // carries a correlationId too (Core WidgetSurface.jsx dispatchToIframe: the
+  // phone's usePluginBridge.ts dispatchToWebView the same), and a plugin that
+  // answers it MUST read that id and echo it back in plugin.command.result: a
+  // page that handles plugin.command is reading the command's, and is not
+  // flagged. (A page that handles commands AND matches its mcp-result by
+  // correlationId is not caught here; its mcp-call send is, and the send side
+  // is checked either way.)
+  const handlesCommands = /(?:\b(?:type|action)\s*[!=]==?\s*|\bcase\s+)["']plugin\.command["']/.test(html);
+  if (!handlesCommands && (
+      /payload\s*(\?\.|\.)\s*correlationId/.test(html) ||
       /payload\s*&&\s*[\w$.]*payload\.correlationId/.test(html) ||
-      /\{\s*correlationId[^}]*\}\s*=\s*[\w$.]*payload/.test(html)) {
+      /\{\s*correlationId[^}]*\}\s*=\s*[\w$.]*payload/.test(html))) {
     add('reads payload.correlationId from the host response — the host sends payload.requestId, so the pending request is never matched.');
   }
   if (/type\s*===?\s*["']tool\.response["']/.test(html)) {
     add('listens for message.type:"tool.response" — the host replies with "mcp-result".');
+  }
+  if (/\btype\s*(?:!==?|===?)\s*["']adas-host["']/.test(html)) {
+    add('compares a message\'s type to "adas-host" — the host identifies itself with source:"adas-host" (message.type is "init", "mcp-result", …), so this listener never matches a host message.');
   }
 
   return problems;
@@ -1465,7 +1562,7 @@ export const tools = [
     name: "ateam_spec_search",
     core: true,
     description:
-      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod or dev, or the base itself for any other host): the environment whose docs were searched.",
+      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic); an example a hit names or points to (examples/<type>, /spec/examples/<type>) is read via ateam_get_examples(type), which ateam_get_spec does not serve. Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod or dev, or the base itself for any other host): the environment whose docs were searched.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2159,10 +2256,10 @@ export const tools = [
     core: true,
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
-      "Scaffold a UI plugin (iframe HTML, React Native TSX, or both) inside an existing connector. " +
+      "Scaffold a UI plugin (iframe HTML, RN TSX, or both) inside an existing connector. " +
       "Writes the boilerplate (imports, theme/bridge hooks, " +
       "postMessage protocol, default export shape); you fill in the component body. " +
-      "Use kind='iframe' for web-only, 'rn' for mobile-only, 'adaptive' for both. " +
+      "'iframe' = HTML (web + phone WebView), 'rn' = native (phone only), 'adaptive' = both. " +
       "Also writes ui-dist/<plugin>/manifest.json with the required render block.\n\n" +
       "⚠️ RENDERING IS NOT AUTOMATIC. A plugin renders only if its connector ADVERTISES it " +
       "(ui.listPlugins + ui.getPlugin) with a render.{mode, iframeUrl?, reactNative?} block. The scaffold files alone register nothing. " +
@@ -3872,42 +3969,81 @@ function _scaffoldPluginFiles({ connectorId, pluginName, kind }) {
   <pre id="output"></pre>
 </div>
 <script type="module">
-  // ── Plugin postMessage protocol scaffold ────────────────────────
-  // 'adas-host' messages come FROM the host shell (web app / mobile).
-  // 'adas-plugin' messages go TO the host.
-  // Use mcpCall(tool, args) to invoke any tool the skill has access to.
+  // ── Plugin <-> host protocol — what the host reads (ateam_get_spec("ui-plugins"): iframe_plugin_guide.protocol) ──
+  // SEND     { source:"adas-plugin", message:{ action:"mcp-call", payload:{ requestId, connectorId, tool, args } } }
+  // RECEIVE  { source:"adas-host",   message:{ type:"mcp-result", payload:{ requestId, result, error } } }
+  // Send is matched on message.ACTION, receive on message.TYPE: that is not a typo.
+  // The host's first message is init; its payload.connectorId goes on every call.
+  // mcpCall(tool, args, connectorId?) resolves with the tool's own answer, or rejects
+  // with its reason: the host's error, the tool's {ok:false}, or a timeout.
 
-  function mcpCall(tool, args = {}, connectorId) {
+  const CALL_TIMEOUT_MS = 15000;
+  const pending = new Map();
+  let hostConnectorId = null;
+
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (!d || typeof d !== "object" || d.source !== "adas-host") return;
+    const m = d.message || {};
+    if (m.type === "init") { hostConnectorId = m.payload?.connectorId || hostConnectorId; return; }
+    if (m.type !== "mcp-result") return;
+    const call = pending.get(m.payload?.requestId);
+    if (!call) return;
+    pending.delete(m.payload.requestId);
+    clearTimeout(call.timer);
+    if (m.payload.error) call.reject(new Error(m.payload.error));
+    else call.settle(m.payload.result);
+  });
+
+  // Results arrive MCP-wrapped ({ content:[{ type:"text", text:"<json>" }] }), sometimes twice.
+  // A tool that fails with { ok:false } and no isError arrives as a SUCCESS: look inside.
+  function toolAnswer(raw) {
+    let v = raw;
+    for (let i = 0; i < 3; i++) {
+      const block = v?.content?.[0];
+      if (v?.isError === true) throw new Error(block?.text || "the tool reported an error");
+      if (block?.type !== "text") break;
+      try { v = JSON.parse(block.text); } catch { return block.text; }
+    }
+    if (v && v.ok === false) throw new Error(v.error || v.message || JSON.stringify(v));
+    return v;
+  }
+
+  function mcpCall(tool, args = {}, connectorId = hostConnectorId) {
     return new Promise((resolve, reject) => {
-      const id = "call_" + Math.random().toString(36).slice(2);
-      const listener = (e) => {
-        if (e?.data?.type !== "adas-host") return;
-        if (e?.data?.requestId !== id) return;
-        window.removeEventListener("message", listener);
-        if (e.data.error) reject(new Error(e.data.error));
-        else resolve(e.data.result);
-      };
-      window.addEventListener("message", listener);
-      window.parent?.postMessage({
-        type: "adas-plugin",
-        action: "mcpCall",
-        requestId: id,
-        tool, args, connectorId,
+      if (!connectorId) {
+        reject(new Error("no connectorId: the host has not sent its init message (is this page running inside the app?)"));
+        return;
+      }
+      const requestId = "req_" + Math.random().toString(36).slice(2);
+      const timer = setTimeout(() => {
+        pending.delete(requestId);
+        reject(new Error("no reply from the host to " + tool + " within " + CALL_TIMEOUT_MS / 1000 + "s"));
+      }, CALL_TIMEOUT_MS);
+      pending.set(requestId, {
+        timer,
+        reject,
+        settle: (raw) => { try { resolve(toolAnswer(raw)); } catch (err) { reject(err); } },
+      });
+      window.parent.postMessage({
+        source: "adas-plugin",
+        message: { action: "mcp-call", payload: { requestId, connectorId, tool, args } },
       }, "*");
     });
   }
 
+  const output = document.getElementById("output");
+  const show = (text, failed) => { output.textContent = text; output.style.color = failed ? "#b00020" : ""; };
+
   document.getElementById("callTool").addEventListener("click", async () => {
+    show("Calling...");
     try {
-      const result = await mcpCall("${connectorId}.echo", { message: "hello" });
-      document.getElementById("output").textContent = JSON.stringify(result, null, 2);
+      const answer = await mcpCall("${connectorId}.echo", { message: "hello" });
+      show(typeof answer === "string" ? answer : JSON.stringify(answer, null, 2));
     } catch (err) {
-      document.getElementById("output").textContent = "Error: " + err.message;
+      show("Error: " + err.message, true);
     }
   });
-
-  // Tell host we're ready
-  window.parent?.postMessage({ type: "adas-plugin", action: "ready" }, "*");
 </script>
 </body>
 </html>
@@ -5355,6 +5491,11 @@ export const handlers = {
     // answered. get_examples, twenty lines below, has had exactly this guard
     // since 04c24ce; it was never brought up here.
     let path = SPEC_PATHS[topic];
+    // A search hit that names an example (ateam_spec_search) is read with
+    // ateam_get_examples; its name is not a spec topic.
+    if (!path && /^\/?(?:spec\/)?examples\//.test(String(topic))) {
+      throw new Error(`"${topic}" is an example, not a spec topic: read it with ateam_get_examples(type: "<the part after examples/>").`);
+    }
     if (!path) {
       throw new Error(
         `Unknown spec topic "${topic}". Available: ${Object.keys(SPEC_PATHS).join(", ")}.`
@@ -7655,7 +7796,7 @@ export const handlers = {
         const found = (data?.plugins || []).find((p) => p?.id === pluginId);
         if (found) {
           verified = _widgetHasRender(found.render)
-            ? { renders: true, render_ok: true, note: "discovered by Core with a valid render block — it will render" }
+            ? { renders: true, render_ok: true, note: "listed by Core with a valid render block (the catalog entry is what was checked; that its buttons reach the host is not — prove the data path with ateam_verify_surface)" }
             : { renders: false, render_ok: false, note: "discovered, but its manifest has no usable render block (need render.mode + iframeUrl/reactNative)" };
           break;
         }
