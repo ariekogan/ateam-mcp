@@ -671,7 +671,7 @@ function _summarizeDef(def) {
     // one home, the skill spec; the note points there and keeps no copy.
     ...(def.tools && { tools_declared: pick(def.tools, "name") }),
     ...((Array.isArray(def.connectors) && def.connectors.length > 0 && !def.skills && !def.linked_skills) && {
-      _tools_note: `tools[] is a WHITELIST once deployed: Core lets this skill call only the connector tools the deployed tools[] names (or a "<connector-id>:*" / "<prefix>.*" entry matches); a tool of [${pick(def.connectors, "id").join(", ")}] not in it is NOT callable. tools_declared is this file's copy and can differ from the deployed list. How the list is built and refreshed: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools. The live list: ateam_get_solution(solution_id, skill_id:"${def.id}", section:"tools").`,
+      _tools_note: `tools[] is a WHITELIST once deployed: Core lets this skill call only the connector tools the deployed tools[] names (or a "<connector-id>:*" / "<prefix>.*" entry matches); a tool of [${pick(def.connectors, "id").join(", ")}] not in it is NOT callable. tools_declared is this file's copy and can differ from the deployed list. How the list is built and refreshed: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools. The Builder's copy of the list (not necessarily what Core runs): ateam_get_solution(solution_id, skill_id:"${def.id}", section:"tools").`,
     }),
     _fields: Object.keys(def),
     _note: "compact summary — pass include_definition:true to ateam_patch for the full definition.",
@@ -2053,7 +2053,7 @@ export const tools = [
     core: true,
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
-      "Upload connector code to Core and restart it. Then every skill that imports this connector's tools and would get a different list is redeployed with it (tools added, removed ones dropped); the reply's skill_tools names each one with the tools added and removed, and stages.skills is its verdict. A tools[] you wrote yourself is never changed.\n\n" +
+      "Upload connector code to Core and restart it. Then the skills that import this connector's tools are redeployed when they need it — a redeploy of the WHOLE skill as the Builder holds it, so its other connectors' tools and any saved edit not yet deployed go live too. The reply's skill_tools says, per skill and per connector, what changed in what Core runs; stages.skills is its verdict. A tools[] you wrote yourself is never changed. The rule: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools.when_the_connector_changes.\n\n" +
       "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
       "Modes:\n" +
       "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
@@ -4370,7 +4370,20 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
           sid,
           { timeoutMs: 120_000 },
         );
-        connectorResults.push({ id: connId, ok: true, tools: uploadResult.tools || 0 });
+        // THE UPLOAD'S OWN VERDICT. This recorded ok:true for every answer, so
+        // an upload whose stages said PARTIAL or FAILED read as a clean restart
+        // — among them stages.skills: a skill that imports this connector did
+        // not get its new tool list, and Core still refuses the new tool to it
+        // (RUN5-3). Its stage and its report ride along.
+        const skillsStage = uploadResult?.stages?.skills;
+        connectorResults.push({
+          id: connId,
+          ok: uploadResult?.ok !== false,
+          tools: uploadResult?.tools || 0,
+          ...(skillsStage && { skills: skillsStage }),
+          ...(skillsStage && skillsStage !== "NOT_RUN" && uploadResult.skill_tools && { skill_tools: uploadResult.skill_tools }),
+          ...(uploadResult?.ok === false && uploadResult.failed_steps && { failed_steps: uploadResult.failed_steps }),
+        });
       } catch (err) {
         connectorResults.push({ id: connId, ok: false, error: err.message });
       }
