@@ -202,21 +202,24 @@ function pullRefused(said, error) {
 
 /**
  * build_and_run's answer when it read an EXISTING repo's deploy branch and
- * that branch holds no solution.json (CHECK A, M2). The only road the old
- * pre_check text gave was "Pass solution inline", written when a missing
- * solution meant no repo at all (8c5a114, 2026-03-21); since deploys moved to
- * `main` (45010fa) an existing repo whose `main` is empty is the normal state
- * of work that has not been promoted yet, and sending the solution inline
- * there recreates what the repo already holds on `dev`. The first-deploy
- * answer (no repo) stays where the guard is.
+ * that branch lacks a part of the definition: the solution (`solution.json`)
+ * or the skills (CHECK A, M2). The only road the old pre_check texts gave was
+ * "Pass solution inline" / "Pass skills inline", written when a missing part
+ * meant no repo at all (8c5a114, 2026-03-21); since deploys moved to `main`
+ * (45010fa) an existing repo whose `main` lacks them is the normal state of
+ * work that has not been promoted yet, and sending the part inline there
+ * recreates what the repo already holds on `dev`. ONE helper for both parts:
+ * the roads are the same. The first-deploy answers (no repo) stay where the
+ * guards are.
+ * @param {string} missing  what `main` does not hold, as the error names it
  * @returns {object}
  */
-function deployBranchHoldsNoSolution() {
+function deployBranchHoldsNo(missing) {
   const { deploy_branch: deploy, write_branch: write, promote_tool: promote } = BRANCH_WORKFLOW;
   return {
     ok: false,
     phase: "pre_check",
-    error: `\`${deploy}\`, the branch ateam_build_and_run deploys, holds no solution.json: nothing has been promoted to it.`,
+    error: `\`${deploy}\`, the branch ateam_build_and_run deploys, holds no ${missing}: nothing has been promoted to it.`,
     message:
       `Ship what is on \`${write}\`: ${promote}(solution_id, dry_run:true) previews it, ${promote}(solution_id) ships it, then run this call again. ` +
       `Or deploy \`${write}\` work without shipping it: ateam_upload_connector(solution_id, connector_id, github:true) for a connector's code, ` +
@@ -4262,7 +4265,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // Guard: solution required (either inline or from GitHub)
   if (!solution) {
     // Phase 0 READ an existing repo's deploy branch and it holds no solution.
-    if (pulledMcpStore) return deployBranchHoldsNoSolution();
+    if (pulledMcpStore) return deployBranchHoldsNo("solution.json");
     return {
       ok: false,
       phase: "pre_check",
@@ -4273,6 +4276,8 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
 
   // Guard: skills required (either inline or from GitHub)
   if (!effectiveSkills?.length) {
+    // Same as the solution guard: Phase 0 read an existing repo's deploy branch.
+    if (pulledMcpStore) return deployBranchHoldsNo("skills (skills/<id>/skill.json)");
     return {
       ok: false,
       phase: "pre_check",

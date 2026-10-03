@@ -12,7 +12,8 @@
 // and the ok:false answer.
 //
 // M2. When the pull SUCCEEDED but `main` (what this call deploys) holds no
-// solution, the guard said "Pass solution inline". That text dates from
+// solution — or a solution but no skills — the guards said "Pass solution
+// inline" / "Pass skills inline". That text dates from
 // 8c5a114 (2026-03-21), when a missing solution meant no repo. For an existing
 // repo it is wrong advice: nothing has been promoted, and the roads are
 // promote, or upload the connector from dev. The no-repo road is unchanged.
@@ -23,7 +24,7 @@ import assert from "node:assert/strict";
 import { handlers } from "../src/tools.js";
 
 /** Run build_and_run(solution_id) against a Builder whose github/status answers `status` and pull-bundle answers `pull` ({ status, body }). */
-async function deployFrom(pull, { repo = true } = {}) {
+async function deployFrom(pull, { repo = true, args = { solution_id: "walkmate" } } = {}) {
   const seen = [];
   const origFetch = global.fetch;
   global.fetch = async (url) => {
@@ -41,7 +42,7 @@ async function deployFrom(pull, { repo = true } = {}) {
     };
   };
   try {
-    const result = await handlers.ateam_build_and_run({ solution_id: "walkmate" }, "sid");
+    const result = await handlers.ateam_build_and_run(args, "sid");
     return { result, wentOn: seen.filter((u) => !u.includes("/github/status") && !u.includes("/github/pull-bundle")) };
   } finally { global.fetch = origFetch; }
 }
@@ -104,4 +105,29 @@ test("M2 control: the first deploy (no repo, no solution) keeps the pass-it-inli
   const { result } = await deployFrom({ body: { ok: true } }, { repo: false });
   assert.equal(result.phase, "pre_check");
   assert.match(result.message, /Pass solution inline/);
+});
+
+const SOLUTION = { id: "walkmate", name: "Walkmate", skills: [{ id: "guide" }] };
+
+test("M2 (skills): main holds a solution but no skills in an EXISTING repo: says so, nothing promoted, the same roads — never 'pass skills inline'", async () => {
+  const { result, wentOn } = await deployFrom({ body: { ok: true, solution: SOLUTION, skills: [], mcp_store: {} } });
+  assert.deepEqual(wentOn, [], "a deploy with no skills went on");
+  assert.equal(result.ok, false);
+  assert.equal(result.phase, "pre_check");
+  const said = JSON.stringify(result);
+  assert.doesNotMatch(said, /pass skills inline/i, `the stale first-deploy advice: ${said}`);
+  assert.match(result.error, /`main`.*holds no skills/, result.error);
+  assert.match(result.error, /nothing has been promoted/, result.error);
+  assert.match(result.message, /ateam_github_promote\(solution_id\) ships it/);
+  assert.match(result.message, /ateam_upload_connector\(solution_id, connector_id, github:true\)/);
+  // ONE helper: the solution and the skills answers carry the same roads, word for word.
+  const noSolution = (await deployFrom({ body: { ok: true, skills: [], mcp_store: {} } })).result;
+  assert.equal(result.message, noSolution.message);
+  assert.equal(result.recovery, noSolution.recovery);
+});
+
+test("M2 (skills) control: a first deploy with a solution and no skills (no repo) keeps the pass-them-inline road", async () => {
+  const { result } = await deployFrom({ body: { ok: true } }, { repo: false, args: { solution: SOLUTION } });
+  assert.equal(result.phase, "pre_check");
+  assert.match(result.message, /Pass skills inline/);
 });
