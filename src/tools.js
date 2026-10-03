@@ -151,6 +151,80 @@ const STORAGE_DECISION_AT = "ateam_get_spec('connector-multi-user') → storage_
 // those rules; it carries no copy.
 const DATA_FIDELITY_AT = 'ateam_get_spec({ topic: "widgets", search: "data_fidelity" })';
 
+// WHERE THE BUILDER STATES WHAT ateam_github_push WRITES — /spec
+// also_available, read by its search form (Builder #144, BL-21).
+const PUSH_WRITES_AT = 'ateam_get_spec({ topic: "overview", search: "github/push" })';
+
+/**
+ * build_and_run's answer when pull-bundle refused. A refusal that names its
+ * `code` is the Builder's verdict: its error, hint and recovery go through as
+ * they are (CORE on #58, B58R-3). The guess "the repo may not exist yet —
+ * deploy with mcp_store first" contradicted those (a branch that could not be
+ * read, a file that does not parse) and sent the agent to re-send connector
+ * code inline. It stays only for an answer with no code (a 404 with no repo).
+ * @param {{ code?: string, error?: string, hint?: string, recovery?: string }} said
+ * @param {string} error
+ */
+function pullRefused(said, error) {
+  if (typeof said.code === "string" && said.code) {
+    return {
+      ok: false,
+      phase: "github_pull",
+      code: said.code,
+      error: said.error || error,
+      ...(said.hint && { hint: said.hint }),
+      ...(said.recovery && { recovery: said.recovery }),
+    };
+  }
+  return {
+    ok: false,
+    phase: "github_pull",
+    error,
+    hint: said.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
+    message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+  };
+}
+
+/**
+ * A bundle pull-bundle could not read in full is refused, never deployed in
+ * part (Builder #144, B144R-6): `solution_unreadable` names the first
+ * definition file (solution.json, a skill) that could not be read or parsed;
+ * `connectors_unreadable` the connectors with a file that could not be read.
+ * @param {object} pull  pull-bundle's answer
+ * @returns {object|null}
+ */
+function bundleNotRead(pull) {
+  const branch = BRANCH_WORKFLOW.deploy_branch;
+  const u = pull.solution_unreadable;
+  if (u) {
+    const path = u.path || "solution.json";
+    const parse = u.stage === "parse";
+    return {
+      ok: false,
+      phase: "github_pull",
+      code: parse ? "SOLUTION_JSON_INVALID" : "BRANCH_NOT_READ",
+      path,
+      ...(u.code && { cause_code: u.code }),
+      error: `${path} on ${branch} ${parse ? "does not parse" : "could not be read"}: ${u.error}. Nothing was deployed.`,
+      hint: parse
+        ? `Fix it with ateam_github_patch(solution_id, path:'${path}'), ship it with ateam_github_promote, then deploy again.`
+        : "Retry the deploy; GitHub reads are usually back within a minute.",
+    };
+  }
+  const ids = Array.isArray(pull.connectors_unreadable) ? pull.connectors_unreadable : [];
+  if (ids.length > 0) {
+    return {
+      ok: false,
+      phase: "github_pull",
+      code: "BRANCH_NOT_READ",
+      connectors_unreadable: ids,
+      error: `GitHub did not let every file of ${ids.join(", ")} be read on ${branch}; deploying now would ship ${ids.length === 1 ? "that connector" : "those connectors"} without them. Nothing was deployed.`,
+      hint: "Retry the deploy; GitHub reads are usually back within a minute.",
+    };
+  }
+  return null;
+}
+
 // WHAT CONTINUES A CONVERSATION, and the window an answer has — what Core does
 // today, from Core and Builder origin/dev (2026-10-02). The Builder serves no
 // constant for this, so these are ateam-mcp's words, rendered in
@@ -1354,7 +1428,7 @@ export const tools = [
     // Reaches the upload route for each connector in mcp_store (connector_restart).
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
-      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → on a FIRST deploy (no repo yet) creates the GitHub repo and pushes to it.\n\n" +
+      "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → then ateam_github_push (when it runs: its /spec entry).\n\n" +
       `OVER A HOSTED CONNECTION (HTTP), which is cut off after ~100s without an answer, the call answers within ${HOSTED_CALL_BUDGET_MS / 1000}s. A run not finished by then answers status:"running" with a run_id and goes on: nothing is stopped or sent again. ` +
       "ateam_build_and_run(solution_id, resume:true, run_id) then answers with THAT run's result (waiting up to the same time again) and deploys nothing. A local (stdio) connection waits for the whole run.\n\n" +
       "🌳 DEV/PROD WORKFLOW:\n" +
@@ -2739,8 +2813,15 @@ export const tools = [
   {
     name: "ateam_github_push",
     core: true,
+    // A POINTER, NOT A COPY. What the push writes, and what it keeps as the
+    // branch holds it, is stated once by the Builder: /spec also_available
+    // "POST /deploy/solutions/:solutionId/github/push" (Builder #144, BL-21).
+    // This said "Commits the full bundle (solution + skills + connector
+    // source)" (c98addc), which stopped being true when the push began writing
+    // only what it changes.
     description:
-      "Push the current deployed solution to GitHub. Auto-creates the repo on first use. Commits the full bundle (solution + skills + connector source) atomically. Use after ateam_build_and_run to version your solution, or anytime you want to snapshot the current state.",
+      "Push the solution to its GitHub repo. When it runs, what it writes, and what it keeps as the branch holds it: " +
+      PUSH_WRITES_AT + ".",
     inputSchema: {
       type: "object",
       properties: {
@@ -3265,7 +3346,11 @@ export const tools = [
     name: "ateam_sync_all",
     core: true,
     description:
-      "Sync ALL tenants: push Builder FS → GitHub, then pull GitHub → Core MongoDB. Requires master key authentication. Returns a summary table with results for each tenant/solution.",
+      // A POINTER, NOT A COPY (CORE on #58, B58R-1): the push half is
+      // ateam_github_push's call (github/push), which on a branch holding the
+      // solution sends nothing from the Builder's disk but what the branch lacks.
+      "Sync ALL tenants: ateam_github_push for each solution (what it writes, and what it keeps: " + PUSH_WRITES_AT +
+      "), then pull GitHub → Core MongoDB. Requires master key authentication. Returns a summary table with results for each tenant/solution.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4058,15 +4143,13 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
         // idempotent, so one lost answer does not fail the whole deploy.
         { timeoutMs: 60_000, idempotent: true },
       );
-      if (!pullResult.ok) {
-        return {
-          ok: false,
-          phase: "github_pull",
-          error: pullResult.error || "Failed to pull bundle from GitHub",
-          hint: pullResult.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
-          message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
-        };
-      }
+      if (!pullResult.ok) return pullRefused(pullResult, pullResult.error || "Failed to pull bundle from GitHub");
+      // A LISTED FILE THE BUILDER COULD NOT READ OR PARSE IS NOT ABSENT
+      // (Builder #144, B144R-6). The bundle comes back without it, and saying
+      // so in a note while deploying the rest shipped the solution without a
+      // skill, without its solution.json, or with a connector short of a file.
+      const notRead = bundleNotRead(pullResult);
+      if (notRead) return notRead;
       effectiveMcpStore = pullResult.mcp_store || {};
       pulledMcpStore = true;
       // Use solution from GitHub if not passed inline
@@ -4104,8 +4187,6 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
       // the Builder's store; what it can no longer do is disappear.
       const missingSource = Array.isArray(pullResult.connectors_missing_source)
         ? pullResult.connectors_missing_source : [];
-      const unreadable = Array.isArray(pullResult.connectors_unreadable)
-        ? pullResult.connectors_unreadable : [];
       if (!connectors?.length && (Object.keys(effectiveMcpStore).length > 0 || missingSource.length > 0)) {
         const connIds = [...new Set([
           ...Object.keys(effectiveMcpStore).map((k) => {
@@ -4132,15 +4213,9 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
           connectors_missing_source: missingSource,
           note: "These connectors are declared but the repo carries no source for them. They are still deployed if the Builder holds their authored source; if it does not, validation refuses and ateam_get_connector_source / ateam_recover_connector_source tell you which.",
         }),
-        ...(unreadable.length > 0 && { connectors_unreadable: unreadable }),
       });
     } catch (err) {
-      return {
-        ok: false,
-        phase: "github_pull",
-        error: err.message,
-        message: "Failed to pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
-      };
+      return pullRefused(jsonVerdictOf(err.body) || {}, err.message);
     }
   }
 
