@@ -87,9 +87,18 @@ function makeApi(respond) {
   return { calls, call: async (connectorId, tool, args) => { calls.push(JSON.parse(JSON.stringify({ connectorId, tool, args }))); return respond(connectorId, tool, args); } };   // plain copy: args may come from the page's realm
 }
 
+// What the host pushes into a plugin for a server command: WidgetSurface.jsx:176-196
+// (dispatchToIframe) — it carries BOTH conventions, type and action; the phone's
+// usePluginBridge.ts dispatchToWebView sends the type form.
+const commandMessage = ({ command, args, correlationId }) => ({
+  source: "adas-host", pluginId: PLUGIN,
+  message: { type: "plugin.command", action: "plugin.command", payload: { command, args, data: undefined, correlationId } },
+});
+
 // ─── Host 1: the double ──────────────────────────────────────────────────────
 function makeHostDouble(api) {
   let toPlugin = () => {};
+  const commandResults = [];
   const reply = (requestId, result, error) =>
     toPlugin({ source: "adas-host", message: { type: "mcp-result", payload: { requestId, result, error } } });   // mcpProxy.js:80-83
   async function handleMcpCall(payload) {
@@ -110,7 +119,11 @@ function makeHostDouble(api) {
       const action = d.message?.action || d.action;                                                              // :45
       const payload = d.message?.payload || d.payload;                                                           // :46
       if (action === "mcp-call" && payload?.requestId) handleMcpCall(payload);                                   // :56
+      const type = d.message?.type || d.type;                                                                    // :47
+      if (type === "plugin.command.result" && payload?.correlationId) commandResults.push(JSON.parse(JSON.stringify(payload)));   // :50
     },
+    commandResults,
+    sendCommand: (cmd) => toPlugin(commandMessage(cmd)),
     // WidgetSurface.jsx:248-259 — init carries the connector's id.
     sendInit: (connectorId) => toPlugin({ source: "adas-host", pluginId: PLUGIN, message: { type: "init", payload: { tenant: "t", token: "", connectorId, mcpEndpoint: null, selectedJobId: null } } }),
     async done() {},
@@ -134,10 +147,18 @@ async function makeRealHost(api) {
   let listener;
   const contentWindow = { postMessage: (m) => toPlugin(m) };
   const iframeRef = { current: { contentWindow, src: "http://localhost:3102/mcp-ui/t/c/p/index.html" } };
-  attachHostBridge({ iframeRef, getToken: () => "tok", targetWindow: { addEventListener: (_t, fn) => { listener = fn; }, removeEventListener() {} }, handlers: {} });
+  const commandResults = [];
+  attachHostBridge({
+    iframeRef, getToken: () => "tok",
+    targetWindow: { addEventListener: (_t, fn) => { listener = fn; }, removeEventListener() {} },
+    // WidgetSurface.jsx wires onCommandResult to sendCommandResult; here it records.
+    handlers: { onCommandResult: (payload) => commandResults.push(JSON.parse(JSON.stringify(payload))) },
+  });
   return {
     attach(deliver) { toPlugin = deliver; },
     fromPlugin: (d) => listener({ source: contentWindow, data: d }),
+    commandResults,
+    sendCommand: (cmd) => toPlugin(commandMessage(cmd)),
     // sendInit builds the same message WidgetSurface.jsx:248-259 posts.
     sendInit: (connectorId) => toPlugin({ source: "adas-host", pluginId: PLUGIN, message: { type: "init", payload: { tenant: "t", token: "", connectorId, mcpEndpoint: null, selectedJobId: null } } }),
     async done() {},
@@ -147,8 +168,8 @@ async function makeRealHost(api) {
 // ─── Run the generated page ──────────────────────────────────────────────────
 // The page's <script type="module"> executed in a context that has a window
 // whose parent is the host, a DOM of two elements, and timers the test fires.
-function runPage(host) {
-  const script = /<script type="module">([\s\S]*?)<\/script>/.exec(html)?.[1];
+function runPage(host, pageHtml = html) {
+  const script = /<script type="module">([\s\S]*?)<\/script>/.exec(pageHtml)?.[1];
   assert.ok(script, "the scaffold has no <script type=\"module\">");
   const listeners = [];
   const timers = new Map();
@@ -190,6 +211,25 @@ async function quiet(fn) {
   console.log = console.debug = console.error = () => {};
   try { return await fn(); } finally { [console.log, console.debug, console.error] = keep; }
 }
+
+// A widget that answers plugin.command, correct and broken. The reply is the
+// only thing that differs between them.
+const commandPage = (reply) => `<html><body><script type="module">
+  window.addEventListener("message", (e) => {
+    const m = e.data && e.data.message;
+    if (e.data && e.data.source === "adas-host" && m && m.type === "plugin.command") {
+      const cid = m.payload.correlationId;
+      ${reply}
+    }
+  });
+</script></body></html>`;
+const replyWith = (message) => `window.parent.postMessage({ source: "adas-plugin", message: ${message} }, "*");`;
+const COMMAND_PAGES = [
+  ["correct reply", commandPage(replyWith(`{ type: "plugin.command.result", payload: { correlationId: cid, result: { shown: m.payload.command } } }`)), false],
+  ["reply keyed by requestId", commandPage(replyWith(`{ type: "plugin.command.result", payload: { requestId: cid, result: { shown: m.payload.command } } }`)), true],
+  ["reply with no id", commandPage(replyWith(`{ type: "plugin.command.result", payload: { result: { shown: m.payload.command } } }`)), true],
+  ["reply sent as action", commandPage(replyWith(`{ action: "plugin.command.result", payload: { correlationId: cid, result: { shown: m.payload.command } } }`)), true],
+];
 
 const hosts = [
   ["host double", (api) => makeHostDouble(api)],
@@ -275,6 +315,26 @@ for (const [label, makeHost] of hosts) {
       assert.equal(page.output.style.color, "#b00020");
     });
   });
+
+  // The linter's verdict on a command widget must be the host's: the page the
+  // linter passes is answered, the pages it flags are not.
+  for (const [name, page, flagged] of COMMAND_PAGES) {
+    test(`[${label}] command widget, ${name}: ${flagged ? "the host drops the reply, and the linter flags it" : "the host takes the reply, and the linter passes it"}`, { skip }, async () => {
+      await quiet(async () => {
+        const host = await makeHost(makeApi(() => answers.ok({ ok: true })));
+        runPage(host, page);
+        host.sendCommand({ command: "show_item", args: { id: 7 }, correlationId: "corr_1" });
+        if (flagged) {
+          assert.deepEqual(host.commandResults, [], "the host took a reply the linter says it cannot match");
+          assert.ok(_widgetProtocolProblems(page).length > 0, "the host drops this reply and the linter passes it");
+        } else {
+          assert.deepEqual(host.commandResults, [{ correlationId: "corr_1", result: { shown: "show_item" } }],
+            "the host did not match the reply to the command");
+          assert.deepEqual(_widgetProtocolProblems(page), [], "the host answers this widget and the linter flags it");
+        }
+      });
+    });
+  }
 
   test(`[${label}] an isError result that arrives as a success (a Core older than 2026-09-27) is still shown as an error`, { skip }, async () => {
     await quiet(async () => {

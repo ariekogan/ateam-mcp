@@ -923,6 +923,21 @@ const _HOST_SEND_ACTIONS = ["mcp-call", "select-actor", "close"];
 const _HOST_SEND_TYPES = ["plugin.command.result", "plugin.event", "open-job"];
 const _keyIs = (key, value) => new RegExp(`\\b${key}\\s*:\\s*["']${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`);
 
+// The inline `payload: { ... }` literal of a message object, or null when there
+// is none to read: built elsewhere (`payload` by name), or it spreads another
+// object (its keys are not all visible). A key we cannot see is not one we may
+// report missing.
+function _inlinePayload(obj) {
+  const at = /payload\s*:\s*\{/.exec(obj);
+  if (!at) return null;
+  const open = obj.indexOf("{", at.index);
+  const end = _closingBrace(obj, open);
+  if (end === -1) return null;
+  const payload = obj.slice(open, end);
+  return /[{,]\s*\.\.\.\s*[\w$({[]/.test(payload) ? null : payload;
+}
+const _hasKey = (payload, key) => new RegExp(`(?:^|[{,\\s])${key}\\s*[:,}]`).test(payload);
+
 export function _widgetProtocolProblems(html) {
   if (typeof html !== "string" || !html.includes("postMessage")) return [];
 
@@ -947,8 +962,11 @@ export function _widgetProtocolProblems(html) {
     if (/type\s*:\s*["']tool\.call["']/.test(obj)) {
       add('sends message.type:"tool.call" — the host has NEVER accepted it, at any version (silent timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
     } else if (!sendsKnown) {
+      const actionIsAType = _HOST_SEND_TYPES.find((t) => _keyIs("action", t).test(obj));
       if (/type\s*:\s*["']mcp-call["']/.test(obj)) {
         add('sends message.TYPE:"mcp-call" — the host matches on message.ACTION for sends, so this is ignored. Use message:{action:"mcp-call",payload:{...}}.');
+      } else if (actionIsAType) {
+        add(`sends message.ACTION:"${actionIsAType}" — the host matches "${actionIsAType}" on message.TYPE (only mcp-call and select-actor are matched on message.ACTION), so this is ignored. Use message:{type:"${actionIsAType}",payload:{...}}.`);
       } else {
         const act = /\baction\s*:\s*["']([^"']+)["']/.exec(obj);
         const typ = /\btype\s*:\s*["']([^"']+)["']/.exec(obj);
@@ -959,7 +977,7 @@ export function _widgetProtocolProblems(html) {
 
     // A plugin.command.result REPLIES to a command and carries the command's
     // correlationId: that is its protocol. Only a tool call keys on requestId.
-    const repliesToCommand = _keyIs("type", "plugin.command.result").test(obj);
+    const repliesToCommand = _keyIs("type", "plugin.command.result").test(obj) || _keyIs("action", "plugin.command.result").test(obj);
     if (!repliesToCommand && (/payload\s*:\s*\{[^}]*correlationId/.test(obj) || /correlationId\s*:\s*correlationId/.test(obj))) {
       add('sends the request id as correlationId — the host echoes payload.requestId, so responses never match the pending request and every call times out even when the host answered.');
     }
@@ -969,22 +987,39 @@ export function _widgetProtocolProblems(html) {
     // Judged only when the payload is an inline literal without a spread: a
     // payload built elsewhere is not one we can see into.
     if (_keyIs("action", "mcp-call").test(obj)) {
-      const at = /payload\s*:\s*\{/.exec(obj);
-      const end = at ? _closingBrace(obj, obj.indexOf("{", at.index)) : -1;
-      const payload = end === -1 ? "" : obj.slice(obj.indexOf("{", at.index), end);
-      if (payload && !payload.includes("...")) {
-        const missing = ["requestId", "connectorId", "tool"].filter((k) => !new RegExp(`(?:^|[{,\\s])${k}\\s*[:,}]`).test(payload));
-        if (missing.length) {
-          add(`sends an mcp-call whose payload has no ${missing.join(" / ")} — the host ignores a call without requestId and answers "Missing connectorId or tool" to one without those, so the call never succeeds. Take connectorId from the host's init message (payload.connectorId).`);
-        }
+      const payload = _inlinePayload(obj);
+      const missing = payload ? ["requestId", "connectorId", "tool"].filter((k) => !_hasKey(payload, k)) : [];
+      if (missing.length) {
+        add(`sends an mcp-call whose payload has no ${missing.join(" / ")} — the host ignores a call without requestId and answers "Missing connectorId or tool" to one without those, so the call never succeeds. Take connectorId from the host's init message (payload.connectorId).`);
+      }
+    }
+
+    // A command reply the host cannot match to the command: it reads
+    // payload.correlationId and ignores the message without it (Core
+    // attachHostBridge.js:50), so the command waits out its 15 s and the
+    // CALLING skill gets "Plugin command timeout" — nothing fails in the widget.
+    if (_keyIs("type", "plugin.command.result").test(obj)) {
+      const payload = _inlinePayload(obj);
+      if (payload && !_hasKey(payload, "correlationId")) {
+        add('sends plugin.command.result whose payload has no correlationId — the host ignores a reply without it (it reads payload.correlationId; a reply to a command keys on correlationId, not requestId), so the command times out after 15 s in the calling skill. Echo the correlationId the plugin.command carried.');
       }
     }
   }
 
-  // RECEIVE side: only reading correlationId OFF THE HOST PAYLOAD counts.
-  if (/payload\s*(\?\.|\.)\s*correlationId/.test(html) ||
+  // RECEIVE side: only reading correlationId OFF THE HOST PAYLOAD counts — and
+  // only where that payload answers a tool call. The host's plugin.command
+  // carries a correlationId too (Core WidgetSurface.jsx dispatchToIframe: the
+  // phone's usePluginBridge.ts dispatchToWebView the same), and a plugin that
+  // answers it MUST read that id and echo it back in plugin.command.result: a
+  // page that handles plugin.command is reading the command's, and is not
+  // flagged. (A page that handles commands AND matches its mcp-result by
+  // correlationId is not caught here; its mcp-call send is, and the send side
+  // is checked either way.)
+  const handlesCommands = /(?:\b(?:type|action)\s*[!=]==?\s*|\bcase\s+)["']plugin\.command["']/.test(html);
+  if (!handlesCommands && (
+      /payload\s*(\?\.|\.)\s*correlationId/.test(html) ||
       /payload\s*&&\s*[\w$.]*payload\.correlationId/.test(html) ||
-      /\{\s*correlationId[^}]*\}\s*=\s*[\w$.]*payload/.test(html)) {
+      /\{\s*correlationId[^}]*\}\s*=\s*[\w$.]*payload/.test(html))) {
     add('reads payload.correlationId from the host response — the host sends payload.requestId, so the pending request is never matched.');
   }
   if (/type\s*===?\s*["']tool\.response["']/.test(html)) {
