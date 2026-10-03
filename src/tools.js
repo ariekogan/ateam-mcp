@@ -809,6 +809,37 @@ function _summarizeDef(def) {
   };
 }
 
+/**
+ * ateam_get_solution(solution_id, skill_id, section:"tools") — the tools a
+ * skill's deploy sends, from the Builder's skill read: `deployed.tools`
+ * ({name, description, connector}), with the author's own list beside it.
+ * A Builder that sends no `deployed` (one before BL-38) or a skill with no
+ * deploy recorded (`deployed: null`) answers with the file's list, and says
+ * that is all it is.
+ */
+function toolsSectionOf(r, solution_id, skill_id) {
+  const skill = r?.skill || r?.definition || r || {};
+  const authored = Array.isArray(skill.tools) ? skill.tools : [];
+  const deployed = r?.deployed;
+  if (deployed && Array.isArray(deployed.tools)) {
+    return {
+      ok: true, solution_id, skill_id, section: "tools",
+      tools: deployed.tools,
+      ...(deployed.imported_from && { imported_from: deployed.imported_from }),
+      authored_tools: authored,
+      _note: "tools = every tool this skill's deploy sends: the ones you wrote (authored_tools, skill.json) and the ones imported from its connectors (imported_from), as the Builder last built them. What Core runs right now can differ until the next deploy. Edit authored_tools with ateam_patch; imported tools come from the connector.",
+    };
+  }
+  return {
+    ok: true, solution_id, skill_id, section: "tools",
+    tools: authored,
+    authored_tools: authored,
+    _note: deployed === null
+      ? "No deploy is recorded for this skill, so these are only the tools you wrote (skill.json). Tools imported from its connectors appear here once it is deployed."
+      : "This Builder sent no deployed state, so these are only the tools written in skill.json; tools imported from the skill's connectors are not listed.",
+  };
+}
+
 // OPEN-8: byte offset/limit paging for reads that can exceed the ~50KB output
 // cap. Serializes the result to pretty JSON and returns a [offset, offset+limit)
 // slice plus a cursor so an agent can page the rest (like Read offset/limit).
@@ -1938,7 +1969,7 @@ export const tools = [
         },
         section: {
           type: "string",
-          description: "Optional (with skill_id): return ONLY this section of the skill instead of the whole definition — avoids the ~50KB output truncation on big skills. Dotted paths work (e.g. 'role', 'tools', 'intents.supported', 'policy', 'engine'). Omit for the full skill; use ateam_show_skill_minimal for the slim authoring view.",
+          description: "Optional (with skill_id): return ONLY this section of the skill instead of the whole definition — avoids the ~50KB output truncation on big skills. Dotted paths work (e.g. 'role', 'tools', 'intents.supported', 'policy', 'engine'). 'tools' answers every tool the skill's deploy sends — the ones written in skill.json (authored_tools) and the ones imported from its connectors — not only the file's list. Omit for the full skill; use ateam_show_skill_minimal for the slim authoring view.",
         },
         offset: {
           type: "number",
@@ -6342,7 +6373,15 @@ export const handlers = {
       // `section` slices it to one field (dotted paths ok, e.g. intents.supported);
       // offset/limit page the raw bytes — so a big skill is always readable.
       let result = r;
-      if (section) {
+      if (section === "tools") {
+        // WHAT THE SKILL CAN DO is what its deploy sends: the Builder's
+        // `deployed.tools` — the author's tools AND the ones imported from its
+        // connectors (Builder BL-38). skill.json holds the author's tools
+        // only, so slicing `skill.tools` answered [] for a skill whose tools
+        // all come from its connectors. `authored_tools` is the file's list,
+        // the one an edit changes.
+        result = toolsSectionOf(r, solution_id, skill_id);
+      } else if (section) {
         const skill = r?.skill || r?.definition || r || {};
         const val = String(section).split(".").reduce((o, k) => (o == null ? undefined : o[k]), skill);
         result = {
