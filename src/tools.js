@@ -1562,7 +1562,7 @@ export const tools = [
     name: "ateam_spec_search",
     core: true,
     description:
-      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic). Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod or dev, or the base itself for any other host): the environment whose docs were searched.",
+      "Semantic search over the FULL ateam platform /spec documentation — the deep fallback behind ateam_design_advisor. Ask a natural-language 'how do I…' question and get the most relevant doc chunks (with their topic + heading), then read the full topic via ateam_get_spec(topic); an example a hit names or points to (examples/<type>, /spec/examples/<type>) is read via ateam_get_examples(type), which ateam_get_spec does not serve. Use this when the advisor's pointer isn't enough, or for details/examples on anything — including topics outside the curated capability list. Read-only. Needs NO sign-in, tenant or LLM, so it answers when the advisor refuses a session that has not signed in. The result carries `served_by` (prod or dev, or the base itself for any other host): the environment whose docs were searched.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5491,6 +5491,11 @@ export const handlers = {
     // answered. get_examples, twenty lines below, has had exactly this guard
     // since 04c24ce; it was never brought up here.
     let path = SPEC_PATHS[topic];
+    // A search hit that names an example (ateam_spec_search) is read with
+    // ateam_get_examples; its name is not a spec topic.
+    if (!path && /^\/?(?:spec\/)?examples\//.test(String(topic))) {
+      throw new Error(`"${topic}" is an example, not a spec topic: read it with ateam_get_examples(type: "<the part after examples/>").`);
+    }
     if (!path) {
       throw new Error(
         `Unknown spec topic "${topic}". Available: ${Object.keys(SPEC_PATHS).join(", ")}.`
