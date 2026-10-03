@@ -1138,6 +1138,19 @@ function kickFallsBackToSync(err) {
   return err?.neverSent === true || err?.status === 404 || err?.status === 405;
 }
 
+/**
+ * monitoring.latency_ms_p95 of every tool that reaches the connector upload
+ * route (/deploy/solutions/<id>/connectors/<id>/upload). Core reads this field
+ * from tools/list to size the tool's timeout (ai-dev-assistant
+ * connectorManager.js timeoutForTool: ×4, capped at 300s, never below its 30s
+ * default). The upload runs npm install + build + a connector restart: ~34s on
+ * K15 (2026-09-28), up to ~7 min (61f5399). So the 30s default cut it off —
+ * run 4's in-app ateam_create_plugin died "HTTP connector timeout after
+ * 30000ms". NOT a measured p95: 75s is the smallest value whose ×4 reaches
+ * Core's 300s cap. Core's own observed latency outranks it once it has samples.
+ */
+const CONNECTOR_UPLOAD_P95_MS = 75_000;
+
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -1338,6 +1351,8 @@ export const tools = [
   {
     name: "ateam_build_and_run",
     core: true,
+    // Reaches the upload route for each connector in mcp_store (connector_restart).
+    monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
       "DEPLOY THE CURRENT MAIN BRANCH TO A-TEAM CORE. ⚠️ HEAVIEST OPERATION (60-180s): validates solution+skills → deploys all connectors+skills to Core (regenerates MCP servers) → health-checks → optionally runs a warm test → on a FIRST deploy (no repo yet) creates the GitHub repo and pushes to it.\n\n" +
       `OVER A HOSTED CONNECTION (HTTP), which is cut off after ~100s without an answer, the call answers within ${HOSTED_CALL_BUDGET_MS / 1000}s. A run not finished by then answers status:"running" with a run_id and goes on: nothing is stopped or sent again. ` +
@@ -1961,6 +1976,7 @@ export const tools = [
   {
     name: "ateam_create_connector",
     core: true,
+    monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
       "Scaffold a new MCP connector with server.js + package.json + README: a defineConnector skeleton " +
       "(@ateam-ai/sdk/serve): you write handlers; caller identity arrives as ctx. " +
@@ -1994,6 +2010,7 @@ export const tools = [
   {
     name: "ateam_create_plugin",
     core: true,
+    monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
       "Scaffold a UI plugin (iframe HTML, React Native TSX, or both) inside an existing connector. " +
       "Eliminates ~50% of identical plugin boilerplate (imports, theme/bridge hooks, " +
@@ -2032,6 +2049,7 @@ export const tools = [
   {
     name: "ateam_upload_connector",
     core: true,
+    monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
       "Upload connector code to Core and restart — WITHOUT redeploying skills.\n\n" +
       "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
