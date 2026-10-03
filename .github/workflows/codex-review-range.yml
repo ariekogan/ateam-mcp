@@ -382,7 +382,12 @@ jobs:
             so far. Then keep investigating and REWRITE the file as you learn more.
             The file must be valid JSON at every point. Never leave it unwritten
             while you explore.
-          claude_args: "--max-turns 150 --allowedTools 'Read,Glob,Grep,LS,Write,Bash(git:*),Bash(node:*),Bash(rg:*),Bash(sed:*),Bash(ls:*),Bash(cat:*)'"
+          # MODEL. Sonnet by default (Arie, 2026-10-03): every PR now gets its own
+          # reviews before it lands, so the checkpoint sweep is a second net. No model
+          # was ever named here before, so it silently ran on the action's default
+          # (Opus). Repo variable CLAUDE_REVIEW_MODEL overrides it with no code change;
+          # this file must match the default branch or claude-code-action refuses to run.
+          claude_args: "--model ${{ vars.CLAUDE_REVIEW_MODEL || 'claude-sonnet-5-5' }} --max-turns 150 --allowedTools 'Read,Glob,Grep,LS,Write,Bash(git:*),Bash(node:*),Bash(rg:*),Bash(sed:*),Bash(ls:*),Bash(cat:*)'"
 
       # RELIABILITY: do not depend on the model choosing to Write the verdict file.
       # Slice 2 of the first Claude run finished cleanly but produced no
