@@ -87,8 +87,25 @@ function signInRefusal(err, base, sessionId, path = "/deploy/solutions") {
 // ...prev}, Builder 7ebab07, routes/deploy.js), so the instruction produced a
 // hand-copied second manifest — and a partial one silently replaced the
 // discovered render. One statement, rendered in both places.
+//
+// WHEN IT HAPPENS (CHECK A, Run 5, 2026-10-03). The texts said "At deploy,
+// Phase 5 discovers plugins" (02d4321) and "every deploy" (0f5f4d3). An in-app
+// builder then logged the lesson "the plugin list is only populated during
+// ateam_build_and_run Phase 5 … must promote", and every later run read it
+// first. What the code does (Builder origin/dev dd24337e, Core 3a9ba8f13): the
+// Builder's introspection runs in the full deploy (POST /deploy/solution —
+// ateam_build_and_run, ateam_deploy_solution) on EVERY run (the Builder has a
+// TEST-ONLY switch, solution._skip_introspection, deploy.js; it is deliberately
+// not taught in any served text), and in the
+// whole-solution redeploy only while ui_plugins is empty; the connector upload
+// and a one-skill redeploy never run it. Core (cp.listContextPlugins) asks
+// every connected connector the solution uses for its ui.listPlugins live, so a
+// running connector's plugin is listed with no deploy at all; a connector not
+// started yet is listed from the recorded solution.ui_plugins[] alone.
+const PLUGIN_LISTED_LIVE =
+  "Core lists a running connector's plugins live, so ateam_upload_connector needs no deploy and no promote to show one.";
 const DISCOVERED_PLUGIN_IS_MERGED =
-  "Nothing to declare: every deploy calls ui.listPlugins + ui.getPlugin on each connector listed in platform_connectors or in a skill's connectors[] " +
+  "Nothing to declare: ateam_build_and_run's deploy, on every run, calls ui.listPlugins + ui.getPlugin on each connector listed in platform_connectors or in a skill's connectors[] " +
   "(list this connector in the skill that opens the plugin) and MERGES each plugin it finds into solution.ui_plugins[], a shallow merge in which the fields you set yourself win. " +
   "Add a solution.ui_plugins[] entry only to override surface, roles or uiActions, or for a runtime:'device' connector, which is never introspected; " +
   "do not restate render, native or stateDomains (a partial render replaces the discovered one whole). " +
@@ -182,6 +199,46 @@ function pullRefused(said, error) {
     error,
     hint: said.hint || "Deploy the solution first (with mcp_store) to auto-create the GitHub repo.",
     message: "Cannot pull from GitHub. The repo may not exist yet — deploy with mcp_store first.",
+  };
+}
+
+// What `main` is said to lack, per part (deployBranchHoldsNo).
+const WHAT_MAIN_LACKS = Object.freeze({
+  solution: "holds no solution.json: nothing has been promoted to it.",
+  skills: "lacks skills (skills/<id>/skill.json).",
+});
+
+/**
+ * build_and_run's answer when it read an EXISTING repo's deploy branch and
+ * that branch lacks a part of the definition: the solution (`solution.json`)
+ * or the skills (CHECK A, M2). The only road the old pre_check texts gave was
+ * "Pass solution inline" / "Pass skills inline", written when a missing part
+ * meant no repo at all (8c5a114, 2026-03-21); since deploys moved to `main`
+ * (45010fa) an existing repo whose `main` lacks them is the normal state of
+ * work that has not been promoted yet, and sending the part inline there
+ * recreates what the repo already holds on `dev`. ONE helper for both parts:
+ * the roads are the same. The first-deploy answers (no repo) stay where the
+ * guards are.
+ * What it says depends on what is missing. No solution at all means nothing
+ * has been promoted. No skills does NOT: a `main` that lacks skills may hold a
+ * solution (or the caller sent one inline), so it says only that the skills
+ * are not there.
+ * @param {"solution"|"skills"} missing  what `main` does not hold
+ * @returns {object}
+ */
+function deployBranchHoldsNo(missing) {
+  const said = WHAT_MAIN_LACKS[missing];
+  if (!said) throw new Error(`deployBranchHoldsNo: unknown part "${missing}"`);
+  const { deploy_branch: deploy, write_branch: write, promote_tool: promote } = BRANCH_WORKFLOW;
+  return {
+    ok: false,
+    phase: "pre_check",
+    error: `\`${deploy}\`, the branch ateam_build_and_run deploys, ${said}`,
+    message:
+      `Ship what is on \`${write}\`: ${promote}(solution_id, dry_run:true) previews it, ${promote}(solution_id) ships it, then run this call again. ` +
+      `Or deploy \`${write}\` work without shipping it: ateam_upload_connector(solution_id, connector_id, github:true) for a connector's code, ` +
+      `ateam_patch for a skill or solution definition.`,
+    recovery: `${promote}(solution_id)`,
   };
 }
 
@@ -2087,16 +2144,16 @@ export const tools = [
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
       "Scaffold a UI plugin (iframe HTML, React Native TSX, or both) inside an existing connector. " +
-      "Eliminates ~50% of identical plugin boilerplate (imports, theme/bridge hooks, " +
-      "postMessage protocol, default export shape). You then fill in the component body. " +
+      "Writes the boilerplate (imports, theme/bridge hooks, " +
+      "postMessage protocol, default export shape); you fill in the component body. " +
       "Use kind='iframe' for web-only, 'rn' for mobile-only, 'adaptive' for both. " +
       "Also writes ui-dist/<plugin>/manifest.json with the required render block.\n\n" +
-      "⚠️ RENDERING IS NOT AUTOMATIC. At deploy, Phase 5 discovers plugins by calling each connector's " +
-      "ui.listPlugins + ui.getPlugin — a plugin only appears (and renders) if the connector ADVERTISES it there " +
-      "with a render.{mode, iframeUrl?, reactNative?} block. Dropping the scaffold files alone does NOT register it. " +
+      "⚠️ RENDERING IS NOT AUTOMATIC. A plugin renders only if its connector ADVERTISES it " +
+      "(ui.listPlugins + ui.getPlugin) with a render.{mode, iframeUrl?, reactNative?} block. The scaffold files alone register nothing. " +
+      `${PLUGIN_LISTED_LIVE} ` +
       "If the connector generates its plugin list from ui-dist/<plugin>/manifest.json, the emitted manifest is picked up automatically; " +
-      "if the connector has a HARDCODED list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), you MUST add this plugin there (copy the render block from the manifest.json). " +
-      `Verify after deploy with ateam_get_solution(solution_id, 'connectors_health') or ateam_get_widget_catalog. ${DISCOVERED_PLUGIN_IS_MERGED}\n\n` +
+      "if the connector has a HARDCODED list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), you MUST add this plugin there (copy the manifest.json render block). " +
+      `Verify with ateam_get_solution(solution_id, 'connectors_health') or ateam_get_widget_catalog. ${DISCOVERED_PLUGIN_IS_MERGED}\n\n` +
       "The scaffold MERGES into the existing connector (server.js + other files preserved) — works on GitHub-backed AND repo-less tenants; merge base is the GitHub repo when connected, else the deployed connector source.",
     inputSchema: {
       type: "object",
@@ -4221,6 +4278,8 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
 
   // Guard: solution required (either inline or from GitHub)
   if (!solution) {
+    // Phase 0 READ an existing repo's deploy branch and it holds no solution.
+    if (pulledMcpStore) return deployBranchHoldsNo("solution");
     return {
       ok: false,
       phase: "pre_check",
@@ -4231,6 +4290,8 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
 
   // Guard: skills required (either inline or from GitHub)
   if (!effectiveSkills?.length) {
+    // Same as the solution guard: Phase 0 read an existing repo's deploy branch.
+    if (pulledMcpStore) return deployBranchHoldsNo("skills");
     return {
       ok: false,
       phase: "pre_check",
@@ -4731,7 +4792,7 @@ export const handlers = {
         "skill.access_policy — defaults",
         "solution orchestrator skill — Phase 6: generated when routing_mode:auto",
         "solution.handoffs[] — Phase 6: orchestrator → each worker",
-        "solution.ui_plugins[] — Phase 5: MCP introspection (ui.listPlugins + ui.getPlugin)",
+        `solution.ui_plugins[] — recorded from each connector's ui.listPlugins + ui.getPlugin by ateam_build_and_run's deploy on every run, and by ateam_redeploy of the whole solution only while the list is empty; it is the list a connector not started yet is shown from. ${PLUGIN_LISTED_LIVE}`,
         "Style block prepended to every skill persona — Phase 1",
       ],
       replace_rule: "REPLACE wins per-field. Any field you write explicitly overrides the platform-generated equivalent. Delete it to opt back into automation.",
@@ -7574,8 +7635,8 @@ export const handlers = {
           ? `Edit ui-dist/${plugin_name}/index.html — replace the placeholder UI.`
           : null,
         `A manifest.json (with the render block) was written to ui-dist/${plugin_name}/manifest.json — this is the source of truth Core reads.`,
-        `If this connector was scaffolded by ateam_create_connector, its ui.listPlugins / ui.getPlugin read ui-dist/*/manifest.json automatically — nothing else to register, it renders on the next deploy. ⚠️ ONLY a connector with a HARDCODED plugin list (legacy, e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js) needs this plugin added there by hand — copy the render block from manifest.json.`,
-        `Verify with ateam_get_widget_catalog (or ateam_get_solution(solution_id, "connectors_health")) after deploy.`,
+        `If this connector was scaffolded by ateam_create_connector, its ui.listPlugins / ui.getPlugin read ui-dist/*/manifest.json automatically — nothing else to register. ${PLUGIN_LISTED_LIVE} ⚠️ ONLY a connector with a HARDCODED plugin list (legacy, e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js) needs this plugin added there by hand — copy the render block from manifest.json.`,
+        `Verify with ateam_get_widget_catalog (or ateam_get_solution(solution_id, "connectors_health")).`,
         DISCOVERED_PLUGIN_IS_MERGED,
       ].filter(Boolean),
     };
