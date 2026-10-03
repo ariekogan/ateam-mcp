@@ -2049,26 +2049,29 @@ export const tools = [
   {
     name: "ateam_log_lesson",
     core: true,
+    // HOW A WRONG LESSON IS CORRECTED is stated in ONE place: the Builder's
+    // lessons GET returns it in every answer as `correction_rule`. This text
+    // declares the argument and points there; it keeps no copy that could
+    // drift (CORE on #54). Core cuts every description at 1200 characters for
+    // an agent run (test/core-description-cut.test.mjs).
     description:
-      "Record ONE lesson this run learned, so the NEXT run does not relearn it. " +
-      "A building agent starts every run empty — it does not know which tool " +
-      "misled the last run or the workaround that got past it. Log a lesson the " +
-      "moment a tool misleads you AND you find a way through.\n\n" +
-      "APPEND-ONLY. You cannot edit or delete earlier lessons, and you do not supply " +
-      "the timestamp — the server stamps it, so it cannot be forged.\n\n" +
-      "PROVENANCE CAVEAT, stated because the earlier wording over-promised: `job_id` " +
-      "and `actor` are recorded ONLY when the caller supplies x-adas-job-id / " +
-      "x-adas-actor-id. An agent calling this tool does not, so those fields are " +
-      "usually null — a lesson cannot currently be traced back to the run that " +
-      "produced it, and the file cannot tell 'three runs hit this' from 'one run hit " +
-      "it three times'. Do not put a job id in `error` to compensate; keep that field " +
-      "verbatim.\n\n" +
-      "LOG ONLY WHAT YOU OBSERVED. Quote the error VERBATIM; never paraphrase it " +
-      "and never write a theory about platform internals. A wrong lesson is worse " +
-      "than no lesson, because the next run cannot check it and will act on it.\n\n" +
-      "Use kind='misleading_success' when a call REPORTED success while the thing " +
-      "you wanted did not happen — that class is the most expensive to rediscover " +
-      "and it is invisible to a failures-only log.",
+      "Record ONE lesson this run learned, so the NEXT run — which starts empty " +
+      "— does not relearn it. Log it the moment a tool misleads you AND you find " +
+      "a way through.\n\n" +
+      "You cannot edit or delete earlier lessons; supersede them: `supersedes` " +
+      "takes the `id` of the lesson to replace, from ateam_get_lessons, whose " +
+      "`correction_rule` says when and how. An unknown id is refused (404); a " +
+      "lesson already superseded is refused (409) naming the current one. The " +
+      "server stamps the id and the time.\n\n" +
+      "PROVENANCE: `job_id` and `actor` are usually null (an agent calling this " +
+      "tool sends no x-adas-job-id / x-adas-actor-id): a lesson cannot be traced " +
+      "to its run, nor 'three runs hit this' told from 'one run, three times'. " +
+      "Do not put a job id in `error`; keep it verbatim.\n\n" +
+      "LOG ONLY WHAT YOU OBSERVED, a correction too. Quote the error VERBATIM; " +
+      "never a paraphrase, never a theory about platform internals. A wrong " +
+      "lesson is worse than no lesson: the next run will act on it.\n\n" +
+      "kind='misleading_success': a call REPORTED success while the effect you " +
+      "wanted did not happen — the class a failures-only log cannot hold.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2082,6 +2085,10 @@ export const tools = [
           enum: ["failure", "surprise", "misleading_success"],
           description: "failure = it errored; surprise = it worked but not as documented; misleading_success = it REPORTED success while the intended effect did not happen",
         },
+        supersedes: {
+          type: "string",
+          description: "The `id` of the lesson this one supersedes, from ateam_get_lessons — see `correction_rule` in its answer",
+        },
       },
       required: ["solution_id", "tool", "error"],
     },
@@ -2091,16 +2098,23 @@ export const tools = [
     name: "ateam_get_lessons",
     core: true,
     description:
-      "Read what EARLIER runs on this solution learned — newest first, bounded. " +
-      "Call this during orientation, BEFORE planning: it is the only thing that " +
-      "carries context across runs, and it is cheap. Each entry says which tool " +
-      "misled a previous run, the verbatim error, what was tried instead, and " +
-      "whether that worked. An empty list is a real answer (nothing learned yet).",
+      "Read what EARLIER runs on this solution learned — the CURRENT lessons, " +
+      "newest first, bounded, each with its `id`. Call this during orientation, " +
+      "BEFORE planning: it is the only thing that carries context across runs, " +
+      "and it is cheap. Each entry says which tool misled a previous run, the " +
+      "verbatim error, what was tried instead, and whether that worked. An empty " +
+      "list is a real answer (nothing learned yet).\n\n" +
+      "Every answer carries `correction_rule`: how a lesson that proved wrong " +
+      "is corrected. A superseded lesson is counted in `superseded_count`, " +
+      "never listed in `lessons`; include_superseded:true returns it in a " +
+      "separate `superseded` list, each with `superseded_by`. A correction " +
+      "carries `corrects`: the tool and error the lesson it replaced quoted.",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: { type: "string", description: "The solution ID" },
-        limit: { type: "number", description: "Max entries, newest first (default 20)" },
+        limit: { type: "number", description: "Max current lessons, newest first (default 20)" },
+        include_superseded: { type: "boolean", description: "Also return the superseded lessons, in their own `superseded` list (default false)" },
       },
       required: ["solution_id"],
     },
@@ -2185,16 +2199,13 @@ export const tools = [
     monitoring: { safe: false, cost: "heavy", latency_ms_p95: CONNECTOR_UPLOAD_P95_MS, output: "bounded" },
     description:
       "Upload connector code to Core and restart it. Then the skills that import this connector's tools are redeployed when they need it — a redeploy of the WHOLE skill as the Builder holds it, so its other connectors' tools and any saved edit not yet deployed go live too. The reply's skill_tools says, per skill and per connector, what changed in what Core runs; stages.skills is its verdict. A tools[] you wrote yourself is never changed. The rule: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools.when_the_connector_changes.\n\n" +
-      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To fully replace the connector dir (historical behavior), pass replace:true.\n\n" +
+      "MERGES with the GitHub state at `ref` by default (default ref: 'dev'). Sending a partial file set ONLY overlays those files — the rest of the connector is preserved. To replace the whole connector, pass replace:true.\n\n" +
       "Modes:\n" +
       "  • github:true (no files)        — deploy the GitHub state at `ref` as-is.\n" +
       "  • github:true + files:[]        — GitHub state at `ref` as BASE, your files overlay on top (incoming wins).\n" +
       "  • files:[] (no github)          — default MERGE: your files over the GitHub state at `ref`, which is itself laid over the files Core ALREADY runs for this connector. So a file that exists only in the deployed copy SURVIVES this mode. Refuses if no base exists at all (no silent nuke).\n" +
       "  • files:[] + replace:true       — full replace. Wipes connector dir + writes only the provided files. Use deliberately.\n\n" +
-      "Multi-file connectors (server.js + dashboard HTML + RN bundle + package/manifest): pass each file with content_base64 (a single-line, escape-safe base64 string) instead of content — so you don't hand-escape ~90KB of HTML/JS/JSON inside one tool call. This is the CANONICAL agent path for a full connector; do NOT hand-roll `curl` against the raw endpoint (that skips connector registration / PAT provisioning).\n\n" +
-      "Common traps this design prevents:\n" +
-      "  • Pre-fix bug (2026-06-06): sending just ui-dist HTML wiped server.js + node_modules — connector broke until a full re-upload. Now: those files merge with the GitHub base.\n" +
-      "  • Pre-fix bug: github:true silently read from `main` even when patches were on `dev`. Now: defaults to dev; pass ref:'main' to opt into the legacy path.",
+      "Multi-file connectors (server.js, UI HTML, RN bundle, package files): pass each file as content_base64 (one escape-safe base64 line) instead of content. This is the CANONICAL agent path for a full connector; do NOT hand-roll `curl` against the raw endpoint (that skips connector registration / PAT provisioning).",
     inputSchema: {
       type: "object",
       properties: {
@@ -7489,13 +7500,15 @@ export const handlers = {
     };
   },
 
-  ateam_log_lesson: async ({ solution_id, tool, error, workaround, worked, kind }, sid) => {
+  ateam_log_lesson: async ({ solution_id, tool, error, workaround, worked, kind, supersedes }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
     if (!tool) throw new Error("tool required — the tool that misled you");
     if (!error) throw new Error("error required — quote it VERBATIM, do not paraphrase");
+    // The Builder validates `supersedes` (a current lesson of THIS solution);
+    // a refusal comes back as its 404/409, naming the current lesson.
     return await post(
       apiPath`/deploy/solutions/${solution_id}/lessons`,
-      { tool, error, workaround, worked, kind },
+      { tool, error, workaround, worked, kind, supersedes },
       sid,
     );
   },
@@ -7517,10 +7530,13 @@ export const handlers = {
     return await get(apiPath`/deploy/solutions/${solution_id}/progress${rawQuery(qs)}`, sid);
   },
 
-  ateam_get_lessons: async ({ solution_id, limit }, sid) => {
+  ateam_get_lessons: async ({ solution_id, limit, include_superseded }, sid) => {
     if (!solution_id) throw new Error("solution_id required");
-    const qs = Number.isFinite(limit) ? `?limit=${limit}` : "";
-    return await get(apiPath`/deploy/solutions/${solution_id}/lessons${rawQuery(qs)}`, sid);
+    const qs = new URLSearchParams();
+    if (Number.isFinite(limit)) qs.set("limit", String(limit));
+    if (include_superseded === true) qs.set("include_superseded", "true");
+    const qsStr = qs.toString() ? `?${qs}` : "";
+    return await get(apiPath`/deploy/solutions/${solution_id}/lessons${rawQuery(qsStr)}`, sid);
   },
 
   ateam_show_solution_minimal: async ({ solution_id }, sid) => {
