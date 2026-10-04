@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.115 — 2026-10-04
+
+Released together with Builder builder-prod-20261004-001, whose served texts these tools point at.
+
+### Dashboard buttons that call tools (#64)
+
+- `ateam_create_plugin`: the web scaffold speaks the host's real protocol
+  (`mcp-call` / `mcp-result`), takes the connector id from the host's init,
+  times out and shows the tool's own result or error, and treats `{ok:false}`
+  as a failure. Before, its buttons waited forever.
+- The plugin check judges every message sent to the host page, and no longer
+  flags a correct reply to a command.
+- "iframe" plugins are described as HTML on web and in the phone's WebView.
+- `ateam_spec_search`: an example a hit points at is read with
+  `ateam_get_examples`.
+
+### Tool texts that follow the Builder (#58, #61, #62, #63)
+
+- Every tool that names the GitHub push points at the Builder's one statement
+  of what a push writes.
+- `ateam_build_and_run` passes the Builder's own refusal through, and on an
+  existing repo whose main holds no solution or skills it says so and gives
+  the ways forward.
+- The patch tools note says a skill's `tools[]` is a whitelist.
+- `ateam_get_spec` has a `finalization` topic: how a skill's run ends.
+
+### Lessons and tools (#54, #65)
+
+- `ateam_log_lesson` can supersede a wrong lesson; `ateam_get_lessons` can
+  include superseded ones.
+- `ateam_get_solution(section:"tools")` answers every tool the skill's deploy
+  sends, its connectors' tools included.
+
 ## 0.4.114 — 2026-10-03
 
 ### Tools that reach the connector upload say how long they take (#59)
