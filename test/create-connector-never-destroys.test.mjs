@@ -6,10 +6,13 @@
 // It now asks first, with the read ateam_get_connector_source makes, and refuses
 // an id that exists, or one it could not check.
 //
-// And ateam_upload_connector says what replace:true deletes, inside the
-// 1200-character cut Core applies to every tool description an in-app agent
-// sees (ai-dev-assistant anthropicAgentBackend.js; ateam_upload_connector is a
-// solution-builder bootstrap tool).
+// And ateam_upload_connector says what replace:true deletes — and the sentence
+// that says what it deletes, and from where, falls inside the 1200-character
+// cut Core applies to every tool description an in-app agent sees
+// (ai-dev-assistant anthropicAgentBackend.js; ateam_upload_connector is a
+// solution-builder bootstrap tool). The whole text is past the cut (its opening
+// paragraph says how skills follow an upload); test/core-description-cut holds
+// its length.
 //
 // Run: node --test test/create-connector-never-destroys.test.mjs
 import { test, before, after, beforeEach } from "node:test";
@@ -101,7 +104,11 @@ test("ateam_upload_connector says what replace:true deletes — and where it doe
   assert.match(replaceLine, /Never from main/);
   assert.match(replaceLine, /github:true \+ replace:true leaves the repo as it is/);
   assert.doesNotMatch(t.description, /Wipes connector dir \+ writes only the provided files/, "the old, incomplete claim is still served");
-  assert.ok(t.description.length <= CORE_DESCRIPTION_CUT, `${t.description.length} characters; an in-app agent sees only the first ${CORE_DESCRIPTION_CUT}`);
+  // What an in-app agent reads is the first 1200 characters: the deletion, and
+  // where it reaches, must be in them (the rest of the line may be cut).
+  const seen = t.description.slice(0, CORE_DESCRIPTION_CUT);
+  assert.match(seen, /Every other file is DELETED from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch \(dev\)/, "an in-app agent is cut off before it reads what replace:true deletes");
+  assert.match(seen, /deployed or not — files written with ateam_github_patch included\./, "an in-app agent is cut off before it reads that never-deployed files go too");
   const param = t.inputSchema.properties.replace.description;
   assert.match(param, /from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch \(dev\)/);
   assert.match(param, /deployed or not, files written with ateam_github_patch included/);
