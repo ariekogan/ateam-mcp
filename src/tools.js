@@ -2853,16 +2853,14 @@ export const tools = [
       "Call ONE tool on a running connector DIRECTLY and get its raw result — no skill, no guardrails, no user turn. It proves a tool's plumbing (arguments in, result out). " +
       "It can NOT prove a step that waits for a person — a confirmation, an approval, a value only the user knows: test those with ateam_conversation (ateam_get_spec('skill') → agent_guide.key_concepts.testing_and_runtime.human_step_testing). " +
       TEST_CONNECTOR_NEVER + " " +
-      // CORE review M41x-L3: the key's person is what an API key gets
-      // (Builder #115). A master_key session has no key person: the Builder
-      // passes its own actor through, and with none Core uses its service
-      // identity.
+      // Who a call runs as is the Builder's to say: the pointer. A master_key
+      // session has no key person, which the Builder's page does not say yet
+      // (CORE review M41x-L3), so this tool says it.
       TEST_RUNS_AS_AT + " " +
-      // DEAD — remove after Builder #158 is on prod: the master_key case moves
-      // into the Builder's key_concepts.actor_id (CORE: one home), and this
-      // sentence goes with the allow-list entry in
-      // the ALLOWED entry in test/tests-run-as-key-person.test.mjs.
-      "A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none. " +
+      // DEAD — remove after Builder #158 is on prod (its key_concepts.actor_id
+      // carries the master_key case; CORE: one home). Delete this sentence
+      // together with its ALLOWED entry in test/tests-run-as-key-person.test.mjs.
+      "A master_key session has no key person: this tool runs as the actor_id the session last passed to another tool, or as the platform's service identity when it passed none (a master session's other tests run anonymously). " +
       "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",
     inputSchema: {
       type: "object",

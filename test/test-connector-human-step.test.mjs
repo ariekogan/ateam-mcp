@@ -68,7 +68,7 @@ test("ateam_test_connector points at who the call runs as, scopes the master_key
   assert.ok(d.includes(TEST_RUNS_AS_AT), "ateam_test_connector does not point at who it runs as");
   // CORE review M41x-L3: a master_key session has no key person (Builder #115
   // passes a master caller's own actor through).
-  assert.ok(d.includes("A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none."), "the master_key case is not scoped");
+  assert.ok(d.includes("A master_key session has no key person: this tool runs as the actor_id the session last passed to another tool, or as the platform's service identity when it passed none (a master session's other tests run anonymously)."), "the master_key case is not scoped");
   assert.doesNotMatch(d, /_system_service/);
 });
 

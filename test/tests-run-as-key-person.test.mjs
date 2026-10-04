@@ -179,7 +179,7 @@ const RESTATEMENTS = [
 const ALLOWED = [
   {
     where: ["ateam_test_connector", "src/tools.js"],
-    sentence: "A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none.",
+    sentence: "A master_key session has no key person: this tool runs as the actor_id the session last passed to another tool, or as the platform's service identity when it passed none (a master session's other tests run anonymously).",
     until: "Builder #158 is on prod: the master_key case is in key_concepts.actor_id; delete the sentence and this entry",
   },
 ];
@@ -230,6 +230,25 @@ test("the allow-list is explicit: each entry is still served, marked DEAD in the
     assert.match(src, new RegExp("DEAD — remove after Builder #158 is on prod"), "the allow-listed sentence has no DEAD marker in src/tools.js");
   }
   assert.equal(ALLOWED.length, 1, "a second allow-listed restatement: the Builder's page must carry it first");
+});
+
+// CORE's wording (AM28-R7), written here once more ON PURPOSE: a test that read
+// it from ALLOWED could not notice ALLOWED changing it. The earlier wording ("it
+// runs as the actor it holds") was broader than what the Builder does: a master
+// session's test_connector runs as the actor_id the session last passed to
+// ANOTHER tool, and its other tests run anonymously.
+const MASTER_KEY_SENTENCE =
+  "A master_key session has no key person: this tool runs as the actor_id the session last passed to another tool, or as the platform's service identity when it passed none (a master session's other tests run anonymously).";
+test("the allow-listed master_key sentence is exactly CORE's wording, served once, and nothing broader is allowed", () => {
+  assert.equal(ALLOWED[0].sentence, MASTER_KEY_SENTENCE);
+  const d = tool("ateam_test_connector").description;
+  assert.equal(d.split(MASTER_KEY_SENTENCE).length - 1, 1, "ateam_test_connector does not serve the sentence exactly once");
+  assert.doesNotMatch(d, /it runs as the actor it holds/, "the broader, earlier wording is still served");
+  assert.deepEqual(restatementsIn(MASTER_KEY_SENTENCE, "ateam_test_connector"), []);
+  // Only that sentence is cut out: the earlier wording, or a sentence that
+  // extends it, still trips the guard.
+  assert.ok(restatementsIn("A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none.", "ateam_test_connector").length > 0);
+  assert.ok(restatementsIn(MASTER_KEY_SENTENCE + " It also acts as the platform's service identity.", "ateam_test_connector").length > 0);
 });
 
 test("(control) the guard sees the Builder's sentences and the ones other texts used", () => {
