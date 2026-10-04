@@ -291,5 +291,29 @@ check("a reply payload built elsewhere is NOT judged",
 check("a reply payload with a spread is NOT judged",
   _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.result",payload:{...base,result:r}}},"*");`)).length === 0);
 
+// ─── "The request id as correlationId" is about a TOOL CALL (BL-42 / AM64-R1) ─
+// The flag used to fire on ANY message whose payload carried a correlationId,
+// bar a plugin.command.result. A reply sent under a type the host does not act
+// on (a misspelt plugin.command.result) was told it "sends the request id as
+// correlationId": the author, who never had a requestId, was sent to look for
+// one. The reply is already reported for its type; the id is its protocol.
+console.log("a correlationId outside a tool call is not 'the request id'");
+const REQUEST_ID_FLAG = "request id as correlationId";
+const wrongType = _widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"plugin.command.response",payload:{correlationId:cid,result:{ok:true}}}},"*");`));
+check("a reply under an UNKNOWN type with a correlationId is not told it sent the request id",
+  !wrongType.some((p) => p.includes(REQUEST_ID_FLAG)));
+check("  it is still reported for the type it used", wrongType.length === 1 && wrongType[0].includes('type:"plugin.command.response"'));
+check("  the same for the `correlationId: correlationId` spelling",
+  !_widgetProtocolProblems(CMD_WIDGET(`window.parent.postMessage({source:"adas-plugin",message:{type:"command.done",payload:{correlationId:correlationId,result:{ok:true}}}},"*");`))
+    .some((p) => p.includes(REQUEST_ID_FLAG)));
+check("a real mcp-call that sends correlationId in its payload is still flagged",
+  _widgetProtocolProblems(SENDS_CORRELATION).some((p) => p.includes(REQUEST_ID_FLAG)));
+check("  also in the `correlationId: correlationId` spelling",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"mcp-call",payload:{requestId:r,connectorId:"c",tool:t,correlationId:correlationId}}},"*")`))
+    .some((p) => p.includes(REQUEST_ID_FLAG)));
+check("  also when the call is the type:\"mcp-call\" near-miss",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"mcp-call",payload:{correlationId:cid,connectorId:"c",tool:t}}},"*")`))
+    .some((p) => p.includes(REQUEST_ID_FLAG)));
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
