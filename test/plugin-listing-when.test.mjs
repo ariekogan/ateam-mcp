@@ -24,17 +24,19 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setSessionCredentials } from "../src/api.js";
 import { tools, handleToolCall } from "../src/tools.js";
+import { createOnlyAnswer, parsedBody } from "./create-only-stand-in.mjs";
 
 const SID = "sess-plugin-listing-when";
 let server;
 before(async () => {
   server = createServer((req, res) => {
-    req.resume();
+    let body = "";
+    req.on("data", (c) => { body += c; });
     req.on("end", () => {
       const path = req.url.split("?")[0];
       const reply = path.endsWith("/ui-plugins")
         ? { ok: true, plugins: [{ id: "mcp:demo-mcp:walk", render: { mode: "adaptive", iframeUrl: "/ui/walk/index.html" } }] }
-        : { ok: true };
+        : { ok: true, ...(path.endsWith("/upload") && createOnlyAnswer(parsedBody(body))) };
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(reply));
     });

@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { setSessionCredentials } from "../src/api.js";
 import { tools, handleToolCall } from "../src/tools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
+import { createOnlyAnswer } from "./create-only-stand-in.mjs";
 
 export const SCENARIO_NOUNS = /(invoic|supplier|vendor(?!ed|ing)|ledger|SEED_HELD)/i;
 const hit = (t) => SCENARIO_NOUNS.test(String(t));
@@ -181,9 +182,12 @@ before(async () => {
     let body = "";
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
-      if (req.url.split("?")[0].endsWith("/upload")) { try { uploads.push(JSON.parse(body || "{}")); } catch { /* not JSON */ } }
+      let created = {};
+      if (req.url.split("?")[0].endsWith("/upload")) {
+        try { const sent = JSON.parse(body || "{}"); uploads.push(sent); created = createOnlyAnswer(sent); } catch { /* not JSON */ }
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, tools: 1 }));
+      res.end(JSON.stringify({ ok: true, tools: 1, ...created }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));

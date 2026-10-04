@@ -28,8 +28,8 @@ const OVER_THE_CUT = new Map([
   ["ateam_patch", 2993],
   ["ateam_delete_solution", 1246],
   ["ateam_log_progress", 1295],
-  ["ateam_create_plugin", 2016],
-  ["ateam_upload_connector", 1695],
+  ["ateam_create_plugin", 1991],
+  ["ateam_upload_connector", 1652],
   ["ateam_github_patch", 2568],
 ]);
 

@@ -33,6 +33,7 @@ import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { setSessionCredentials } from "../src/api.js";
 import { handleToolCall, coreTools, _widgetProtocolProblems } from "../src/tools.js";
+import { createOnlyAnswer } from "./create-only-stand-in.mjs";
 
 const SID = "sess-scaffold-host";
 const KEY = "adas_tenanta_00000000000000000000000000000000";
@@ -51,9 +52,10 @@ before(async () => {
       const path = req.url.split("?")[0];
       let reply = { ok: true };
       if (req.method === "POST" && path.endsWith("/upload")) {
-        const f = (JSON.parse(body || "{}").files || []).find((x) => x.path === `ui-dist/${PLUGIN}/index.html`);
+        const sent = JSON.parse(body || "{}");
+        const f = (sent.files || []).find((x) => x.path === `ui-dist/${PLUGIN}/index.html`);
         if (f) html = f.content;
-        reply = { ok: true, tools: 1 };
+        reply = { ok: true, tools: 1, ...createOnlyAnswer(sent) };
       } else if (path.endsWith("/ui-plugins")) {
         reply = { ok: true, plugins: [{ id: `mcp:${SCAFFOLD_CONNECTOR}:${PLUGIN}`, render: { mode: "adaptive", iframeUrl: `/ui/${PLUGIN}/index.html` } }] };
       }
