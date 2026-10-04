@@ -1853,7 +1853,13 @@ export const tools = [
     name: "ateam_test_voice",
     core: true,
     description:
-      "Simulate a voice conversation with a deployed solution, using text instead of audio and no phone call. Returns each turn with bot response, verification status, tool calls, and entities; the reply's identity (auth_method, actor_id, note) is the voice backend's own report, and ran_as repeats its actor_id.\n\n" +
+      // Says what /spec/voice says (Builder capabilitySpecs.js VOICE_TEST_REACH).
+      // It promised "the full voice pipeline … skill dispatch → response,
+      // end-to-end" (32dec97) while Core refuses a test session's first skill
+      // call (C6), so an agent read a voice-layer pass as a skill pass. Kept
+      // within the length it had: the whole text is past Core's cut, and the
+      // ratchet (test/core-description-cut) lets none grow.
+      "Simulate a voice call with text, not audio. VOICE LAYER only: it cannot show a skill result today (Core C6) — test the skill with ateam_conversation or ateam_test_skill. Each turn returns the response, verification status and entities; identity is the voice backend's report, ran_as repeats its actor_id.\n\n" +
       TEST_RUNS_AS,
     inputSchema: {
       type: "object",
@@ -4516,8 +4522,16 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
     // 2026-08-21 (job_aehopl8z): the backend had been restarted mid-run and
     // the agent burned turns on get_spec and spec_search chasing a phantom
     // format problem. The two diagnoses are opposites; pick by the cause.
-    const transport = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|network|aborted/i
-      .test(err.message || "");
+    //
+    // BY THE CAUSE, NOT THE WORDS. f0bb2c2 matched /…|network|aborted/ over
+    // err.message, which carries the response body (formatError), so a 400
+    // whose body said "network" was told to RETRY an unchanged definition,
+    // and a gateway 524 was sent to re-read the spec. Now: isTimeoutError
+    // (a timeout or a gateway, from the status and request()'s own mark);
+    // neverSent (request()'s mark on a refused connection or an unresolvable
+    // host, which it rethrows as a fresh Error with no cause); or the socket's
+    // errno in err.cause for a connection that died before any answer.
+    const transport = isTimeoutError(err) || err?.neverSent === true || typeof err?.cause?.code === "string";
     return {
       ok: false,
       phase: "validation",
@@ -5569,8 +5583,13 @@ export const handlers = {
   },
 
   // Design-time capability advisor. Proxies to the Builder's /spec/advisor
-  // (LLM over the curated capability catalog). Public endpoint (auth-exempt),
-  // but we forward the session so a base override is honored.
+  // (LLM over the curated capability catalog). SIGNED-IN ONLY: it runs the
+  // tenant's LLM, so the Builder refuses a call with no verified key (401
+  // SIGN_IN_REQUIRED, Builder #81), and the sign-in gate (publicTools.js: every
+  // tool not listed there is refused first) stops a key-less session before
+  // this runs. This comment used to say "Public endpoint (auth-exempt)"
+  // (5f539fa) — the exemption that let a bare X-ADAS-TENANT header bill
+  // another tenant's LLM.
   ateam_design_advisor: async ({ goal, design_state }, sid) => {
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
     // Direct call to the Builder's /spec/advisor. The session's X-ADAS-TENANT
@@ -8194,7 +8213,16 @@ const MAX_INDEX_NAMES = 200;
  * Now every check measures the document that will actually be returned.
  */
 function summarizeSpecResult(result) {
-  const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
+  // Through the TOOL: the reader is an MCP client and cannot GET anything, yet
+  // this said "GET /spec/<topic> directly" (360fb78). The Builder (#67) serves a
+  // page too big for one answer with a `_read_it_in_parts` index — small and
+  // first, so it survives the cut below — and returns any part whole for
+  // search:"<id>".
+  const how = "Call ateam_get_spec again with the same topic (and section, if you gave one) plus search:\"<id>\" — " +
+    (result._read_it_in_parts
+      ? "_read_it_in_parts at the top of this page lists the id of every part, and each part comes back WHOLE."
+      : "an entry id named here returns the entries that match it.") +
+    " ateam_spec_search finds the entry you need when you do not know its id.";
   const sizeOf = (v) => JSON.stringify(v ?? null).length;
   // The pretty-printed length of one top-level entry. Swapping a section's
   // value changes the whole document's length by exactly the difference of

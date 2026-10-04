@@ -26,7 +26,7 @@ const OVER_THE_CUT = new Map([
   ["ateam_build_and_run", 2469],
   ["ateam_test_skill", 1223],
   ["ateam_test_notification", 1331],
-  ["ateam_test_voice", 1780],
+  ["ateam_test_voice", 1779],
   ["ateam_patch", 2993],
   ["ateam_delete_solution", 1246],
   ["ateam_log_progress", 1295],
