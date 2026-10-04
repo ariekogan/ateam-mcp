@@ -1223,22 +1223,21 @@ function personRefusalHint({ code, actor }, ctx) {
   const who = actor ? ` (actor ${actor})` : "";
   const signInWithIt = ctx.signedIn ? switchSteps(ctx) : connectSteps(ctx);
   if (code === "KEY_OWNER_DELETED") {
-    return `This API key belongs to a person who has been deleted${who}. A key acts as the person who minted it, so ` +
-      "this one runs nothing now, and it is never run as anyone else. Signing in again with the same key will not help: " +
+    return `This API key belongs to a person who has been deleted${who}, so it runs nothing now. ` +
+      "Signing in again with the same key will not help: " +
       "a workspace owner or admin rotates the key (Tenant Admin → Tokens & Keys, in the A-Team app), the new key " +
       `belongs to whoever rotates it, and this session signs in with the new key.\n${signInWithIt}`;
   }
   if (code === "KEY_OWNER_INACTIVE") {
-    return `This API key belongs to a person who is no longer active in this workspace${who}. A key acts as the person ` +
-      "who minted it, so this one runs nothing until that changes, and it is never run as anyone else. Signing in again " +
-      "with the same key will not help. Either a workspace owner or admin reactivates or approves that person (Tenant " +
+    return `This API key belongs to a person who is no longer active in this workspace${who}, so it runs nothing until ` +
+      "that changes. Signing in again with the same key will not help. Either a workspace owner or admin reactivates or approves that person (Tenant " +
       "Admin → Users, in the A-Team app), and the same key works again; or they rotate the key (Tenant Admin → Tokens & " +
       `Keys), the new key belongs to whoever rotates it, and this session signs in with the new key.\n${signInWithIt}`;
   }
   return `The platform will not act as the person${who}: they are no longer active in this workspace, so the call did ` +
     "not run. Retrying as the same person will not help. Act as a person who is active here, or have a workspace owner " +
     "or admin reactivate or approve that person (Tenant Admin → Users, in the A-Team app). If that person is the one " +
-    "this session's key belongs to, the key acts as nobody else: reactivate them, or rotate the key (Tenant Admin → " +
+    "this session's key belongs to, the key runs nothing until then: reactivate them, or rotate the key (Tenant Admin → " +
     "Tokens & Keys) and sign this session in with the new one.";
 }
 

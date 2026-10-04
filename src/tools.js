@@ -2613,7 +2613,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Usually the session already holds it. Otherwise pass the ran_as of the ateam_conversation / ateam_test_skill reply that started the job, not the actor_id you passed (that names the thread). " + TEST_RUNS_AS_AT,
+          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Usually the session already holds it. Otherwise pass the ran_as of the ateam_conversation / ateam_test_skill reply that started the job, not the actor_id you passed. " + TEST_RUNS_AS_AT,
         },
         limit: {
           type: "number",
@@ -2796,7 +2796,7 @@ export const tools = [
     // actor", and the handler below never read it. The abort is no read: the
     // Builder's DELETE …/test/:jobId (routes/solutions.js:3056-3059, 986b2b8d)
     // sends Core testIdentity(req).ranAs — the API key's person, null for a key
-    // no person minted — and nothing the caller names. Core's
+    // with no person — and nothing the caller names. Core's
     // POST /api/job/:id/abort (server.js:3006) refuses an actor that may not
     // access the job (utils/actors.js canAccessActor: itself, a platform admin,
     // or a _system_service job), answered as 403 JOB_ACCESS_DENIED. A key with
@@ -2808,7 +2808,7 @@ export const tools = [
     // since an undeclared actor_id would be latched all the same.
     description:
       "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Stops at the next iteration boundary. " +
-      "The abort acts as your API key's person, as the test's start did (its ran_as), whatever actor_id says: Core stops a job that person may access and refuses any other with 403 JOB_ACCESS_DENIED. A key no person minted acts as the platform's service identity, which may stop only anonymous runs. (Advanced.)",
+      "The abort uses the actor the test's start ran as, whatever actor_id says: Core stops a job that actor may access and refuses any other with 403 JOB_ACCESS_DENIED, so an anonymous abort stops only anonymous runs. " + TEST_RUNS_AS_AT + " (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -2820,7 +2820,7 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional, and NOT who aborts: the abort acts as your API key's person (see the description). What it does is what actor_id does on any call: ateam-mcp keeps it (a test_ thread id excepted) as this session's actor and sends it on later calls, and the chain_id form reads the chain's jobs as that actor before aborting them. The session already holds it after ateam_conversation / ateam_test_skill; in a new session, pass the ran_as of the reply that started the run.",
+            "Optional, and NOT who aborts (see the description). What it does is what actor_id does on any call: ateam-mcp keeps it (a test_ thread id excepted) as this session's actor and sends it on later calls, and the chain_id form reads the chain's jobs as that actor before aborting them. The session already holds it after ateam_conversation / ateam_test_skill; in a new session, pass the ran_as of the reply that started the run.",
         },
         solution_id: {
           type: "string",
@@ -2857,7 +2857,12 @@ export const tools = [
       // (Builder #115). A master_key session has no key person: the Builder
       // passes its own actor through, and with none Core uses its service
       // identity.
-      TEST_RUNS_AS_AT + " A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none. " +
+      TEST_RUNS_AS_AT + " " +
+      // DEAD — remove after Builder #158 is on prod: the master_key case moves
+      // into the Builder's key_concepts.actor_id (CORE: one home), and this
+      // sentence goes with the allow-list entry in
+      // the ALLOWED entry in test/tests-run-as-key-person.test.mjs.
+      "A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none. " +
       "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",
     inputSchema: {
       type: "object",

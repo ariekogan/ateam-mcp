@@ -28,7 +28,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TEST_RUNS_AS_AT } from "../src/testRunsAs.js";
 import * as RunsAsModule from "../src/testRunsAs.js";
-import { setSessionCredentials } from "../src/api.js";
+import { setSessionCredentials, formatError } from "../src/api.js";
+import { sessionOpening } from "../src/signInSteps.js";
 import { tools, handleToolCall } from "../src/tools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
 
@@ -144,8 +145,11 @@ test("ateam_conversation's result keeps the Builder's ran_as and names it in _po
 // test/scaffold-connector.test.mjs runs the new scaffold.
 
 // NOTHING MAY RESTATE THE ANSWER. These are the Builder's sentences (capabilitySpecs.js
-// TEST_RUNS_AS and its voice sentence) in their distinctive words; none may appear
-// in any ateam-mcp source file, tool description, parameter text, bootstrap result
+// TEST_RUNS_AS and its voice sentence) in their distinctive words, and the same
+// facts as other texts once wrote them (the abort's "acts as your API key's
+// person", the sign-in opening's "a test's ran_as names who it ran as", the
+// refusal hints' "a key acts as the person who minted it"). None may appear in
+// any ateam-mcp source file, tool description, parameter text, bootstrap result
 // or generated CLAUDE.md. The pointer is the only thing that may. (A phrase here
 // is a sentence of the answer, not a field name: "ran_as" itself may be named.)
 const RESTATEMENTS = [
@@ -153,33 +157,95 @@ const RESTATEMENTS = [
   /share one conversation/i,
   /actor_id never picks/i,
   /service-provisioned key/i,
+  /key no person minted/i,
   /whose key started the test/i,
   /is the actor the job ran as/i,
   /Core ignores actor_id/i,
   /voice backend verifies/i,
   /generated it in Tokens & Keys/i,
+  /acts? as your API key's person/i,
+  /acts as the person who minted/i,
+  /acts as nobody else/i,
+  /never run as anyone else/i,
+  /ran_as names who/i,
+  /names the (?:conversation )?thread/i,
+  /platform's service identity/i,
 ];
-function restatementsIn(text) {
-  return RESTATEMENTS.filter((rx) => rx.test(text)).map(String);
+
+// THE ALLOW-LIST: sentences that restate a fact the Builder's page does not
+// carry yet (CORE: one home). Each is marked "DEAD — remove after <condition>"
+// in the source, names where it is served, and goes when the condition holds.
+// Nothing else may be added without the Builder carrying it first.
+const ALLOWED = [
+  {
+    where: ["ateam_test_connector", "src/tools.js"],
+    sentence: "A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none.",
+    until: "Builder #158 is on prod: the master_key case is in key_concepts.actor_id; delete the sentence and this entry",
+  },
+];
+// The allowed SENTENCE is cut out before the check, so the same words anywhere
+// else in the same file or tool still fail.
+function restatementsIn(text, where) {
+  let rest = text;
+  for (const a of ALLOWED) if (a.where.includes(where)) rest = rest.split(a.sentence).join("").split(JSON.stringify(a.sentence).slice(1, -1)).join("");
+  return RESTATEMENTS.filter((rx) => rx.test(rest)).map(String);
 }
 
-test("no ateam-mcp source file restates who a test runs as — only the pointer", () => {
+test("no ateam-mcp source file restates who a test or call runs as — only the pointer", () => {
   for (const f of readdirSync(SRC).filter((n) => n.endsWith(".js"))) {
-    const found = restatementsIn(readFileSync(join(SRC, f), "utf8"));
+    const found = restatementsIn(readFileSync(join(SRC, f), "utf8"), `src/${f}`);
     assert.deepEqual(found, [], `src/${f} restates the Builder's statement of who a test runs as: point at it with TEST_RUNS_AS_AT instead`);
   }
 });
 
-test("no served text restates it: tool descriptions, parameters, bootstrap and the tenant CLAUDE.md", async () => {
+test("no served text restates it: tool descriptions, parameters, bootstrap, the session opening and the tenant CLAUDE.md", async () => {
   const boot = (await handleToolCall("ateam_bootstrap", {}, "sess-runs-as-guard")).content[0].text;
   const doc = renderAgentDocHeader({ solution: { id: "walkmate", name: "Walkmate" }, skills: [], connectors: [] });
-  const served = [...tools.map((t) => [t.name, JSON.stringify(t)]), ["ateam_bootstrap", boot], ["CLAUDE.md", doc]];
-  for (const [where, text] of served) assert.deepEqual(restatementsIn(text), [], `${where} restates the Builder's statement of who a test runs as`);
+  const opening = sessionOpening({ signedIn: true, tenant: "walkmate", environment: "prod" });
+  const served = [...tools.map((t) => [t.name, JSON.stringify(t)]), ["ateam_bootstrap", boot], ["CLAUDE.md", doc], ["sessionOpening", opening]];
+  for (const [where, text] of served) assert.deepEqual(restatementsIn(text, where), [], `${where} restates the Builder's statement of who a test runs as`);
 });
 
-test("(control) the guard sees the Builder's sentences", () => {
-  assert.ok(restatementsIn("a test … runs AS THE PERSON that key belongs to").length > 0);
-  assert.ok(restatementsIn("so all anonymous tests in a tenant share one conversation").length > 0);
-  assert.ok(restatementsIn("A voice test (ateam_test_voice) runs as the person only once the voice backend verifies the API key").length > 0);
-  assert.deepEqual(restatementsIn(TEST_RUNS_AS_AT), [], "the pointer itself trips the guard");
+test("the refusal hints for a key whose person is gone keep their way out and no longer say who a key acts as", () => {
+  for (const code of ["KEY_OWNER_DELETED", "KEY_OWNER_INACTIVE", "ACTOR_INACTIVE"]) {
+    const msg = formatError("GET", "/deploy/solutions", 401, JSON.stringify({ code, actorId: "usr_gone" }), "https://api.ateam-ai.com");
+    assert.deepEqual(restatementsIn(msg, "formatError"), [], `${code}: the hint restates who a key acts as`);
+    assert.match(msg, /usr_gone/, `${code}: the hint lost the person`);
+    assert.match(msg, /Tokens & Keys|Users/, `${code}: the hint lost its way out`);
+  }
+});
+
+test("the session opening points at who a test runs as, and no longer says what ran_as names", () => {
+  const opening = sessionOpening({ signedIn: true, tenant: "walkmate", environment: "prod" });
+  assert.ok(opening.includes(TEST_RUNS_AS_AT), opening);
+  assert.match(opening, /no person is named here/);
+});
+
+test("the allow-list is explicit: each entry is still served, marked DEAD in the source, and names its removal condition", async () => {
+  const src = readFileSync(join(SRC, "tools.js"), "utf8");
+  for (const a of ALLOWED) {
+    assert.ok(a.until && /Builder #\d+/.test(a.until), `an allow-list entry names no removal condition: ${a.sentence}`);
+    const served = tools.some((t) => a.where.includes(t.name) && JSON.stringify(t).includes(JSON.stringify(a.sentence).slice(1, -1)));
+    assert.ok(served, `the allow-listed sentence is no longer served — remove the entry: ${a.sentence}`);
+    assert.match(src, new RegExp("DEAD — remove after Builder #158 is on prod"), "the allow-listed sentence has no DEAD marker in src/tools.js");
+  }
+  assert.equal(ALLOWED.length, 1, "a second allow-listed restatement: the Builder's page must carry it first");
+});
+
+test("(control) the guard sees the Builder's sentences and the ones other texts used", () => {
+  for (const t of [
+    "a test … runs AS THE PERSON that key belongs to",
+    "so all anonymous tests in a tenant share one conversation",
+    "A voice test (ateam_test_voice) runs as the person only once the voice backend verifies the API key",
+    "The abort acts as your API key's person, as the test's start did (its ran_as)",
+    "A key no person minted acts as the platform's service identity, which may stop only anonymous runs.",
+    "person is named here; a test's ran_as names who it ran as.",
+    "A key acts as the person who minted it, so this one runs nothing now, and it is never run as anyone else.",
+    "the key acts as nobody else",
+    "not the actor_id you passed (that names the thread)",
+  ]) assert.ok(restatementsIn(t, "nowhere").length > 0, t);
+  assert.deepEqual(restatementsIn(TEST_RUNS_AS_AT, "nowhere"), [], "the pointer itself trips the guard");
+  // The allow-list is per place: the same sentence anywhere else still fails.
+  assert.deepEqual(restatementsIn(ALLOWED[0].sentence, "ateam_test_connector"), []);
+  assert.ok(restatementsIn(ALLOWED[0].sentence, "ateam_test_abort").length > 0);
 });

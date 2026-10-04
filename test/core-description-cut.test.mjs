@@ -23,12 +23,12 @@ const CORE_DESCRIPTION_CUT = 1200;
 
 const OVER_THE_CUT = new Map([
   ["ateam_auth", 1385],
-  ["ateam_build_and_run", 2469],
+  ["ateam_build_and_run", 2451],
   ["ateam_test_notification", 1331],
   ["ateam_patch", 2993],
   ["ateam_delete_solution", 1246],
   ["ateam_log_progress", 1295],
-  ["ateam_create_plugin", 2017],
+  ["ateam_create_plugin", 2016],
   ["ateam_upload_connector", 1695],
   ["ateam_github_patch", 2568],
 ]);
