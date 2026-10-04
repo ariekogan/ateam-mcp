@@ -1442,9 +1442,19 @@ const CONNECTOR_UPLOAD_P95_MS = 75_000;
 const UPLOAD_DROPS_UNREADABLE = {
   mergeMode: "except a binary or a file over 512 KB that Core runs: it is dropped, and the reply's dropped[] and dropped_warning name it",
   filesParam: "A merge or github:true upload that leaves out a binary or a file over 512 KB that Core runs goes through and drops it: the reply's dropped[] and dropped_warning name it. A built file under ui-dist/ or rn-bundle/ that a build script of the package.json you send writes again on every upload is listed in regenerated[], not as lost; a binary never is.",
-  refusal: (what, lost) => `Adding ${what} would delete files Core runs and the Builder cannot read back${lost}: a create does not accept that loss. Nothing was uploaded.`,
-  next: (args, connectorId) => [
-    `ateam_get_deployed_connector_source(${args}) lists what Core runs. A binary or a file over 512 KB cannot be read back from it: an upload keeps one only if it carries the original, so commit each original under connectors/${connectorId}/ on the repo's working branch, then create the plugin again`,
+  // `deleting`: every path the Builder says the upload would delete (would_delete);
+  // `unreadable`: the ones among them it cannot read back (would_delete_unreadable).
+  // "Cannot read back" is said only of those.
+  refusal: (what, { deleting = [], unreadable = [] }) => {
+    const names = (paths) => (paths.length > 0 ? ` (${paths.slice(0, 5).join(", ")}${paths.length > 5 ? `, +${paths.length - 5} more` : ""})` : "");
+    const others = deleting.filter((p) => !unreadable.includes(p));
+    const lost = unreadable.length > 0
+      ? `files Core runs and the Builder cannot read back${names(unreadable)}${others.length > 0 ? `, and also files Core runs${names(others)}` : ""}`
+      : `files Core runs${names(others)}`;
+    return `Adding ${what} would delete ${lost}: a create does not accept that loss. Nothing was uploaded.`;
+  },
+  next: (args, connectorId, { unreadable = false } = {}) => [
+    `ateam_get_deployed_connector_source(${args}) lists what Core runs. ${unreadable ? "A binary or a file over 512 KB cannot be read back from it: an upload" : "An upload"} keeps a file only if it carries it, so ${unreadable ? "commit each original" : "commit each file"} under connectors/${connectorId}/ on the repo's working branch, then create the plugin again`,
     "If the originals are not at hand, or there is no repo, stop and tell the user which files stand in the way: only the user can decide to lose them",
   ],
 };
@@ -3907,14 +3917,16 @@ function createOnlyRefusal(scope, { status, body }, ctx) {
     };
   }
   if (status === 409 && code === "UPLOAD_WOULD_DELETE") {
-    const lost = (Array.isArray(body.would_delete_unreadable) ? body.would_delete_unreadable : []).map((u) => u?.path || u).slice(0, 5);
+    const paths = (list) => (Array.isArray(list) ? list : []).map((u) => u?.path || u).filter((p) => typeof p === "string");
+    const unreadable = paths(body.would_delete_unreadable);
     return {
       ok: false,
       code,
       connector_id: connectorId,
+      ...(body.would_delete && { would_delete: body.would_delete }),
       ...(body.would_delete_unreadable && { would_delete_unreadable: body.would_delete_unreadable }),
-      error: UPLOAD_DROPS_UNREADABLE.refusal(what, lost.length > 0 ? ` (${lost.join(", ")})` : ""),
-      next: UPLOAD_DROPS_UNREADABLE.next(args, connectorId),
+      error: UPLOAD_DROPS_UNREADABLE.refusal(what, { deleting: paths(body.would_delete), unreadable }),
+      next: UPLOAD_DROPS_UNREADABLE.next(args, connectorId, { unreadable: unreadable.length > 0 }),
     };
   }
   if (status === 502 && code === "CONNECTOR_UNREADABLE") {
@@ -4032,7 +4044,8 @@ async function settleAgainstEarlierJob(refusal, earlierJobId, { sid, connectorId
       created_now: false,
       plugin_id: pluginId,
       job_id: earlierJobId,
-      note: `The plugin was created by the earlier job ${earlierJobId}; nothing new was written by this call. Check that job's result (upload_result).`,
+      found_in: refusal.found_in,
+      note: `The plugin was created by the earlier job ${earlierJobId}; nothing new was written by this call. The files may have changed since that job; this call did not compare them. Check that job's result (upload_result) and found_in, where the Builder finds the plugin's files now.`,
       upload_result: job,
       next_steps: ["ateam_get_widget_catalog shows whether it is listed and renders"],
     };
@@ -4048,7 +4061,7 @@ async function settleAgainstEarlierJob(refusal, earlierJobId, { sid, connectorId
       next: ["Wait for that job, then read the connector (ateam_get_connector_source) to see what it wrote"],
     };
   }
-  const ended = job?.status === "failed" ? " and failed" : job?.status === "done" ? " and finished without creating it" : ", its result could not be read";
+  const ended = job?.status === "failed" ? " and failed" : job?.status === "done" ? " and finished without confirming a create-only write" : ", its result could not be read";
   return { ...refusal, earlier_job_id: earlierJobId, error: `${refusal.error} An earlier create of this plugin (job ${earlierJobId}) was accepted by this server${ended}.` };
 }
 

@@ -257,14 +257,22 @@ test("no create refusal offers replace:true as a way out", async () => {
     CONNECTOR_UNREADABLE: [502, { code: "CONNECTOR_UNREADABLE", retryable: true, unreadable: [{ where: "core", error: "x" }] }],
     INVALID_IF_ABSENT: [400, { code: "INVALID_IF_ABSENT", error: "if_absent is invalid" }],
   };
+  // Every pair must be checked: a refusal that throws instead of refusing FAILS
+  // here, it is not skipped. The one pair that is not a refusal is
+  // CONNECTOR_BASE_MISSING asked of create_connector (only a plugin has a
+  // connector to add to): the tool rethrows the Builder's error.
   const seen = [];
   for (const [code, reply] of Object.entries(bodies)) {
     for (const [what, run] of [["create_plugin", () => fast(() => createPlugin("offer-mcp", `offer-${code.toLowerCase().replace(/_/g, "-")}`))], ["create_connector", () => create(`offer-${code.toLowerCase().replace(/_/g, "-")}`)]]) {
       uploadReply = () => reply;
       const r = await run();
+      if (what === "create_connector" && code === "CONNECTOR_BASE_MISSING") {
+        assert.equal(r.isError, true, "create_connector answered a plugin-only refusal as a success");
+        continue;
+      }
       let out;
-      try { out = JSON.parse(text(r)); } catch { continue; }   // an error the tool rethrows as text
-      if (out.code !== code) continue;   // a refusal only one of the two tools makes
+      try { out = JSON.parse(text(r)); } catch { assert.fail(`${what} ${code} threw instead of refusing: ${text(r).slice(0, 200)}`); }
+      assert.equal(out.code, code, `${what} answered ${code} with ${out.code}`);
       seen.push(`${what}:${code}`);
       const wholeReply = JSON.stringify(out);
       for (const m of wholeReply.matchAll(/replace:true/g)) {
@@ -274,7 +282,34 @@ test("no create refusal offers replace:true as a way out", async () => {
       assert.doesNotMatch(wholeReply, /ateam_upload_connector\([^)]*replace:true/, `${what} ${code} points at ateam_upload_connector with replace:true`);
     }
   }
-  assert.ok(seen.includes("create_plugin:UPLOAD_WOULD_DELETE") && seen.includes("create_plugin:PLUGIN_EXISTS") && seen.includes("create_connector:CONNECTOR_EXISTS"), `the refusals checked: ${seen}`);
+  assert.deepEqual(seen.sort(), [
+    "create_connector:CONNECTOR_EXISTS", "create_connector:CONNECTOR_UNREADABLE", "create_connector:INVALID_IF_ABSENT", "create_connector:PLUGIN_EXISTS", "create_connector:UPLOAD_WOULD_DELETE",
+    "create_plugin:CONNECTOR_BASE_MISSING", "create_plugin:CONNECTOR_EXISTS", "create_plugin:CONNECTOR_UNREADABLE", "create_plugin:INVALID_IF_ABSENT", "create_plugin:PLUGIN_EXISTS", "create_plugin:UPLOAD_WOULD_DELETE",
+  ], "the refusals checked");
+});
+
+// AM50-R21. The Builder's UPLOAD_WOULD_DELETE carries would_delete (every path) and
+// would_delete_unreadable (the ones it cannot read back). "Cannot read back" is
+// said only of those, and every path it names reaches the caller.
+test("create_plugin, UPLOAD_WOULD_DELETE with only text files: names them, passes would_delete through, and does not say 'cannot read back'", async () => {
+  uploadReply = () => asJob(refusedJob(409, { code: "UPLOAD_WOULD_DELETE", connector_id: "demo-mcp", would_delete: ["lib/helpers.js", "config.json"], would_delete_count: 2 }), "job_t");
+  const out = JSON.parse(text(await fast(() => createPlugin("text-mcp", "texty"))));
+  assert.equal(out.code, "UPLOAD_WOULD_DELETE");
+  assert.deepEqual(out.would_delete, ["lib/helpers.js", "config.json"]);
+  assert.equal(out.would_delete_unreadable, undefined);
+  assert.match(out.error, /would delete files Core runs \(lib\/helpers\.js, config\.json\): a create does not accept that loss\. Nothing was uploaded\./);
+  assert.doesNotMatch(out.error, /cannot read back/, out.error);
+  const next = out.next.join(" | ");
+  assert.doesNotMatch(next, /cannot be read back|binary|512 KB/, next);
+  assert.match(next, /commit each file under connectors\/text-mcp\/ on the repo's working branch, then create the plugin again/);
+});
+
+test("create_plugin, UPLOAD_WOULD_DELETE with both kinds: 'cannot read back' only for the unreadable ones, and both lists reach the caller", async () => {
+  uploadReply = () => asJob(refusedJob(409, { code: "UPLOAD_WOULD_DELETE", connector_id: "demo-mcp", would_delete: ["lib/helpers.js", "assets/icon.png"], would_delete_unreadable: [{ path: "assets/icon.png", reason: "binary_not_round_trippable" }] }), "job_m");
+  const out = JSON.parse(text(await fast(() => createPlugin("mixed-mcp", "mixed"))));
+  assert.deepEqual(out.would_delete, ["lib/helpers.js", "assets/icon.png"]);
+  assert.deepEqual(out.would_delete_unreadable, [{ path: "assets/icon.png", reason: "binary_not_round_trippable" }]);
+  assert.match(out.error, /would delete files Core runs and the Builder cannot read back \(assets\/icon\.png\), and also files Core runs \(lib\/helpers\.js\): a create does not accept that loss\./);
 });
 
 test("create_plugin, CONNECTOR_UNREADABLE in the job's result: retryable, nothing created", async () => {
@@ -329,8 +364,13 @@ test("create_plugin repeated after its job created the plugin: 'created by the e
   assert.equal(out.code, "PLUGIN_CREATED_BY_EARLIER_JOB");
   assert.equal(out.job_id, "job_first");
   assert.equal(out.created_now, false);
-  assert.match(out.note, /The plugin was created by the earlier job job_first; nothing new was written by this call\. Check that job's result/);
+  assert.match(out.note, /The plugin was created by the earlier job job_first; nothing new was written by this call\./);
   assert.equal(out.upload_result.create_only, "plugin");
+  // AM50-R20. "Created by the earlier job" is read from that job's PAST result. Within
+  // 30 minutes the plugin may have been edited, removed or made again by someone
+  // else, so the answer carries what the Builder finds NOW and says it did not compare.
+  assert.deepEqual(out.found_in, [{ where: "core", paths: ["ui-dist/walk/index.html"] }]);
+  assert.match(out.note, /The files may have changed since that job; this call did not compare them\. Check that job's result \(upload_result\) and found_in, where the Builder finds the plugin's files now\./);
 });
 
 test("create_plugin repeated while its first job still runs: 'in progress', with the job id", async () => {
@@ -386,7 +426,8 @@ test("an earlier job that is done but has no create_only is NOT 'created by the 
   assert.equal(out.code, "PLUGIN_EXISTS");
   assert.notEqual(out.ok, true);
   assert.equal(out.earlier_job_id, "job_dn");
-  assert.match(out.error, /\(job job_dn\) was accepted by this server and finished without creating it\./);
+  assert.match(out.error, /\(job job_dn\) was accepted by this server and finished without confirming a create-only write\./);
+  assert.doesNotMatch(out.error, /finished without creating it/, "an older Builder's job may have written the plugin: 'without creating' is not known");
 });
 
 // AM50-R11. The earlier job was found by the plugin's NAME only. iframe, then
@@ -467,6 +508,16 @@ test("no create text promises that nothing can be lost", () => {
 
 const upload = () => tools.find((x) => x.name === "ateam_upload_connector");
 
+/** Every text of a tool an author reads: its description and each parameter's. */
+const describedTexts = (tool) => [
+  ["the description", tool.description],
+  ...Object.entries(tool.inputSchema.properties).map(([k, v]) => [`the ${k} parameter`, v.description]),
+].filter(([, t]) => typeof t === "string");
+
+/** True when a sentence ties a binary, or a file over 512 KB, to a refusal or to replace:true as the way past one. */
+const claimsBinaryMergeRefused = (t) => String(t).split(/(?<=[.!?])\s+/)
+  .some((sentence) => /binary|512 KB/i.test(sentence) && /refus|UPLOAD_WOULD_DELETE|unless replace:true|only way/i.test(sentence));
+
 // AM50-R4, the middle path: what "a file you leave out is kept" is qualified by,
 // inside the first 1200 characters an in-app agent reads. A merge goes through
 // and WARNS; it is a CREATE that refuses, and that is the create's text.
@@ -475,7 +526,7 @@ test("ateam_upload_connector qualifies 'a file you leave out is kept' for files 
   const seen = d.slice(0, CORE_DESCRIPTION_CUT);
   assert.match(seen, /A file you leave out is kept, except a binary or a file over 512 KB that Core runs: it is dropped, and the reply's dropped\[\] and dropped_warning name it\./);
   assert.match(seen, /over the files Core ALREADY runs/);
-  assert.doesNotMatch(d, /dropping it is refused|unless replace:true|UPLOAD_WOULD_DELETE/, "a merge is described as refused: the Builder lets it through and warns");
+  assert.equal(claimsBinaryMergeRefused(d), false, "a merge is described as refused for a binary: the Builder lets it through and warns");
 });
 
 test("the files parameter says a merge or github:true upload drops such a file with a warning, and where Core's build output is listed", () => {
@@ -529,7 +580,22 @@ test("the replace parameter names repo.kept, dropped, authored.removed, repo.del
   assert.match(p, /Main is never touched/);
   assert.match(p, /With github:true the repo is left as it is/);
   assert.doesNotMatch(JSON.stringify(upload()), /not known text is kept/, "the text says only not-known-text files are kept");
-  assert.doesNotMatch(p, /only way to accept dropping|UPLOAD_WOULD_DELETE/, "replace:true is offered as the way past a refusal the Builder no longer makes for a merge");
+  for (const [name, t] of describedTexts(upload())) assert.equal(claimsBinaryMergeRefused(t), false, `${name} says a merge that drops a binary is refused, or that replace:true is the way past it`);
+});
+
+// AM50-R23. The pin is on the ONE false claim, not on the code UPLOAD_WOULD_DELETE:
+// the Builder does refuse a plain or github:true upload that would drop a deployed
+// TEXT file, and a text may say so. What it may not say is that a merge which
+// leaves out a binary, or a file over 512 KB, is refused, or that replace:true is
+// the way to accept losing one: that is a warning (dropped[]), not a refusal.
+test("the false claim is pinned by what it says, so the real refusal can still be documented", () => {
+  // The claim, in the wordings it has been served in.
+  assert.equal(claimsBinaryMergeRefused("A file you leave out is kept, except a binary or a file over 512 KB that Core runs: dropping it is refused (409 UPLOAD_WOULD_DELETE) unless replace:true."), true);
+  assert.equal(claimsBinaryMergeRefused("It is also the only way to accept dropping a binary or a file over 512 KB that Core runs (otherwise 409 UPLOAD_WOULD_DELETE)."), true);
+  assert.equal(claimsBinaryMergeRefused("A merge that leaves out a binary is refused."), true);
+  // The true documentation of the real refusal, and the true warning, pass.
+  assert.equal(claimsBinaryMergeRefused("A github:true or merge upload that would drop a deployed text file is refused (409 UPLOAD_WOULD_DELETE); include the file, or pass replace:true to delete it."), false);
+  assert.equal(claimsBinaryMergeRefused("A merge that leaves out a binary goes through and drops it: the reply's dropped[] and dropped_warning name it."), false);
 });
 
 test("no text names a dev host", () => {
