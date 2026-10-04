@@ -38,6 +38,27 @@ const READS = {
       imported_from: { "items-mcp": ["items.list", "items.add"] },
     },
   },
+  // Deployed, but the Builder has not yet migrated its skill.json (BL-38): the
+  // file still holds, marked `_auto_imported`, the tool an earlier import wrote.
+  "unmigrated": {
+    skill: {
+      id: "unmigrated", connectors: ["items-mcp"],
+      tools: [own, { name: "items.list", description: "List the items", source: { connection_id: "items-mcp" }, _auto_imported: true }],
+    },
+    deployed: {
+      phase: "DEPLOYED",
+      tools: [
+        { name: "notes.add", description: "Add a note", connector: null },
+        { name: "items.list", description: "List the items", connector: "items-mcp" },
+      ],
+      imported_from: { "items-mcp": ["items.list"] },
+    },
+  },
+  // No deploy recorded, and the file already holds an imported tool.
+  "undeployed-with-import": {
+    skill: { id: "undeployed-with-import", tools: [own, { name: "items.add", _auto_imported: true }, { name: "items.mark", _auto_imported: false }] },
+    deployed: null,
+  },
   // Never deployed.
   "fresh-skill": { skill: { id: "fresh-skill", connectors: ["items-mcp"], tools: [] }, deployed: null },
   // A Builder from before BL-38: no `deployed` at all.
@@ -89,4 +110,22 @@ test("any other section still slices the skill as before", async () => {
   const out = await handleToolCall("ateam_get_solution", { solution_id: "list-keeper", skill_id: "item-keeper", section: "connectors" }, SID);
   const r = JSON.parse(out.content[0].text);
   assert.deepEqual(r.connectors, ["items-mcp"]);
+});
+
+// Builder BL-43: authored_tools is "the ones you wrote". A tool the import wrote
+// into skill.json (_auto_imported) is not one of them, and ateam_patch on it is
+// undone by the next deploy.
+test("authored_tools leaves out a tool marked _auto_imported (a skill not yet migrated by BL-38)", async () => {
+  const r = await toolsSection("unmigrated");
+  assert.deepEqual(names(r.authored_tools), ["notes.add"],
+    "authored_tools listed a connector's imported tool as one the author wrote");
+  assert.deepEqual(names(r.tools), ["items.list", "notes.add"], "tools = what the deploy sends, imported ones included");
+  assert.deepEqual(r.imported_from, { "items-mcp": ["items.list"] });
+});
+
+test("with no deploy recorded, authored_tools still leaves the imported tool out; tools is the whole file", async () => {
+  const r = await toolsSection("undeployed-with-import");
+  assert.deepEqual(names(r.authored_tools), ["items.mark", "notes.add"],
+    "only a tool marked _auto_imported:true is left out; _auto_imported:false is the author's");
+  assert.deepEqual(names(r.tools), ["items.add", "items.mark", "notes.add"]);
 });
