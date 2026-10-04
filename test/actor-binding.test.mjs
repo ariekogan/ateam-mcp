@@ -82,6 +82,43 @@ const coded = say(400, { ok: false, code: "ACTOR_NOT_FOUND", error: "Core does n
 check("the ACTOR_NOT_FOUND code alone is enough to reclassify", /does not recognise the ACTOR/i.test(coded));
 check("  and it never prints empty quotes for the name", !/ACTOR ""/.test(coded));
 
+// THE BUILDER'S OWN ACTOR_NOT_FOUND CARRIES code + hint. formatError drops the
+// status-level hint whenever a body has both (5a6a9f5), and that silently
+// removed this one on the one path it mattered — the Builder's test and job
+// routes (d357b5c98d). This hint is not a guess about the status: it reports
+// what request() just did to the session. Both are shown, and they must agree.
+//
+// THE FIXTURE IS THE BUILDER'S REAL TEXT, verbatim: adas_mcp_toolbox_builder
+// apps/backend/src/routes/solutions.js:143 (origin/dev b815bd94; the same on
+// builder-prod-20261004-001). A paraphrase here once hid that it sends the
+// caller to "the one ateam_conversation returned" — an id that is an actor only
+// when the key has a person. Re-copy it when the Builder rewords it.
+const BUILDER_ACTOR_400 = {
+  ok: false,
+  code: "ACTOR_NOT_FOUND",
+  error: 'Core does not recognize actor "bob": Actor "bob" not found',
+  hint: `Retrying will not help. "_system_service" and similar markers in a job's actorId field are NOT actors you can act as — they record what ran the job. OMIT the actor entirely to read a job the tenant owns, or pass a real actor id (the one ateam_conversation returned for a human's thread).`,
+};
+const both = say(400, BUILDER_ACTOR_400);
+const ours = both.slice(both.indexOf("\nHint: "));
+check("code+hint: the actor hint survives the endpoint's own hint", /Hint: NOT an auth problem/.test(both));
+check("  and names the actor", /does not recognise the ACTOR "bob"/.test(both));
+check("  and the Builder's hint is still there, whole, in the body",
+  both.includes(JSON.stringify(BUILDER_ACTOR_400.hint).slice(1, -1)));
+check("  and they agree: re-sending THAT actor will not help", /neither will sending that actor again/.test(ours));
+check("  and the tenant path is the same call WITHOUT an actor, not a bare retry",
+  /sent again without an actor, now acts as the tenant/.test(ours) && !/retrying the same call now acts/i.test(ours));
+// The Builder's hint sends the caller to the id ateam_conversation returned. Ours,
+// shown beside it, must not make that id sound like an actor when it is a label.
+check("  the Builder's hint points at the id ateam_conversation returned (control: the fixture says so)",
+  /the one ateam_conversation returned/.test(BUILDER_ACTOR_400.hint));
+check("  and ours says when that id is an actor — only when the key has a person",
+  /ateam_conversation returns is one only when the key has a person/.test(ours));
+check("  and that a test_<ts>_<rand> id is a thread label, not an actor",
+  /test_<ts>_<rand> id is a thread label, not an actor/.test(ours));
+check("(control) any other code+hint body still drops the status-level hint",
+  !/Hint:/.test(say(404, { code: "NO_MATCH", hint: "copy the exact bytes" })));
+
 // Narrowing, not replacement — a real auth failure must still say so.
 const realAuth = say(401, { error: "Invalid or unconfigured API key" });
 check("a genuine invalid-key 401 is NOT reclassified", !/does not recognise the ACTOR/i.test(realAuth));

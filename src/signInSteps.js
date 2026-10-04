@@ -16,7 +16,7 @@
  *   - platform: the A-Team app's own builder (ateam-proxy-mcp). The platform
  *               signs each workspace in itself; its sessions get no steps.
  *
- * A leaf module apart from publicTools.js: api.js renders these in formatError,
+ * A leaf module apart from publicTools.js and testRunsAs.js: api.js renders these in formatError,
  * and tools.js and oauth.js render them too.
  *
  * WHAT EACH STEP RESTS ON (checked 2026-10-01; the PR body quotes the sources):
@@ -44,6 +44,7 @@
  * pointed at "your environment's own A-Team app", with no URL.
  */
 import { NO_SIGN_IN_NEEDED } from "./publicTools.js";
+import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 
 const HOSTED_CONNECTOR_URL = "https://mcp.ateam-ai.com";
 const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
@@ -156,8 +157,7 @@ export function notInThisWorkspace(ctx = {}) {
  * out, how to sign in. Facts only (api.js signInContext): the workspace, the
  * environment of the sign-in, master mode, and how the session is connected.
  * No person: ateam-mcp is not told whose key it is (whoami answers tenant and
- * env; the Builder learns the person from Core and reports it per test as
- * ran_as).
+ * env).
  *
  * @param {{ audience?: string, signedIn: boolean, tenant?: string|null, environment?: string|null, masterMode?: boolean }} ctx
  */
@@ -181,7 +181,7 @@ export function sessionOpening(ctx) {
     : "Every tool that reads, changes or deploys acts on this workspace (the API calls a workspace a tenant).";
   return [
     `You are signed in to ${where} (${env}). ${scope} ateam-mcp is not told which person the key belongs to, so no ` +
-      "person is named here; a test's ran_as names who it ran as.",
+      "person is named here. " + TEST_RUNS_AS_AT,
     `Tell the user which workspace this is before changing anything. If they mean another one:\n${switchSteps(ctx)}`,
     NO_KEY_IN_CHAT,
   ].join("\n\n");

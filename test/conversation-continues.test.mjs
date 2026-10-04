@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setSessionCredentials } from "../src/api.js";
 import { tools, handleToolCall } from "../src/tools.js";
-import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "../src/testRunsAs.js";
+import { TEST_RUNS_AS_AT } from "../src/testRunsAs.js";
 import { WAITING_ON_THE_USER, PLAY_THE_PERSON } from "../src/humanStep.js";
 
 const CORE_DESCRIPTION_CUT = 1200;
@@ -42,7 +42,7 @@ test("the WHOLE description reaches an in-app agent: it fits in Core's 1200-char
   const d = conv().description;
   assert.ok(d.length <= CORE_DESCRIPTION_CUT, `${d.length} characters; an in-app agent sees only the first ${CORE_DESCRIPTION_CUT}, ending "…${d.slice(CORE_DESCRIPTION_CUT - 40, CORE_DESCRIPTION_CUT)}"`);
   // What sat past the cut before now arrives.
-  assert.ok(d.includes(RAN_AS_IN_REPLY));
+  assert.ok(d.includes(TEST_RUNS_AS_AT));
 });
 
 test("multi-turn: the key continues the conversation, not actor_id, and each call is a new chain", () => {
@@ -60,15 +60,14 @@ test("the reply window, with Core's numbers: 60 s, 5 min for 25 characters or fe
   assert.ok(multi.includes(PLAY_THE_PERSON));
 });
 
-test("actor_id says what it does and does not do, then who the job runs as", () => {
+test("actor_id says what ateam-mcp does with it, then points at who the job runs as", () => {
   const p = conv().inputSchema.properties.actor_id.description;
-  assert.ok(p.startsWith("Optional. It picks no identity and continues nothing: your key does both"), p);
-  assert.ok(p.includes("with a person, the reply's actor_id is that person whatever you pass"), p);
+  assert.ok(p.startsWith("Optional: the conversation thread (the description says what continues a conversation"), p);
   assert.ok(p.includes("ateam-mcp keeps the actor_id you pass, and the one the reply returns (a test_ id excepted), as this session's actor"), p);
   // Core answers an unknown X-ADAS-ACTOR-ID with 401 `Actor "<id>" not found`
   // (ai-dev-assistant middleware/attachActor.js), on every later read.
   assert.ok(p.includes("so pass only a real one: an id Core does not know makes those reads fail (401)"), p);
-  assert.ok(p.endsWith(TEST_RUNS_AS), "TEST_RUNS_AS is not rendered whole at the end");
+  assert.ok(p.endsWith(TEST_RUNS_AS_AT), "the pointer is not at the end");
   assert.doesNotMatch(p, /to continue it/);
 });
 

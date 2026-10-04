@@ -743,8 +743,8 @@ export function touchSession(sessionId, { toolName, solutionId, skillId, actorId
   // test_<ts>_<rand> thread key is dropped rather than sent to Core (which 401s on
   // an actor it cannot find). An explicit actor_id on a call still wins. (2026-08-22.)
   // ONLY A REAL ACTOR. ateam_conversation mints a throwaway THREAD key
-  // (test_<ts>_<rand>) for anonymous use and returns it as actor_id — the docs
-  // tell callers to pass it back for multi-turn. It is not an actor Core can
+  // (test_<ts>_<rand>) for anonymous use and returns it as actor_id — a thread
+  // label, never an actor Core can run a job as. It is not an actor Core can
   // resolve, and Core 401s the WHOLE REQUEST on an actor it cannot find.
   //
   // I shipped this without the filter and broke ateam_chain_status — the tool
@@ -1223,22 +1223,21 @@ function personRefusalHint({ code, actor }, ctx) {
   const who = actor ? ` (actor ${actor})` : "";
   const signInWithIt = ctx.signedIn ? switchSteps(ctx) : connectSteps(ctx);
   if (code === "KEY_OWNER_DELETED") {
-    return `This API key belongs to a person who has been deleted${who}. A key acts as the person who minted it, so ` +
-      "this one runs nothing now, and it is never run as anyone else. Signing in again with the same key will not help: " +
+    return `This API key belongs to a person who has been deleted${who}, so it runs nothing now. ` +
+      "Signing in again with the same key will not help: " +
       "a workspace owner or admin rotates the key (Tenant Admin → Tokens & Keys, in the A-Team app), the new key " +
       `belongs to whoever rotates it, and this session signs in with the new key.\n${signInWithIt}`;
   }
   if (code === "KEY_OWNER_INACTIVE") {
-    return `This API key belongs to a person who is no longer active in this workspace${who}. A key acts as the person ` +
-      "who minted it, so this one runs nothing until that changes, and it is never run as anyone else. Signing in again " +
-      "with the same key will not help. Either a workspace owner or admin reactivates or approves that person (Tenant " +
+    return `This API key belongs to a person who is no longer active in this workspace${who}, so it runs nothing until ` +
+      "that changes. Signing in again with the same key will not help. Either a workspace owner or admin reactivates or approves that person (Tenant " +
       "Admin → Users, in the A-Team app), and the same key works again; or they rotate the key (Tenant Admin → Tokens & " +
       `Keys), the new key belongs to whoever rotates it, and this session signs in with the new key.\n${signInWithIt}`;
   }
   return `The platform will not act as the person${who}: they are no longer active in this workspace, so the call did ` +
     "not run. Retrying as the same person will not help. Act as a person who is active here, or have a workspace owner " +
     "or admin reactivate or approve that person (Tenant Admin → Users, in the A-Team app). If that person is the one " +
-    "this session's key belongs to, the key acts as nobody else: reactivate them, or rotate the key (Tenant Admin → " +
+    "this session's key belongs to, the key runs nothing until then: reactivate them, or rotate the key (Tenant Admin → " +
     "Tokens & Keys) and sign this session in with the new one.";
 }
 
@@ -1336,11 +1335,23 @@ export function formatError(method, path, status, body, baseUrl, { read = method
     // response, with this same classifier, it unbinds the session's actor
     // before this message is built (clearSessionActor). So the true remedy is
     // the cheaper one: retry.
+    //
+    // It must also agree with the Builder's own ACTOR_NOT_FOUND hint, which
+    // stays in the body (routes/solutions.js: "Retrying will not help … OMIT the
+    // actor entirely … or pass a real actor id (the one ateam_conversation
+    // returned for a human's thread)"): re-sending the SAME actor fails again,
+    // and the same call without one acts as the tenant. This hint used to say
+    // "the one ateam_conversation returned" with no condition, and that id is an
+    // actor only when the key has a person; a key with none gets a
+    // test_<ts>_<rand> thread label back, which is never an actor. So it says
+    // both, which is what the Builder's "for a human's thread" means.
     hints[status] =
       `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
-      `Re-authenticating will not help. Either pass a real actor id (the one ateam_conversation returned for the thread), ` +
-      `or omit the actor entirely to act as the tenant. If you never sent an actor, this session was carrying a stale one: ` +
-      `it has been dropped with this error, so retrying the same call now acts as the tenant.`;
+      `Re-authenticating will not help, and neither will sending that actor again. Either pass the id of an actor that ` +
+      `exists in this tenant (the actor_id ateam_conversation returns is one only when the key has a person; a ` +
+      `test_<ts>_<rand> id is a thread label, not an actor), or omit the actor entirely to act as the tenant. ` +
+      `If you never sent an actor, this session was carrying a stale one: it has been dropped with this error, so the ` +
+      `same call, sent again without an actor, now acts as the tenant.`;
   }
 
   // A 404 ON /spec IS NOT A MISSING SOLUTION.
@@ -1435,6 +1446,13 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // the endpoint's correct "re-read the file and copy the exact bytes"
   // followed by "Check the solution_id … use ateam_list_solutions", and the
   // agent went hunting for a missing solution three times.
+  //
+  // EXCEPT the actor-not-found hint. It is not a status-level guess: it reports
+  // what request() just did to THIS session (dropped its stale actor), which no
+  // endpoint can know. The Builder's test and job routes answer 400
+  // ACTOR_NOT_FOUND with their own hint, so this rule silently removed it
+  // there — the one path where it mattered (d357b5c98d). Both are shown; the
+  // wording above is what keeps them from contradicting each other.
   const hasSpecificHint = /"code"\s*:/.test(bodyStr) && /"hint"\s*:/.test(bodyStr);
   // A person the platform will not act as has ONE way out, whichever hop said
   // so: Core's bare { code, actorId, error } carries no hint, so the table would
@@ -1443,7 +1461,7 @@ export function formatError(method, path, status, body, baseUrl, { read = method
   // new key, which no endpoint can know. It contradicts neither.
   const person = personRefused(status, body);
   const hint = person ? personRefusalHint(person, ctx)
-    : hasSpecificHint ? "" : (hints[status] || "");
+    : hasSpecificHint && !notFound ? "" : (hints[status] || "");
   // A SOLUTION THIS WORKSPACE DOES NOT HAVE MAY BE IN ANOTHER ONE. Both 404
   // hints — the table's "check the solution_id" and the Builder's own
   // SOLUTION_NOT_FOUND hint ("this tenant has: …, use one of those ids") — read

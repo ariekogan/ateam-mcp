@@ -1,18 +1,23 @@
-// WHO A TEST RUNS AS (Builder #103, D7) — every ateam-mcp surface that says it.
+// WHO A TEST RUNS AS — ateam-mcp does not say. It points.
 //
-// Since #103 the Builder runs an agent's test job AS THE PERSON the API key
-// belongs to (req.auth.actorId, from Core's verify-agent-key); a caller's
-// actor_id only names the thread; every test reply carries ran_as beside
-// actor_id; a key with no person runs anonymously as before; a voice test is
-// still anonymous until the voice backend verifies the key. The Builder states
-// that once (capabilitySpecs.js TEST_RUNS_AS, served on /spec/skill), and
-// ateam-mcp renders the same words from one constant (src/testRunsAs.js).
+// Since Builder #103 an agent's test job runs AS THE PERSON the API key belongs
+// to; the Builder states that once, in /spec/skill
+// (agent_guide.key_concepts.testing_and_runtime.conversation_testing.
+// key_concepts.actor_id), and ateam_get_spec(topic:"skill", search:"actor_id")
+// returns it. ateam-mcp used to carry a hand-pasted copy (src/testRunsAs.js),
+// pinned only by its length. A copy cannot follow the page: it kept serving a
+// sentence the Builder had corrected (a voice test with a person's key reaches
+// the skill) in six tools, bootstrap and the tenant CLAUDE.md. So every surface
+// that touches the question carries ONE pointer (TEST_RUNS_AS_AT) and no
+// sentence of the answer, and this file fails any source or served text that
+// restates it.
 //
-// Before this, ateam-mcp said the opposite in six places: "Omit to
+// Before #103 ateam-mcp said the opposite in six places: "Omit to
 // auto-generate a test actor", "Omit for a new conversation", "the same
 // actor_id maintains conversation context", "synthetic test actor with no
 // channels", "Use the same actor_id you passed to ateam_conversation", and
-// ateam_test_voice "Runs the full voice pipeline … end-to-end".
+// ateam_test_voice "Runs the full voice pipeline … end-to-end". STALE keeps
+// those out.
 //
 // Run: node --test test/tests-run-as-key-person.test.mjs
 import { test, before, after } from "node:test";
@@ -21,8 +26,10 @@ import { createServer } from "node:http";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TEST_RUNS_AS, RAN_AS_IN_REPLY } from "../src/testRunsAs.js";
-import { setSessionCredentials } from "../src/api.js";
+import { TEST_RUNS_AS_AT } from "../src/testRunsAs.js";
+import * as RunsAsModule from "../src/testRunsAs.js";
+import { setSessionCredentials, formatError } from "../src/api.js";
+import { sessionOpening } from "../src/signInSteps.js";
 import { tools, handleToolCall } from "../src/tools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
 
@@ -30,50 +37,14 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const tool = (name) => tools.find((t) => t.name === name);
 const actorParam = (name) => tool(name).inputSchema.properties.actor_id.description;
 
-// The statement itself, held to the Builder's words (the same phrases its own
-// test/testRunsAsQuoted.test.js pins on TEST_RUNS_AS).
-test("TEST_RUNS_AS says what the Builder's /spec says", () => {
-  for (const rx of [
-    /runs AS THE PERSON that key belongs to/,
-    /generated it in Tokens & Keys/,
-    /actor_id never picks the identity/,
-    /a different actor_id is not honoured/,
-    // CORE review B112r3-L1: Core drops the test_ thread from an API-key caller.
-    /key no person minted[^.]*runs anonymously, as the platform's service identity — Core ignores actor_id then, so all anonymous tests in a tenant share one conversation/,
-    /ran_as is the actor the job ran as/,
-    /ran_as is the actor the job ran as: the person whose key started the test \(the key's owner\), or null for an anonymous run/,
-    /ateam_test_voice\) runs as the person only once the voice backend verifies the API key/,
-    /Core follow-up/,
-    /until then it is anonymous/,
-    // CORE review M41-3: a voice test given a phone_number reports the phone caller.
-    /until then it is anonymous — or, given a phone_number, the phone caller \(phone::<number>\) — and its ran_as says so/,
-  ]) assert.match(TEST_RUNS_AS, rx);
-  assert.ok(TEST_RUNS_AS.includes(RAN_AS_IN_REPLY), "RAN_AS_IN_REPLY must be a part of TEST_RUNS_AS, not a second wording");
-});
-
-// THE WHOLE STATEMENT, byte for byte (===) the Builder's capabilitySpecs.js
-// TEST_RUNS_AS on origin/dev 6c37ae6a (#112's text with #117's KEY_OWNER_GONE).
-// The phrase checks above say what it must mean; this says it is the SAME text,
-// so a change on one side fails here until the other side carries it too.
-const BUILDER_TEST_RUNS_AS =
-  "WHO A TEST RUNS AS: a test an agent starts through the Builder with an API key (ateam_conversation, " +
-  "ateam_test_skill, ateam_test_connector, ateam_test_voice) runs AS THE PERSON that key belongs to — the " +
-  "signed-in user who generated it in Tokens & Keys — so the job, its memory and its per-user data are that " +
-  "person's and show in that person's product. actor_id never picks the identity: it names the conversation " +
-  "thread, and with a person on the key the thread IS that person (Core keys a conversation by its actor), " +
-  "so a different actor_id is not honoured. Only a key no person minted (a service-provisioned key) runs " +
-  "anonymously, as the platform's service identity — Core ignores actor_id then, so all anonymous tests in " +
-  "a tenant share one conversation. A key whose person has since been deleted, or is no longer active in " +
-  "the workspace, runs nothing: it is refused (401 KEY_OWNER_DELETED or KEY_OWNER_INACTIVE) and never run " +
-  "as anyone else, until a workspace owner or admin rotates the key in Tokens & Keys (the new key belongs " +
-  "to whoever rotated it) or reactivates that person. Every reply's ran_as is the actor the job ran as: the " +
-  "person whose key started the test (the key's owner), or null for an anonymous run. A voice test " +
-  "(ateam_test_voice) runs as the person only once the voice backend verifies the API key the Builder sends " +
-  "it (Core follow-up); until then it is anonymous — or, given a phone_number, the phone caller " +
-  "(phone::<number>) — and its ran_as says so.";
-test("TEST_RUNS_AS is the Builder's TEST_RUNS_AS, byte for byte", () => {
-  assert.equal(TEST_RUNS_AS.length, 1473);
-  assert.equal(TEST_RUNS_AS, BUILDER_TEST_RUNS_AS);
+// THE POINTER: where the answer is, and nothing of it. It must name the read an
+// agent makes (ateam_get_spec, topic skill, search actor_id) and the place in
+// the result.
+test("TEST_RUNS_AS_AT is a pointer to the served spec, and testRunsAs.js exports nothing else", () => {
+  assert.match(TEST_RUNS_AS_AT, /ateam_get_spec\(\{ topic: "skill", search: "actor_id" \}\)/);
+  assert.match(TEST_RUNS_AS_AT, /testing_and_runtime\.conversation_testing\.key_concepts\.actor_id/);
+  assert.deepEqual(Object.keys(RunsAsModule), ["TEST_RUNS_AS_AT"], "testRunsAs.js exports more than the pointer: a copy of the Builder's words is back");
+  assert.ok(TEST_RUNS_AS_AT.length < 200, `${TEST_RUNS_AS_AT.length} characters: a pointer, not a statement`);
 });
 
 // Any of these on a surface is the pre-#103 claim.
@@ -89,34 +60,32 @@ const STALE = [
 function assertCurrent(where, text) {
   for (const [rx, claim] of STALE) assert.doesNotMatch(text, rx, `${where} still promises: ${claim}`);
 }
-function assertStatesIt(where, text) {
-  assert.ok(text.includes(TEST_RUNS_AS), `${where} does not state who a test runs as (TEST_RUNS_AS)`);
+function assertPoints(where, text) {
+  assert.ok(text.includes(TEST_RUNS_AS_AT), `${where} does not point at who a test runs as`);
   assertCurrent(where, text);
 }
 
-test("ateam_test_skill: actor_id states it; the description names ran_as", () => {
-  assertStatesIt("ateam_test_skill actor_id", actorParam("ateam_test_skill"));
+test("ateam_test_skill: actor_id points; the description names ran_as and points", () => {
+  assertPoints("ateam_test_skill actor_id", actorParam("ateam_test_skill"));
   const d = tool("ateam_test_skill").description;
-  assert.ok(d.includes(RAN_AS_IN_REPLY), "ateam_test_skill description does not name ran_as");
+  assertPoints("ateam_test_skill description", d);
   assert.match(d, /inside response\.kickoff/, "where ran_as is on a wait_for:'chain' result");
-  assertCurrent("ateam_test_skill description", d);
 });
 
 // It asserted /actor_id \(the thread\)/ — "pass the reply's actor_id (the
 // thread) back in to continue that thread" (7d44113). Core drops actor_id from
 // an agent key; the key continues the conversation
 // (test/conversation-continues.test.mjs).
-test("ateam_conversation: actor_id states it; multi-turn says the key continues it, and names ran_as", () => {
-  assertStatesIt("ateam_conversation actor_id", actorParam("ateam_conversation"));
+test("ateam_conversation: actor_id points; multi-turn says the key continues it, and points", () => {
+  assertPoints("ateam_conversation actor_id", actorParam("ateam_conversation"));
   const d = tool("ateam_conversation").description;
-  assert.ok(d.includes(RAN_AS_IN_REPLY), "ateam_conversation description does not name ran_as");
+  assertPoints("ateam_conversation description", d);
   assert.match(d, /your key, not actor_id, continues the conversation/);
-  assertCurrent("ateam_conversation description", d);
 });
 
-test("ateam_test_voice: no full-pipeline claim; person vs anonymous; ran_as", () => {
+test("ateam_test_voice: no full-pipeline claim; ran_as; points", () => {
   const d = tool("ateam_test_voice").description;
-  assertStatesIt("ateam_test_voice description", d);
+  assertPoints("ateam_test_voice description", d);
   assert.match(d, /ran_as repeats its actor_id/, "ateam_test_voice does not say where ran_as comes from");
 });
 
@@ -127,10 +96,10 @@ test("ateam_test_notification and ateam_get_execution_logs: no synthetic actor, 
   assert.match(logs, /pass the ran_as of the ateam_conversation \/ ateam_test_skill reply/);
 });
 
-test("bootstrap: conversation_flow states it; developer_loop points at it", async () => {
+test("bootstrap: conversation_flow points; developer_loop points at it", async () => {
   const boot = JSON.parse((await handleToolCall("ateam_bootstrap", {}, "sess-runs-as-boot")).content[0].text);
   const flow = boot.conversation_flow;
-  assert.equal(flow.who_it_runs_as, TEST_RUNS_AS);
+  assert.equal(flow.who_it_runs_as, TEST_RUNS_AS_AT);
   assert.match(flow.steps[0], /\{ chain_id, actor_id, ran_as \}/);
   assertCurrent("conversation_flow", JSON.stringify(flow));
   assert.doesNotMatch(flow.steps[3], /same conversation context/, "step 4 still promises context by actor_id alone");
@@ -138,9 +107,9 @@ test("bootstrap: conversation_flow states it; developer_loop points at it", asyn
   assert.match(step5, /conversation_flow\.who_it_runs_as/);
 });
 
-test("the tenant CLAUDE.md states it", () => {
+test("the tenant CLAUDE.md points", () => {
   const doc = renderAgentDocHeader({ solution: { id: "walkmate", name: "Walkmate" }, skills: [], connectors: [] });
-  assertStatesIt("CLAUDE.md pitfalls", doc);
+  assertPoints("CLAUDE.md pitfalls", doc);
 });
 
 // A stand-in Builder: answers a conversation kickoff with ran_as.
@@ -167,19 +136,135 @@ test("ateam_conversation's result keeps the Builder's ran_as and names it in _po
   assert.ok(!r.isError, r.content[0].text.slice(0, 300));
   const out = JSON.parse(r.content[0].text);
   assert.equal(out.ran_as, "usr_person", "the Builder's ran_as did not reach the caller");
-  assert.equal(out._poll.who_it_ran_as, RAN_AS_IN_REPLY, "_poll does not name ran_as");
+  assert.equal(out._poll.who_it_ran_as, TEST_RUNS_AS_AT, "_poll does not point at what ran_as means");
 });
 
 // The scaffolded connector's own missing-actor error (getActorId, which named
-// TEST_RUNS_AS) is gone with the raw JSON-RPC scaffold: a defineConnector
+// the statement) is gone with the raw JSON-RPC scaffold: a defineConnector
 // connector refuses a call with no caller in the runtime (MISSING_CALLER).
 // test/scaffold-connector.test.mjs runs the new scaffold.
 
-// ONE copy of the fact: its distinctive words appear in no other source file.
-test("the statement is written once, in src/testRunsAs.js", () => {
-  const phrases = ["runs AS THE PERSON that key belongs to", "is the actor the job ran as", "the person whose key started the test"];
-  for (const f of readdirSync(SRC).filter((n) => n.endsWith(".js") && n !== "testRunsAs.js")) {
-    const text = readFileSync(join(SRC, f), "utf8");
-    for (const p of phrases) assert.ok(!text.includes(p), `src/${f} restates "${p}" — render TEST_RUNS_AS instead`);
+// NOTHING MAY RESTATE THE ANSWER. These are the Builder's sentences (capabilitySpecs.js
+// TEST_RUNS_AS and its voice sentence) in their distinctive words, and the same
+// facts as other texts once wrote them (the abort's "acts as your API key's
+// person", the sign-in opening's "a test's ran_as names who it ran as", the
+// refusal hints' "a key acts as the person who minted it"). None may appear in
+// any ateam-mcp source file, tool description, parameter text, bootstrap result
+// or generated CLAUDE.md. The pointer is the only thing that may. (A phrase here
+// is a sentence of the answer, not a field name: "ran_as" itself may be named.)
+const RESTATEMENTS = [
+  /runs (?:it )?as (?:the|that) person/i,
+  /share one conversation/i,
+  /actor_id never picks/i,
+  /service-provisioned key/i,
+  /key no person minted/i,
+  /whose key started the test/i,
+  /is the actor the job ran as/i,
+  /Core ignores actor_id/i,
+  /voice backend verifies/i,
+  /generated it in Tokens & Keys/i,
+  /acts? as your API key's person/i,
+  /acts as the person who minted/i,
+  /acts as nobody else/i,
+  /never run as anyone else/i,
+  /ran_as names who/i,
+  /names the (?:conversation )?thread/i,
+  /platform's service identity/i,
+];
+
+// THE ALLOW-LIST: sentences that restate a fact the Builder's page does not
+// carry yet (CORE: one home). Each is marked "DEAD — remove after <condition>"
+// in the source, names where it is served, and goes when the condition holds.
+// Nothing else may be added without the Builder carrying it first.
+const ALLOWED = [
+  {
+    where: ["ateam_test_connector", "src/tools.js"],
+    sentence: "A master_key session has no key person: this tool runs as the actor_id the session last passed to another tool, or as the platform's service identity when it passed none (a master session's other tests run anonymously).",
+    until: "Builder #158 is on prod: the master_key case is in key_concepts.actor_id; delete the sentence and this entry",
+  },
+];
+// The allowed SENTENCE is cut out before the check, so the same words anywhere
+// else in the same file or tool still fail.
+function restatementsIn(text, where) {
+  let rest = text;
+  for (const a of ALLOWED) if (a.where.includes(where)) rest = rest.split(a.sentence).join("").split(JSON.stringify(a.sentence).slice(1, -1)).join("");
+  return RESTATEMENTS.filter((rx) => rx.test(rest)).map(String);
+}
+
+test("no ateam-mcp source file restates who a test or call runs as — only the pointer", () => {
+  for (const f of readdirSync(SRC).filter((n) => n.endsWith(".js"))) {
+    const found = restatementsIn(readFileSync(join(SRC, f), "utf8"), `src/${f}`);
+    assert.deepEqual(found, [], `src/${f} restates the Builder's statement of who a test runs as: point at it with TEST_RUNS_AS_AT instead`);
   }
+});
+
+test("no served text restates it: tool descriptions, parameters, bootstrap, the session opening and the tenant CLAUDE.md", async () => {
+  const boot = (await handleToolCall("ateam_bootstrap", {}, "sess-runs-as-guard")).content[0].text;
+  const doc = renderAgentDocHeader({ solution: { id: "walkmate", name: "Walkmate" }, skills: [], connectors: [] });
+  const opening = sessionOpening({ signedIn: true, tenant: "walkmate", environment: "prod" });
+  const served = [...tools.map((t) => [t.name, JSON.stringify(t)]), ["ateam_bootstrap", boot], ["CLAUDE.md", doc], ["sessionOpening", opening]];
+  for (const [where, text] of served) assert.deepEqual(restatementsIn(text, where), [], `${where} restates the Builder's statement of who a test runs as`);
+});
+
+test("the refusal hints for a key whose person is gone keep their way out and no longer say who a key acts as", () => {
+  for (const code of ["KEY_OWNER_DELETED", "KEY_OWNER_INACTIVE", "ACTOR_INACTIVE"]) {
+    const msg = formatError("GET", "/deploy/solutions", 401, JSON.stringify({ code, actorId: "usr_gone" }), "https://api.ateam-ai.com");
+    assert.deepEqual(restatementsIn(msg, "formatError"), [], `${code}: the hint restates who a key acts as`);
+    assert.match(msg, /usr_gone/, `${code}: the hint lost the person`);
+    assert.match(msg, /Tokens & Keys|Users/, `${code}: the hint lost its way out`);
+  }
+});
+
+test("the session opening points at who a test runs as, and no longer says what ran_as names", () => {
+  const opening = sessionOpening({ signedIn: true, tenant: "walkmate", environment: "prod" });
+  assert.ok(opening.includes(TEST_RUNS_AS_AT), opening);
+  assert.match(opening, /no person is named here/);
+});
+
+test("the allow-list is explicit: each entry is still served, marked DEAD in the source, and names its removal condition", async () => {
+  const src = readFileSync(join(SRC, "tools.js"), "utf8");
+  for (const a of ALLOWED) {
+    assert.ok(a.until && /Builder #\d+/.test(a.until), `an allow-list entry names no removal condition: ${a.sentence}`);
+    const served = tools.some((t) => a.where.includes(t.name) && JSON.stringify(t).includes(JSON.stringify(a.sentence).slice(1, -1)));
+    assert.ok(served, `the allow-listed sentence is no longer served — remove the entry: ${a.sentence}`);
+    assert.match(src, new RegExp("DEAD — remove after Builder #158 is on prod"), "the allow-listed sentence has no DEAD marker in src/tools.js");
+  }
+  assert.equal(ALLOWED.length, 1, "a second allow-listed restatement: the Builder's page must carry it first");
+});
+
+// CORE's wording (AM28-R7), written here once more ON PURPOSE: a test that read
+// it from ALLOWED could not notice ALLOWED changing it. The earlier wording ("it
+// runs as the actor it holds") was broader than what the Builder does: a master
+// session's test_connector runs as the actor_id the session last passed to
+// ANOTHER tool, and its other tests run anonymously.
+const MASTER_KEY_SENTENCE =
+  "A master_key session has no key person: this tool runs as the actor_id the session last passed to another tool, or as the platform's service identity when it passed none (a master session's other tests run anonymously).";
+test("the allow-listed master_key sentence is exactly CORE's wording, served once, and nothing broader is allowed", () => {
+  assert.equal(ALLOWED[0].sentence, MASTER_KEY_SENTENCE);
+  const d = tool("ateam_test_connector").description;
+  assert.equal(d.split(MASTER_KEY_SENTENCE).length - 1, 1, "ateam_test_connector does not serve the sentence exactly once");
+  assert.doesNotMatch(d, /it runs as the actor it holds/, "the broader, earlier wording is still served");
+  assert.deepEqual(restatementsIn(MASTER_KEY_SENTENCE, "ateam_test_connector"), []);
+  // Only that sentence is cut out: the earlier wording, or a sentence that
+  // extends it, still trips the guard.
+  assert.ok(restatementsIn("A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none.", "ateam_test_connector").length > 0);
+  assert.ok(restatementsIn(MASTER_KEY_SENTENCE + " It also acts as the platform's service identity.", "ateam_test_connector").length > 0);
+});
+
+test("(control) the guard sees the Builder's sentences and the ones other texts used", () => {
+  for (const t of [
+    "a test … runs AS THE PERSON that key belongs to",
+    "so all anonymous tests in a tenant share one conversation",
+    "A voice test (ateam_test_voice) runs as the person only once the voice backend verifies the API key",
+    "The abort acts as your API key's person, as the test's start did (its ran_as)",
+    "A key no person minted acts as the platform's service identity, which may stop only anonymous runs.",
+    "person is named here; a test's ran_as names who it ran as.",
+    "A key acts as the person who minted it, so this one runs nothing now, and it is never run as anyone else.",
+    "the key acts as nobody else",
+    "not the actor_id you passed (that names the thread)",
+  ]) assert.ok(restatementsIn(t, "nowhere").length > 0, t);
+  assert.deepEqual(restatementsIn(TEST_RUNS_AS_AT, "nowhere"), [], "the pointer itself trips the guard");
+  // The allow-list is per place: the same sentence anywhere else still fails.
+  assert.deepEqual(restatementsIn(ALLOWED[0].sentence, "ateam_test_connector"), []);
+  assert.ok(restatementsIn(ALLOWED[0].sentence, "ateam_test_abort").length > 0);
 });

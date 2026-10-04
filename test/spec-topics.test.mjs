@@ -193,6 +193,28 @@ if (typeof formatResultForTest !== "function") {
       parsed.how_to_use === "short and must survive");
   }
 
+  // THE WAY TO THE REST GOES THROUGH THE TOOL. The reader is an MCP client and
+  // cannot GET anything, yet every stub said "GET /spec/<topic> directly"
+  // (B10-G5G7). The Builder (#67) serves a page too big for one answer with a
+  // small `_read_it_in_parts` index first and returns any part for search:"<id>".
+  const hows = (o) => !o || typeof o !== "object" ? [] : Object.entries(o).flatMap(([k, v]) =>
+    k.startsWith("_how_to_read_") && typeof v === "string" ? [v] : hows(v));
+  const parted = JSON.parse(formatResultForTest({
+    _read_it_in_parts: { how: "call ateam_get_spec again … search", ids: ["q0", "q1"] },
+    ...huge,
+  }, "ateam_get_spec"));
+  const partedHows = hows(parted);
+  check("an oversized page says how to read the rest (control)", partedHows.length > 0);
+  check("  never 'GET … directly' — an MCP client cannot",
+    partedHows.every((h) => !/\bGET\b.*directly/.test(h)));
+  check("  but ateam_get_spec with search:\"<id>\", pointing at _read_it_in_parts",
+    partedHows.every((h) => /ateam_get_spec.*search:/.test(h) && /_read_it_in_parts/.test(h)));
+  check("the kept _read_it_in_parts index survives the cut whole",
+    Array.isArray(parted._read_it_in_parts?.ids) && parted._read_it_in_parts.ids.length === 2);
+  const plainHows = hows(JSON.parse(outStr));
+  check("a page with no parts index is not told to read one",
+    plainHows.length > 0 && plainHows.every((h) => /ateam_get_spec.*search:/.test(h) && !/_read_it_in_parts/.test(h)));
+
   // A response that fits must be returned untouched — no stub, no _truncation.
   const small = formatResultForTest({ topic: "enums", a: 1 }, "ateam_get_spec");
   check("a small spec response is passed through unchanged",
