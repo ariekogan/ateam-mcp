@@ -1853,13 +1853,16 @@ export const tools = [
     name: "ateam_test_voice",
     core: true,
     description:
-      // Says what /spec/voice says (Builder capabilitySpecs.js VOICE_TEST_REACH).
       // It promised "the full voice pipeline … skill dispatch → response,
-      // end-to-end" (32dec97) while Core refuses a test session's first skill
-      // call (C6), so an agent read a voice-layer pass as a skill pass. Kept
-      // within the length it had: the whole text is past Core's cut, and the
-      // ratchet (test/core-description-cut) lets none grow.
-      "Simulate a voice call with text, not audio. VOICE LAYER only: it cannot show a skill result today (Core C6) — test the skill with ateam_conversation or ateam_test_skill. Each turn returns the response, verification status and entities; identity is the voice backend's report, ran_as repeats its actor_id.\n\n" +
+      // end-to-end" (32dec97), then said the voice layer was ALL a test shows.
+      // Neither holds for every caller. Core c93563976 (D7, in prod since
+      // prod-20261001-001): a voice test forwarded with a PERSON's API key runs
+      // as that person, skill job included. Core still refuses the skill call
+      // for a key with no person (an anonymous run) and for a phone caller
+      // (phone::<number>, an actor Core does not know) — C6. Kept within the
+      // length it had: the whole text is past Core's cut, and the ratchet
+      // (test/core-description-cut) lets none grow.
+      "Simulate a voice call with text, not audio. A person's key runs it as that person, skill job included; with no person on the key, or a phone caller, Core refuses the skill call today (C6): test it with ateam_conversation. Each turn returns response, verification, entities; ran_as repeats its actor_id.\n\n" +
       TEST_RUNS_AS,
     inputSchema: {
       type: "object",
@@ -5026,7 +5029,10 @@ export const handlers = {
         "Style block prepended to every skill persona — Phase 1",
       ],
       replace_rule: "REPLACE wins per-field. Any field you write explicitly overrides the platform-generated equivalent. Delete it to opt back into automation.",
-      read_first: "GET /spec/skill → auto_expand block has the full list and a typical_minimal_skill example. GET /spec/solution → same.",
+      // Through the TOOL: the reader is an MCP client and cannot GET anything
+      // (2a07c08 wrote "GET /spec/skill"). search:"auto_expand" returns just that
+      // block, typical_minimal_skill included, from each page.
+      read_first: "ateam_get_spec(topic:\"skill\", search:\"auto_expand\") → the auto_expand block has the full list and a typical_minimal_skill example. ateam_get_spec(topic:\"solution\", search:\"auto_expand\") → same.",
     },
     example_solutions: [
       { name: "Fleet Command Center", description: "Live vehicle tracking, route optimization, safety monitoring, governed execution" },

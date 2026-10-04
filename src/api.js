@@ -1338,16 +1338,21 @@ export function formatError(method, path, status, body, baseUrl, { read = method
     // the cheaper one: retry.
     //
     // It must also agree with the Builder's own ACTOR_NOT_FOUND hint, which
-    // stays in the body ("Retrying will not help … OMIT the actor entirely"):
-    // re-sending the SAME actor fails again, and the same call without one acts
-    // as the tenant. It used to point at "the one ateam_conversation returned"
-    // — a test_<ts>_<rand> thread label that is never an actor.
+    // stays in the body (routes/solutions.js: "Retrying will not help … OMIT the
+    // actor entirely … or pass a real actor id (the one ateam_conversation
+    // returned for a human's thread)"): re-sending the SAME actor fails again,
+    // and the same call without one acts as the tenant. This hint used to say
+    // "the one ateam_conversation returned" with no condition, and that id is an
+    // actor only when the key has a person; a key with none gets a
+    // test_<ts>_<rand> thread label back, which is never an actor. So it says
+    // both, which is what the Builder's "for a human's thread" means.
     hints[status] =
       `NOT an auth problem — your key is fine. Core does not recognise the ACTOR "${who}" in this tenant. ` +
       `Re-authenticating will not help, and neither will sending that actor again. Either pass the id of an actor that ` +
-      `exists in this tenant, or omit the actor entirely to act as the tenant. If you never sent an actor, this session ` +
-      `was carrying a stale one: it has been dropped with this error, so the same call, sent again without an actor, now ` +
-      `acts as the tenant.`;
+      `exists in this tenant (the actor_id ateam_conversation returns is one only when the key has a person; a ` +
+      `test_<ts>_<rand> id is a thread label, not an actor), or omit the actor entirely to act as the tenant. ` +
+      `If you never sent an actor, this session was carrying a stale one: it has been dropped with this error, so the ` +
+      `same call, sent again without an actor, now acts as the tenant.`;
   }
 
   // A 404 ON /spec IS NOT A MISSING SOLUTION.
