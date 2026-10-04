@@ -1422,6 +1422,27 @@ function kickFallsBackToSync(err) {
  */
 const CONNECTOR_UPLOAD_P95_MS = 75_000;
 
+/**
+ * WHAT ateam-mcp SAYS ABOUT AN UPLOAD THAT WOULD DROP FILES CORE CANNOT HAND
+ * BACK — ONE place (Builder #160, AM50-R4). Core cannot return a binary or a
+ * file over 512 KB, so a merge that does not carry one deletes it. The Builder
+ * refuses that (409 UPLOAD_WOULD_DELETE, would_delete_unreadable) unless
+ * replace:true accepts the loss. Whether it refuses always, only with if_absent,
+ * or only warns is still open on the Builder's side: when it changes, change
+ * these strings and the pins in test/create-connector-never-destroys.test.mjs,
+ * and nothing else. Used by ateam_upload_connector (merge mode, replace) and by
+ * the refusal ateam_create_plugin hands back.
+ */
+const UPLOAD_DROPS_UNREADABLE = {
+  mergeMode: "except a binary or a file over 512 KB that Core runs: dropping it is refused (409 UPLOAD_WOULD_DELETE) unless replace:true",
+  replaceParam: "It is also the only way to accept dropping a binary or a file over 512 KB that Core runs (otherwise 409 UPLOAD_WOULD_DELETE).",
+  refusal: (what, lost) => `Adding ${what} would delete files Core runs and the Builder cannot read back${lost}. Nothing was uploaded.`,
+  next: (args) => [
+    `ateam_get_deployed_connector_source(${args}) lists what Core runs; get those files into the connector's source or repo so the upload carries them, then try again`,
+    `ateam_upload_connector(${args}, files, replace:true) accepts the loss, and deletes everything the upload does not send: only if that is meant`,
+  ],
+};
+
 // ─── Tool definitions ───────────────────────────────────────────────
 
 export const tools = [
@@ -2271,9 +2292,9 @@ export const tools = [
       "(plugin source files added separately via ateam_create_plugin). " +
       "After scaffolding, the files are uploaded to Core via the same path " +
       "as ateam_upload_connector. " +
-      "Create never replaces: an id that already exists in this solution (authored source, or code Core runs) " +
-      "is refused with CONNECTOR_EXISTS and nothing is uploaded — change it with ateam_upload_connector. " +
-      "If whether it exists cannot be read, the create is refused too.",
+      "Create never replaces: the Builder writes the scaffold only if the connector exists nowhere (its source, the repo's working branch, Core), " +
+      "in the same request that checks. Otherwise CONNECTOR_EXISTS names where, with the way on, or, when a read failed, a retryable CONNECTOR_UNREADABLE. " +
+      "Nothing is uploaded either way.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2310,8 +2331,8 @@ export const tools = [
       `${PLUGIN_LISTED_LIVE} ` +
       "If the connector generates its plugin list from ui-dist/<plugin>/manifest.json, the emitted manifest is picked up automatically; " +
       "if the connector has a HARDCODED list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), you MUST add this plugin there (copy the manifest.json render block). " +
-      `Verify with ateam_get_solution(solution_id, 'connectors_health') or ateam_get_widget_catalog. ${DISCOVERED_PLUGIN_IS_MERGED}\n\n` +
-      "The scaffold MERGES into the existing connector (server.js + other files preserved) — works on GitHub-backed AND repo-less tenants; merge base is the GitHub repo when connected, else the deployed connector source.",
+      `${DISCOVERED_PLUGIN_IS_MERGED}\n\n` +
+      "The scaffold MERGES into the existing connector (server.js + other files preserved), GitHub-backed or repo-less. Create never replaces: a plugin file that exists anywhere (source, repo branch, Core) is refused (PLUGIN_EXISTS); no connector to add to is CONNECTOR_BASE_MISSING (create it first).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2341,10 +2362,11 @@ export const tools = [
     description:
       "Upload connector code to Core and restart it. Then the skills that import this connector's tools are redeployed when they need it — a redeploy of the WHOLE skill as the Builder holds it, so its other connectors' tools and any saved edit not yet deployed go live too. The reply's skill_tools says, per skill and per connector, what changed in what Core runs; stages.skills is its verdict. A tools[] you wrote yourself is never changed. The rule: ateam_get_spec('skill') → agent_guide.key_concepts.how_a_skill_gets_its_tools.when_the_connector_changes.\n\n" +
       "Modes:\n" +
-      "  • github:true — deploy connectors/<id>/ from the repo at `ref` (default 'dev'); add files:[] to overlay yours on it.\n" +
-      "  • files:[] — MERGE (default): your files over the repo at `ref`, over the files Core ALREADY runs, so a file you leave out is kept. Refused when there is no base at all.\n" +
-      "  • files:[] + replace:true — the connector becomes EXACTLY these files. Every other file is DELETED from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev): every file under connectors/<connector-id>/ you leave out, deployed or not — files written with ateam_github_patch included. Some files are kept — repo.kept names each with its reason. Never from main; a promote carries it there. The reply names each (dropped, authored.removed, repo.deleted, repo.branch_only). github:true + replace:true leaves the repo as it is.\n\n" +
-      "Multi-file connectors: pass each file as content_base64 (single-line, escape-safe) instead of content. This is the canonical path for a full connector — do not curl the raw endpoint (it skips connector registration and PAT provisioning).",
+      "  • github:true — deploy connectors/<id>/ from the repo at `ref` (default 'dev'); files:[] overlays yours on it.\n" +
+      "  • files:[] — MERGE (default): your files over the repo at `ref`, over the files Core ALREADY runs. A file you leave out is kept, " + UPLOAD_DROPS_UNREADABLE.mergeMode + ".\n" +
+      "  • files:[] + replace:true — the connector becomes EXACTLY these files. Every other file is DELETED from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev), deployed or not — files written with ateam_github_patch included. Some files are kept — repo.kept names each with its reason.\n\n" +
+      "Nothing is written with no base (409 CONNECTOR_BASE_MISSING: a new connector is ateam_create_connector's) or a failed read (retryable 502 CONNECTOR_UNREADABLE).\n\n" +
+      "Multi-file connectors: pass each file as content_base64 (single-line, escape-safe) instead of content — the canonical path for a full connector; do not curl the raw endpoint (it skips connector registration and PAT provisioning).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2379,7 +2401,7 @@ export const tools = [
         },
         replace: {
           type: "boolean",
-          description: "FULL REPLACE: the connector becomes exactly `files`. Every other file is deleted from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev) — every file under connectors/<connector-id>/ you leave out, deployed or not, files written with ateam_github_patch included (some files are kept — repo.kept names each with its reason). Main is never touched (a promote carries it). With github:true the repo is left as it is. Default: false (= merge). An incomplete file set with replace:true deletes the rest of the connector.",
+          description: "FULL REPLACE: the connector becomes exactly `files`. Every other file is deleted from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev) — every file under connectors/<connector-id>/ you leave out, deployed or not, files written with ateam_github_patch included (some files are kept — repo.kept names each with its reason). The reply names each: dropped (Core), authored.removed (the Builder's source), repo.deleted (the branch), repo.branch_only (the branch files that were never deployed), repo.kept (kept, with the reason). Main is never touched (a promote carries it). With github:true the repo is left as it is. Default: false (= merge). An incomplete file set with replace:true deletes the rest of the connector. " + UPLOAD_DROPS_UNREADABLE.replaceParam,
         },
         force: {
           type: "boolean",
@@ -3790,18 +3812,210 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // ═══════════════════════════════════════════════════════════════════
 // Phase 7 strip: connector + plugin scaffolds
 // ───────────────────────────────────────────────────────────────────
-/** ateam_create_connector's refusal for an id that already exists: what to use instead. */
-function connectorExists(solutionId, connectorId, why) {
+// ── The Builder's create-only upload (if_absent, Builder #160) ────────────────
+// ateam_create_connector and ateam_create_plugin do not ask first and then
+// upload: the check and the write are ONE request the Builder answers under its
+// per-connector lock, `{ files, if_absent: true }` for a connector and
+// `{ files, if_absent: { plugin } }` for one plugin. It checks the Builder's
+// source, the repo's working branch and Core, and writes only when none of them
+// holds it. (The client-side check this replaced read GET …/source: a failed
+// read looked like "new", and anything landing between the question and the
+// upload was replaced — CORE on #50, AM50-R1/R2/R6.) These two functions are the
+// ONE reading of that answer, for the sync reply (a thrown HTTP error) and for
+// an async job's result ({ ok, http_status, code, … }).
+
+/** "the Builder's source (a, b, +2 more), Core" — where found_in found it. */
+function placesFound(found) {
+  return (Array.isArray(found) ? found : []).map((f) => {
+    const name = f?.where === "github" ? `the repo's ${f.branch || "working"} branch`
+      : f?.where === "core" ? "Core" : "the Builder's source";
+    const paths = Array.isArray(f?.paths) ? f.paths : [];
+    return paths.length > 0 ? `${name} (${paths.slice(0, 3).join(", ")}${paths.length > 3 ? `, +${paths.length - 3} more` : ""})` : name;
+  }).join("; ");
+}
+
+/** What to do next, per place the files were found. */
+function existsNext(found, solutionId, connectorId) {
+  const at = (found || []).map((f) => f?.where);
+  const args = `solution_id:'${solutionId}', connector_id:'${connectorId}'`;
+  const next = [];
+  if (at.includes("builder") || at.includes("github")) {
+    next.push(`ateam_get_connector_source(${args}) reads it; change it with ateam_github_patch (one file per call), then ateam_upload_connector(${args}, github:true)`);
+  }
+  if (at.includes("core")) {
+    next.push(at.includes("builder") || at.includes("github")
+      ? `ateam_get_deployed_connector_source(${args}) shows what Core runs, which may differ`
+      : `Core runs it but the Builder holds no source of it: ateam_get_deployed_connector_source(${args}) shows what Core runs, and ateam_recover_connector_source(${args}) adopts it as the Builder's source; change it from there`);
+  }
+  return next;
+}
+
+/**
+ * The Builder's answer to a create-only upload, as the refusal a caller is
+ * handed, or null when it is not one of the Builder's create-only answers (the
+ * caller then rethrows the error, or reports the job's failure).
+ * @param {"connector"|"plugin"} scope
+ * @param {{ status: number|null|undefined, body: object|null }} answer  an HTTP error's status and JSON body, or an async job's http_status and result
+ * @param {{ solutionId: string, connectorId: string, pluginName?: string, afterAsyncKick?: boolean }} ctx
+ */
+function createOnlyRefusal(scope, { status, body }, ctx) {
+  const { solutionId, connectorId, pluginName, afterAsyncKick } = ctx;
+  const code = body?.code;
+  const args = `solution_id:'${solutionId}', connector_id:'${connectorId}'`;
+  const what = scope === "plugin" ? `plugin "${pluginName}" of connector "${connectorId}"` : `connector "${connectorId}"`;
+  if (status === 409 && (code === "CONNECTOR_EXISTS" || code === "PLUGIN_EXISTS")) {
+    const plugin = code === "PLUGIN_EXISTS";
+    return {
+      ok: false,
+      code,
+      connector_id: connectorId,
+      ...(plugin && { plugin: body.plugin || pluginName }),
+      found_in: body.found_in || [],
+      error: `${plugin ? `Plugin "${body.plugin || pluginName}" of connector "${connectorId}" already has files` : `Connector "${connectorId}" already exists`}: ` +
+        `${placesFound(body.found_in) || "the Builder found files"}. Create never replaces, so nothing was created or uploaded.` +
+        (afterAsyncKick ? " An earlier attempt of this same call was accepted before this one, and may be what created it." : ""),
+      next: [
+        ...existsNext(body.found_in, solutionId, connectorId),
+        plugin ? "or create the plugin under another name" : "or create a new connector under another id",
+      ],
+    };
+  }
+  if (status === 409 && code === "CONNECTOR_BASE_MISSING" && scope === "plugin") {
+    return {
+      ok: false,
+      code,
+      connector_id: connectorId,
+      error: `Connector "${connectorId}" has nothing to add the plugin to: it exists nowhere (not in the Builder's source, on the repo's working branch, or in Core). Nothing was uploaded.`,
+      next: [`Create the connector first: ateam_create_connector(${args}, ui_capable:true), then ateam_create_plugin again`],
+    };
+  }
+  if (status === 409 && code === "UPLOAD_WOULD_DELETE") {
+    const lost = (Array.isArray(body.would_delete_unreadable) ? body.would_delete_unreadable : []).map((u) => u?.path || u).slice(0, 5);
+    return {
+      ok: false,
+      code,
+      connector_id: connectorId,
+      ...(body.would_delete_unreadable && { would_delete_unreadable: body.would_delete_unreadable }),
+      error: UPLOAD_DROPS_UNREADABLE.refusal(what, lost.length > 0 ? ` (${lost.join(", ")})` : ""),
+      next: UPLOAD_DROPS_UNREADABLE.next(args),
+    };
+  }
+  if (status === 502 && code === "CONNECTOR_UNREADABLE") {
+    const layers = (Array.isArray(body.unreadable) ? body.unreadable : []).map((u) => `${u?.where || "a layer"} (${u?.error || "no reason given"})`).join("; ");
+    return {
+      ok: false,
+      code,
+      connector_id: connectorId,
+      retryable: true,
+      unreadable: body.unreadable || [],
+      error: `Could not tell whether ${what} exists: ${layers || "a layer could not be read"}. Nothing was created or uploaded, and an unreadable answer is not an empty one.`,
+      next: [
+        "Retry the same call once it answers: nothing was written",
+        "If it keeps failing, ateam_get_connector_source and ateam_get_deployed_connector_source show which layer is down. Never create it with replace:true",
+      ],
+    };
+  }
+  if (status === 400 && code === "INVALID_IF_ABSENT") {
+    return {
+      ok: false,
+      code,
+      connector_id: connectorId,
+      error: `The Builder refused the create-only request: ${body.error || "if_absent is invalid"}. Nothing was read or written.`,
+      next: ["This is a mismatch between ateam-mcp and the Builder, not something to work around: report it, and do not create with replace:true"],
+    };
+  }
+  return null;
+}
+
+/**
+ * A 2xx from a create-only upload that does NOT say create_only: an older
+ * Builder, which ignored if_absent and ran the upload as a plain merge. It may
+ * have written the scaffold over what was there. Never "created"; never a
+ * retry with replace.
+ */
+function createNotSafeYet(scope, upload, ctx) {
+  const what = scope === "plugin" ? `plugin "${ctx.pluginName}" of connector "${ctx.connectorId}"` : `connector "${ctx.connectorId}"`;
   return {
     ok: false,
-    code: "CONNECTOR_EXISTS",
-    connector_id: connectorId,
-    error: `Connector "${connectorId}" already exists (${why}) — use ateam_upload_connector to change it. ` +
-      "ateam_create_connector makes a NEW connector and never replaces one. Nothing was created or uploaded.",
-    use: [
-      `ateam_get_connector_source(solution_id:'${solutionId}', connector_id:'${connectorId}') — read what it holds`,
-      `ateam_github_patch, then ateam_upload_connector(solution_id:'${solutionId}', connector_id:'${connectorId}', github:true) — change it`,
+    code: "BUILDER_CANNOT_CREATE_SAFELY",
+    connector_id: ctx.connectorId,
+    error: `This Builder cannot create safely yet: it answered without create_only, so it ignored if_absent and ran the upload as a merge. ${what[0].toUpperCase()}${what.slice(1)} may have been overwritten. Nothing was reported as created.`,
+    next: [
+      `ateam_get_connector_source(solution_id:'${ctx.solutionId}', connector_id:'${ctx.connectorId}') shows what it holds now`,
+      "Use the Builder's current version before creating again. ateam_create_connector and ateam_create_plugin never fall back to replace:true",
     ],
+    upload_result: upload,
+  };
+}
+
+// ── An earlier create_plugin job of this process (Builder #160, PR160-R5) ──────
+// A PLUGIN_EXISTS that follows an async job THIS process accepted for the same
+// plugin is not necessarily a stranger's files: the job may be what created
+// them — the async kick accepted, its result not read (the poll gave up, the
+// call was repeated, or a sync retry waited for the connector's lock behind the
+// job and then found the plugin there). So it is not answered as "someone else
+// has it": the earlier job is read, and what it did is said, with its id. Only
+// jobs this process accepted are known, and for as long as the Builder keeps a
+// finished job (30 minutes).
+const acceptedPluginJobs = new Map(); // owner + connector + plugin → { job_id, at }
+const ACCEPTED_PLUGIN_JOB_KEPT_MS = 30 * 60_000;
+
+function pluginJobKey(sid, solutionId, connectorId, pluginName) {
+  return `${buildRunOwner(sid, solutionId)}\n${connectorId}\n${pluginName}`;
+}
+
+/** The job id this process accepted earlier for this plugin, if it still counts. */
+function earlierPluginJob(key) {
+  const rec = acceptedPluginJobs.get(key);
+  if (!rec) return null;
+  if (Date.now() - rec.at >= ACCEPTED_PLUGIN_JOB_KEPT_MS) { acceptedPluginJobs.delete(key); return null; }
+  return rec.job_id;
+}
+
+/**
+ * A PLUGIN_EXISTS refusal, read against the earlier job that may have created
+ * the plugin. Anything else, or no earlier job, comes back unchanged.
+ */
+async function settleAgainstEarlierJob(refusal, earlierJobId, { sid, connectorId, pluginName }) {
+  if (refusal?.code !== "PLUGIN_EXISTS" || !earlierJobId) return refusal;
+  let job = null;
+  try { job = await get(apiPath`/deploy/jobs/${earlierJobId}`, sid); } catch { /* unknown: the plain refusal stands, naming the job */ }
+  const pluginId = `mcp:${connectorId}:${pluginName}`;
+  if (job?.status === "done" && job.create_only === "plugin") {
+    return {
+      ok: true,
+      code: "PLUGIN_CREATED_BY_EARLIER_JOB",
+      created_now: false,
+      plugin_id: pluginId,
+      job_id: earlierJobId,
+      note: `The plugin was created by the earlier job ${earlierJobId}; nothing new was written by this call. Check that job's result (upload_result).`,
+      upload_result: job,
+      next_steps: ["ateam_get_widget_catalog shows whether it is listed and renders"],
+    };
+  }
+  if (job && job.status !== "done" && job.status !== "failed") {
+    return {
+      ok: false,
+      code: "PLUGIN_CREATE_IN_PROGRESS",
+      plugin_id: pluginId,
+      job_id: earlierJobId,
+      retryable: true,
+      error: `An earlier create of plugin "${pluginName}" (job ${earlierJobId}) is still running: do not repeat it. Nothing new was written by this call.`,
+      next: ["Wait for that job, then read the connector (ateam_get_connector_source) to see what it wrote"],
+    };
+  }
+  return { ...refusal, earlier_job_id: earlierJobId, error: `${refusal.error} An earlier create of this plugin (job ${earlierJobId}) was accepted by this session${job?.status === "failed" ? " and failed" : ", its result could not be read"}.` };
+}
+
+/** An upload that failed in a way that is none of the create-only answers (an async job's failed result, or its poll that gave up). */
+function uploadFailed(result) {
+  return {
+    ok: false,
+    code: result?.code || "UPLOAD_FAILED",
+    http_status: result?.http_status ?? null,
+    error: result?.error || "The upload did not succeed.",
+    ...(result?.hint && { hint: result.hint }),
+    upload_result: result,
   };
 }
 
@@ -7782,41 +7996,35 @@ export const handlers = {
     if (!/^[a-z][a-z0-9-]*$/.test(connector_id)) {
       throw new Error("connector_id must be lowercase letters/digits/dashes only");
     }
-    // CREATE NEVER DESTROYS (CORE). The upload below is replace:true, which
-    // deletes every file the scaffold lacks — from Core, from the Builder's
-    // source and from the repo's working branch (Builder #121, #123). 575e993
-    // sent it assuming the id was new and never checked, so create on an
-    // existing id replaced that connector with a skeleton. So ask first, with
-    // the read ateam_get_connector_source makes: the Builder's authored source
-    // (its store, then GitHub), and `deployed_in_core` when there is none.
-    // Only its 404 AUTHORED_SOURCE_MISSING with nothing deployed is "new".
-    // Any other answer — a failure included — refuses: never create blind.
-    try {
-      await get(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
-      return connectorExists(solution_id, connector_id, "it has authored source");
-    } catch (err) {
-      const parsed = jsonBodyOf(err.body);
-      if (!(err.status === 404 && parsed?.code === "AUTHORED_SOURCE_MISSING")) {
-        err.message = `ateam_create_connector refused: could not tell whether connector "${connector_id}" already exists (${err.message}). Nothing was created or uploaded.`;
-        throw err;
-      }
-      if (parsed.deployed_in_core === true) return connectorExists(solution_id, connector_id, "Core is running it");
-    }
     const files = _scaffoldConnectorFiles({
       connectorId: connector_id,
       displayName: name || connector_id,
       uiCapable: !!ui_capable,
     });
-    // replace:true — this is a NEW connector (checked above): the scaffold IS
-    // the complete file set, and there's nothing to merge against. Without it
-    // the upload route's merge-protection 409s a brand-new connector on a
-    // repo-less tenant ("no existing base to merge").
-    const result = await post(
-      apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
-      { files, replace: true },
-      sid,
-      { timeoutMs: 120_000 },
-    );
+    // CREATE NEVER DESTROYS (CORE). This uploaded with replace:true (575e993,
+    // "this is a NEW connector", never checked), which deletes every file the
+    // scaffold lacks — from Core, from the Builder's source and from the repo's
+    // working branch — so create on an existing id replaced that connector with a
+    // skeleton. if_absent:true makes the Builder write the scaffold only if the
+    // connector exists nowhere, in the same request that checks (createOnlyRefusal).
+    // There is no replace here and no fallback to one: a refusal, a failed read,
+    // or a Builder that does not answer create_only is a failure.
+    const ctx = { solutionId: solution_id, connectorId: connector_id };
+    let result;
+    try {
+      result = await post(
+        apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`,
+        { files, if_absent: true },
+        sid,
+        { timeoutMs: 120_000 },
+      );
+    } catch (err) {
+      const refusal = createOnlyRefusal("connector", { status: err.status, body: jsonBodyOf(err.body) }, ctx);
+      if (refusal) return refusal;
+      throw err;
+    }
+    if (result?.ok === false) return uploadFailed(result);
+    if (result?.create_only !== "connector") return createNotSafeYet("connector", result, ctx);
     return {
       ok: true,
       connector_id,
@@ -7852,17 +8060,46 @@ export const handlers = {
     });
     // Async-first upload — npm install+build can exceed Cloudflare's 100s → 524.
     // Kick async → poll /deploy/jobs; fall back to sync for older backends.
+    //
+    // CREATE NEVER DESTROYS: the upload carries if_absent:{plugin}, so the Builder
+    // refuses (PLUGIN_EXISTS) when any file of this plugin exists in its source,
+    // on the repo's working branch or in Core, in the same request that writes
+    // (Builder #160). An async job reports its refusal in its result, with
+    // http_status and code; createOnlyRefusal reads both the same way.
     const _uploadUrl = apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/upload`;
+    const createOnly = { files, if_absent: { plugin: plugin_name } };
+    const ctx = { solutionId: solution_id, connectorId: connector_id, pluginName: plugin_name };
+    const jobKey = pluginJobKey(sid, solution_id, connector_id, plugin_name);
+    const earlierJobId = earlierPluginJob(jobKey);   // read BEFORE this call's own job is recorded
+    const settle = (refusal) => settleAgainstEarlierJob(refusal, earlierJobId, { sid, connectorId: connector_id, pluginName: plugin_name });
+    const fromError = (err) => ({ status: err?.status, body: jsonBodyOf(err?.body) });
     let result;
     try {
-      const kicked = await post(_uploadUrl, { files, async: true }, sid, { timeoutMs: 30_000 });
+      const kicked = await post(_uploadUrl, { ...createOnly, async: true }, sid, { timeoutMs: 30_000 });
+      if (kicked?.async && kicked.job_id) acceptedPluginJobs.set(jobKey, { job_id: kicked.job_id, at: Date.now() });
       result = (kicked?.async && kicked.job_id)
         ? await pollDeployJob(kicked.job_id, sid, { label: 'create-plugin', maxMs: 15 * 60_000, intervalMs: 2000 })
         : kicked;
     } catch (err) {
+      const refusal = createOnlyRefusal("plugin", fromError(err), ctx);
+      if (refusal) return settle(refusal);
       if (!kickFallsBackToSync(err)) throw err;
-      result = await post(_uploadUrl, { files }, sid, { timeoutMs: 120_000 });
+      // The sync retry waits for the connector's lock. If the async job was
+      // accepted before this retry, it may have created the plugin, and the
+      // retry then gets PLUGIN_EXISTS: say so (afterAsyncKick).
+      try {
+        result = await post(_uploadUrl, createOnly, sid, { timeoutMs: 120_000 });
+      } catch (syncErr) {
+        const syncRefusal = createOnlyRefusal("plugin", fromError(syncErr), { ...ctx, afterAsyncKick: true });
+        if (syncRefusal) return settle(syncRefusal);
+        throw syncErr;
+      }
     }
+    if (result?.ok === false || result?.status === "failed") {
+      const refusal = createOnlyRefusal("plugin", { status: result.http_status, body: result }, ctx);
+      return refusal ? settle(refusal) : uploadFailed(result);
+    }
+    if (result?.create_only !== "plugin") return createNotSafeYet("plugin", result, ctx);
 
     // Verify the plugin actually became RENDERABLE — poll Core's live catalog
     // (which calls the connector's ui.listPlugins) for this plugin id. The

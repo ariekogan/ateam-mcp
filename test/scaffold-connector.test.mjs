@@ -28,6 +28,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { setSessionCredentials } from "../src/api.js";
 import { tools, handleToolCall } from "../src/tools.js";
+import { createOnlyAnswer } from "./create-only-stand-in.mjs";
 
 const SID = "sess-scaffold-connector";
 const uploads = [];
@@ -38,15 +39,11 @@ before(async () => {
     let body = "";
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
-      if (req.url.split("?")[0].endsWith("/upload")) uploads.push(JSON.parse(body || "{}"));
-      // A new connector: nothing authored, nothing deployed (create's existence check).
-      if (req.method === "GET" && req.url.split("?")[0].endsWith("/source")) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, code: "AUTHORED_SOURCE_MISSING", deployed_in_core: false }));
-        return;
-      }
+      const upload = req.url.split("?")[0].endsWith("/upload");
+      const sent = upload ? JSON.parse(body || "{}") : null;
+      if (upload) uploads.push(sent);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, tools: 1 }));
+      res.end(JSON.stringify({ ok: true, tools: 1, ...(upload && createOnlyAnswer(sent)) }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));

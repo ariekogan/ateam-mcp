@@ -53,14 +53,6 @@ before(async () => {
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
       requests.push({ method: req.method, path: req.url.split("?")[0] });
-      // A connector with no authored source and nothing deployed: what
-      // ateam_create_connector must hear before it uploads (create never
-      // replaces an existing one), so it is driven to the upload it exists for.
-      if (req.method === "GET" && /\/connectors\/[^/]+\/source$/.test(req.url.split("?")[0])) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, code: "AUTHORED_SOURCE_MISSING", deployed_in_core: false }));
-        return;
-      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(BODY));
     });

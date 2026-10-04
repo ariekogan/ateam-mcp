@@ -35,6 +35,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setSessionCredentials } from "../src/api.js";
 import { handleToolCall } from "../src/tools.js";
+import { createOnlyAnswer } from "./create-only-stand-in.mjs";
 
 const SID = "sess-scaffold-truth";
 const KEY = "adas_tenanta_00000000000000000000000000000000";
@@ -49,13 +50,9 @@ before(async () => {
       const path = req.url.split("?")[0];
       let reply = { ok: true };
       if (req.method === "POST" && path.endsWith("/upload")) {
-        uploads.push(JSON.parse(body || "{}"));
-        reply = { ok: true, tools: 1 };
-      } else if (req.method === "GET" && path.endsWith("/source")) {
-        // A new connector: nothing authored, nothing deployed (create's existence check).
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, code: "AUTHORED_SOURCE_MISSING", deployed_in_core: false }));
-        return;
+        const sent = JSON.parse(body || "{}");
+        uploads.push(sent);
+        reply = { ok: true, tools: 1, ...createOnlyAnswer(sent) };
       } else if (path.endsWith("/ui-plugins")) {
         // Found at once, so create_plugin's render check does not wait.
         reply = { ok: true, plugins: [{ id: "mcp:demo-mcp:walk", render: { mode: "adaptive", iframeUrl: "/ui/walk/index.html" } }] };
