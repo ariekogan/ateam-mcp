@@ -24,7 +24,7 @@ import { setSessionCredentials } from "../src/api.js";
 // constants and every check reports what it finds there.
 import * as toolsModule from "../src/tools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
-import * as testRunsAs from "../src/testRunsAs.js";
+import { TEST_RUNS_AS_AT } from "../src/testRunsAs.js";
 import * as humanStep from "../src/humanStep.js";
 
 const { tools, handleToolCall } = toolsModule;
@@ -63,16 +63,12 @@ test("ateam_test_connector points at the key the Builder actually serves", () =>
   assert.match(description("ateam_test_connector"), /ateam_get_spec\('skill'\) → agent_guide\.key_concepts\.testing_and_runtime\.human_step_testing/);
 });
 
-test("ateam_test_connector says who the call runs as — what PRE-1 saw, never _system_service", () => {
+test("ateam_test_connector points at who the call runs as, scopes the master_key case, and never says _system_service", () => {
   const d = description("ateam_test_connector");
-  assert.ok(testRunsAs.KEY_PERSON, "testRunsAs.js exports no KEY_PERSON");
-  // The key's OWNER — one agent key per tenant, so not necessarily the person
-  // chatting (CORE review M41r3-2). The Builder's KEY_PERSON is the same bytes.
-  assert.equal(testRunsAs.KEY_PERSON, "the person whose key started the test (the key's owner)");
-  assert.ok(d.includes("With an API key this call runs as " + testRunsAs.KEY_PERSON + ";"), "ateam_test_connector does not say who it runs as");
+  assert.ok(d.includes(TEST_RUNS_AS_AT), "ateam_test_connector does not point at who it runs as");
   // CORE review M41x-L3: a master_key session has no key person (Builder #115
   // passes a master caller's own actor through).
-  assert.ok(d.includes("a master_key session runs as the actor it holds, or the platform's service identity when it holds none."), "the master_key case is not scoped");
+  assert.ok(d.includes("A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none."), "the master_key case is not scoped");
   assert.doesNotMatch(d, /_system_service/);
 });
 
@@ -110,18 +106,12 @@ test("WAITING_ON_THE_USER is one plain sentence, in every place that says when t
   assert.doesNotMatch(served, /or pending_question is set|OR when pending_question is set/);
 });
 
-test("ran_as names the key's owner, never 'the person you are talking to'", () => {
-  assert.equal(testRunsAs.RAN_AS_IN_REPLY, "Every reply's ran_as is the actor the job ran as: the person whose key started the test (the key's owner), or null for an anonymous run.");
-  assert.doesNotMatch(testRunsAs.TEST_RUNS_AS, /the person you are talking to/);
-  assert.ok(testRunsAs.TEST_RUNS_AS.includes(testRunsAs.RAN_AS_IN_REPLY));
-});
-
 test("the tenant CLAUDE.md no longer says ateam_test_connector runs as _system_service", () => {
   const doc = renderAgentDocHeader({ solution: { id: "walkmate", name: "Walkmate" }, skills: [], connectors: [] });
   const line = doc.split("\n").find((l) => l.includes("`ateam_test_connector`"));
   assert.ok(line, "CLAUDE.md has no ateam_test_connector pitfall");
   assert.doesNotMatch(line, /_system_service/);
-  assert.ok(line.includes(testRunsAs.TEST_RUNS_AS), "the pitfall does not say who the call runs as (TEST_RUNS_AS)");
+  assert.ok(line.includes(TEST_RUNS_AS_AT), "the pitfall does not point at who the call runs as");
   assert.match(line, /ateam_conversation/);
 });
 
@@ -136,10 +126,6 @@ test("what ateam_test_connector must never write: one wording, rendered in the d
     assert.ok(text.includes(NEVER), `${where} does not render human_step_testing.never`);
     assert.doesNotMatch(text, /Never call a (?:write|commit) tool (?:here )?on a|commit tool \(confirm/, `${where} still has another wording of the rule`);
   }
-});
-
-test("TEST_RUNS_AS names ateam_test_connector among the tests that run as the key's person", () => {
-  assert.match(testRunsAs.TEST_RUNS_AS, /\(ateam_conversation, ateam_test_skill, ateam_test_connector, ateam_test_voice\) runs AS THE PERSON/);
 });
 
 // A stand-in Builder answering a conversation kickoff.
@@ -171,8 +157,6 @@ test("no file in the repo still says ateam_test_connector runs as _system_servic
   const { join, dirname } = await import("node:path");
   const { fileURLToPath } = await import("node:url");
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const header = readFileSync(join(root, "src", "testRunsAs.js"), "utf8").split("*/")[0];
-  assert.doesNotMatch(header, /missing-actor error/, "testRunsAs.js header still lists the scaffold's deleted missing-actor error");
   const wip = readFileSync(join(root, "docs", "WIP", "AGENT_ONBOARDING_DOC_AUTOGEN.md"), "utf8");
   assert.doesNotMatch(wip, /`ateam_test_connector` runs as `_system_service`|stripped to `_system_service`/, "docs/WIP still states the old pitfall");
 });

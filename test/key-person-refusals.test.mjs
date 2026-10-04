@@ -21,13 +21,11 @@
 //     and a sealed key (whose whoami error kept 300 characters of the body,
 //     cutting the Builder's hint, and appended "upgrade it or pass tenant")
 //     (CORE review of #48, aa342968);
-//   - TEST_RUNS_AS carries KEY_OWNER_GONE, byte for byte the Builder's.
 //
 // Run: node --test test/key-person-refusals.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as API from "../src/api.js";
-import * as RunsAs from "../src/testRunsAs.js";
 import { handleToolCall } from "../src/tools.js";
 
 const { formatError, actorNotFound } = API;
@@ -93,14 +91,6 @@ test("the code is read with its status, at the top level of the body only", () =
   assert.deepEqual(API.personRefused?.(401, JSON.stringify(CORE.ACTOR_INACTIVE)), { code: "ACTOR_INACTIVE", actor: OWNER });
   // On any other status the table's hint stands.
   assert.match(formatError("GET", "/deploy/solutions", 403, JSON.stringify(CORE.KEY_OWNER_DELETED), BASE, { signIn: HOSTED }), /This key is not allowed to do this here/);
-});
-
-test("TEST_RUNS_AS says a key whose person is gone runs nothing — byte for byte the Builder's KEY_OWNER_GONE", () => {
-  assert.equal(RunsAs.KEY_OWNER_GONE,
-    "A key whose person has since been deleted, or is no longer active in the workspace, runs nothing: it is refused " +
-    "(401 KEY_OWNER_DELETED or KEY_OWNER_INACTIVE) and never run as anyone else, until a workspace owner or admin " +
-    "rotates the key in Tokens & Keys (the new key belongs to whoever rotated it) or reactivates that person.");
-  assert.ok(RunsAs.TEST_RUNS_AS.includes(RunsAs.KEY_OWNER_GONE + " " + RunsAs.RAN_AS_IN_REPLY), "KEY_OWNER_GONE is not a part of TEST_RUNS_AS");
 });
 
 // ─── ateam_auth, through the real dispatcher ─────────────────────────────────

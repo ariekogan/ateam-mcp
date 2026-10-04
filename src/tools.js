@@ -139,8 +139,8 @@ import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
-// Who a test job runs as: ONE statement (the Builder's /spec wording), rendered where it is read.
-import { TEST_RUNS_AS, RAN_AS_IN_REPLY, KEY_PERSON } from "./testRunsAs.js";
+// Who a test job runs as: ONE pointer to the Builder's /spec, never a copy of its words.
+import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 // Signing in and switching workspace: ONE statement of the steps, rendered where it is read.
 import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
@@ -1696,7 +1696,7 @@ export const tools = [
       "  • 'chain' — wait until EVERY job in the chain (root + handoffs + askAnySkill subcalls, recursively) reaches a terminal state, then return the full chain tree. Use when testing multi-skill flows (orchestrator → workers, builders → sub-builders, etc.). The response.chain field carries chainJobs[] with parentJobId/relation/depth and executionSteps[] with tool-nesting (opId/parentOpId/_toolDepth).\n\n" +
       "Legacy: wait:false is equivalent to wait_for:'never' — returns job_id immediately for polling via ateam_test_status. wait:true is the same as the default wait_for:'root'.\n\n" +
       "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).\n\n" +
-      "Who it runs as: see actor_id. The reply carries ran_as (with wait_for:'chain', inside response.kickoff) beside actor_id. " + RAN_AS_IN_REPLY,
+      "The reply carries ran_as (with wait_for:'chain', inside response.kickoff) beside actor_id. " + TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",
       properties: {
@@ -1731,7 +1731,7 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional: the conversation thread. Pass the actor_id from a previous test response to continue that thread. " + TEST_RUNS_AS,
+            "Optional: the conversation thread. Pass the actor_id from a previous test response to continue that thread. " + TEST_RUNS_AS_AT,
         },
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
@@ -1795,12 +1795,13 @@ export const tools = [
     // call inside one. This one was 1,489, so that agent never read its last
     // ~290 characters (who a job runs as, attachments). It now fits whole
     // (test/conversation-continues.test.mjs). Parameter descriptions are not
-    // cut there (agentSdk/toolSchema.js), so actor_id carries TEST_RUNS_AS.
+    // cut there (agentSdk/toolSchema.js), so actor_id carries what is not in the
+    // description.
     description:
       "Chat with a deployed solution (auto-routed; no skill_id).\n\n" +
       "ALWAYS ASYNC: returns a chain_id at once; the reply is NOT here. Poll ateam_chain_status(chain_id) every ~2s until chain_done === true (by chain, never by job); ateam_get_chain(chain_id) once at the end.\n\n" +
       "Multi-turn: " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW + " " + WAITING_ON_THE_USER + " " +
-      PLAY_THE_PERSON + " " + RAN_AS_IN_REPLY,
+      PLAY_THE_PERSON + " " + TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",
       properties: {
@@ -1815,10 +1816,9 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional. It picks no identity and continues nothing: your key does both (the description says what continues a conversation, and the window an answer has). " +
-            "What it does: with no person on the key, the reply's actor_id echoes it (or is a test_ id when you pass none); with a person, the reply's actor_id is that person whatever you pass. " +
+            "Optional: the conversation thread (the description says what continues a conversation, and the window an answer has). " +
             "ateam-mcp keeps the actor_id you pass, and the one the reply returns (a test_ id excepted), as this session's actor for later job reads such as ateam_chain_status, so pass only a real one: an id Core does not know makes those reads fail (401). " +
-            TEST_RUNS_AS,
+            TEST_RUNS_AS_AT,
         },
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
@@ -1856,14 +1856,13 @@ export const tools = [
       // It promised "the full voice pipeline … skill dispatch → response,
       // end-to-end" (32dec97), then said the voice layer was ALL a test shows.
       // Neither holds for every caller. Core c93563976 (D7, in prod since
-      // prod-20261001-001): a voice test forwarded with a PERSON's API key runs
-      // as that person, skill job included. Core still refuses the skill call
-      // for a key with no person (an anonymous run) and for a phone caller
-      // (phone::<number>, an actor Core does not know) — C6. Kept within the
-      // length it had: the whole text is past Core's cut, and the ratchet
-      // (test/core-description-cut) lets none grow.
-      "Simulate a voice call with text, not audio. A person's key runs it as that person, skill job included; with no person on the key, or a phone caller, Core refuses the skill call today (C6): test it with ateam_conversation. Each turn returns response, verification, entities; ran_as repeats its actor_id.\n\n" +
-      TEST_RUNS_AS,
+      // prod-20260929-001): a voice test forwarded with a PERSON's API key
+      // reaches the skill, the job running as that person. Core still refuses
+      // the skill call for a key with no person (an anonymous run) and for a
+      // phone caller (phone::<number>, an actor Core does not know) — C6. Who
+      // the test runs as is the Builder's to say: the pointer.
+      "Simulate a voice call with text, not audio. A person's key reaches the skill (skill job included); with no person on the key, or a phone caller, Core refuses the skill call today (C6): test it with ateam_conversation. Each turn returns response, verification, entities; ran_as repeats its actor_id.\n\n" +
+      TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2614,7 +2613,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Usually the session already holds it. Otherwise pass the ran_as of the ateam_conversation / ateam_test_skill reply that started the job, not the actor_id you passed (that names the thread). " + RAN_AS_IN_REPLY,
+          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Usually the session already holds it. Otherwise pass the ran_as of the ateam_conversation / ateam_test_skill reply that started the job, not the actor_id you passed (that names the thread). " + TEST_RUNS_AS_AT,
         },
         limit: {
           type: "number",
@@ -2858,7 +2857,7 @@ export const tools = [
       // (Builder #115). A master_key session has no key person: the Builder
       // passes its own actor through, and with none Core uses its service
       // identity.
-      "With an API key this call runs as " + KEY_PERSON + "; a master_key session runs as the actor it holds, or the platform's service identity when it holds none. " +
+      TEST_RUNS_AS_AT + " A master_key session has no key person: it runs as the actor it holds, or the platform's service identity when it holds none. " +
       "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",
     inputSchema: {
       type: "object",
@@ -5061,9 +5060,9 @@ export const handlers = {
         "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
         "4. NEXT TURN — a reply or the next message: ateam_conversation(solution_id, message). " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW + " Repeat from step 2.",
       ],
-      who_it_runs_as: TEST_RUNS_AS,
+      who_it_runs_as: TEST_RUNS_AS_AT,
       example: {
-        kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "usr_you", ran_as: "usr_you" }  (a key no person minted: actor_id "test_x", ran_as null)',
+        kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "usr_you", ran_as: "usr_you" }',
         poll: 'ateam_chain_status(chain_id: "job_ab12") → { chain_status: "running", chain_done: false } … repeat … → { chain_status: "completed", chain_done: true, result: "…" }',
         full_tree: 'ateam_get_chain(chain_id: "job_ab12") → { chainJobs: [ {jobId, skill, status, relation, depth} … ], executionSteps: [ … ] }',
         continue: 'ateam_conversation(solution_id: "ada", message: "yes")  (inside the window in steps[3])',
@@ -6522,9 +6521,9 @@ export const handlers = {
             // It said "ateam_conversation(actor_id: …) to continue the thread"
             // (a793b34): actor_id continues nothing (CONVERSATION_CONTINUES).
             continue: "ateam_conversation(solution_id, message). " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW,
-            // The Builder's ran_as rides in ...kickoff above; name it, so an agent
-            // reads WHO the job ran as and not only the thread.
-            who_it_ran_as: RAN_AS_IN_REPLY,
+            // The Builder's ran_as rides in ...kickoff above; point at what it
+            // means, so an agent reads WHO the job ran as and not only the thread.
+            who_it_ran_as: TEST_RUNS_AS_AT,
           }
         : undefined,
     };
@@ -8476,9 +8475,8 @@ export async function handleToolCall(name, args, sessionId) {
 
     // An actor id comes back here: ateam_conversation/ateam_test_skill return
     // the thread as actor_id, and the docs tell callers to pass it back for
-    // multi-turn. With a person on the key the thread IS that person, the actor
-    // the job ran as (ran_as, testRunsAs.js); a key no person minted gets a
-    // test_ thread key, which api.js drops. Learn it on the way out so the
+    // multi-turn. For a key with a person the thread is that person (ran_as); a
+    // key with none gets a test_ thread key, which api.js drops. Learn it on the way out so the
     // follow-up ateam_get_execution_logs / ateam_get_metrics on that very job
     // is not refused for not knowing who ran it — the single most common dead
     // end when debugging a run.

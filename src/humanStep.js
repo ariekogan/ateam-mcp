@@ -3,10 +3,9 @@
  *
  * The one home is the Builder's /spec/skill
  * agent_guide.key_concepts.testing_and_runtime.human_step_testing (#112):
- * `rule` and `never` below are its `rule` and `never`, verbatim, as
- * src/testRunsAs.js is the Builder's TEST_RUNS_AS. When the Builder's change,
- * these change with them; test/test-connector-human-step.test.mjs pins the
- * bytes. Their own module so agentDoc.js can render them (agentDoc.js cannot
+ * `rule` and `never` below are its `rule` and `never`, verbatim. When the
+ * Builder's change, these change with them; test/test-connector-human-step.test.mjs
+ * pins the bytes. Their own module so agentDoc.js can render them (agentDoc.js cannot
  * import tools.js — tools.js imports agentDoc.js).
  */
 

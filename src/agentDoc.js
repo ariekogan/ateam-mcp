@@ -18,7 +18,7 @@
 
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_TYPES } from './exampleTypes.js';
-import { TEST_RUNS_AS } from './testRunsAs.js';
+import { TEST_RUNS_AS_AT } from './testRunsAs.js';
 import { TEST_CONNECTOR_NEVER } from './humanStep.js';
 
 export const AGENT_DOC_SENTINEL = "<!-- SOLUTION-SPECIFIC NOTES BELOW — not auto-regenerated -->";
@@ -312,9 +312,9 @@ function buildUniversalPitfalls() {
   return [
     // It said "`ateam_test_connector` runs as `_system_service`" (e75feac,
     // 2026-04-21). True on a fresh session until Builder #115 made the
-    // connector call run as the key's person, like every other test — which
-    // TEST_RUNS_AS states. The never-write rule is rendered, not paraphrased.
-    "- **`ateam_test_connector` proves a tool's plumbing only** — a step that waits for a person is tested with `ateam_conversation` (its description says how). " + TEST_CONNECTOR_NEVER + " " + TEST_RUNS_AS,
+    // connector call run as the key's person, like every other test — which the
+    // pointer says where to read. The never-write rule is rendered, not paraphrased.
+    "- **`ateam_test_connector` proves a tool's plumbing only** — a step that waits for a person is tested with `ateam_conversation` (its description says how). " + TEST_CONNECTOR_NEVER + " " + TEST_RUNS_AS_AT,
     "- **`.ateam/export.json` is auto-generated.** Never hand-edit. Deploys read it, so stale copies silently break things.",
     "- **Prefer `ateam_patch` over `github_patch` + a deploy** for skill-definition edits. One call that writes `dev` and redeploys what it patched; check its `redeploy` phase, which reports a failed redeploy (the edit is kept).",
     "- **Always refetch dynamic ids.** Corpus ids, job ids, actor ids change. Call `docs.corpus.list` / `ateam_list_solutions` / etc. in the current job — don't reuse ids from memory or previous sessions.",

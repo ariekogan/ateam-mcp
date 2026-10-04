@@ -39,7 +39,7 @@ On solution repo creation, seed a `CLAUDE.md` at the repo root. Two sections:
 - A-Team GitHub-first workflow (single `main` branch, `safe-*` checkpoints)
 - MCP tool decision table (`github_patch` vs `patch` vs `build_and_run` vs `redeploy`)
 - Universal pitfalls:
-  - `ateam_test_connector` proves a tool's plumbing only; who it runs as is TEST_RUNS_AS (src/testRunsAs.js) — the key's owner since Builder #115, not `_system_service` (the live pitfall text is src/agentDoc.js)
+  - `ateam_test_connector` proves a tool's plumbing only; who it runs as is the Builder's to say (src/testRunsAs.js holds only the pointer; the live pitfall text is src/agentDoc.js)
   - `.ateam/export.json` is auto-generated — don't hand-edit
   - `ateam_patch` is preferred over `github_patch + build_and_run` for skill-def changes
   - Always `git pull` / `ateam_github_read` before editing (don't rely on cached content)

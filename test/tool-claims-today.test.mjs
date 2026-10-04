@@ -5,7 +5,7 @@
 //     pipeline … skill dispatch → response" end-to-end (32dec97). The first fix
 //     said the voice layer was ALL a test shows ("cannot show a skill result
 //     today"), which is false for a person's key: Core c93563976 (D7, in prod
-//     since prod-20261001-001) runs a voice test forwarded with a person's API
+//     since prod-20260929-001) runs a voice test forwarded with a person's API
 //     key AS that person, skill job included. Core still refuses the skill call
 //     (C6) for a key with no person (an anonymous run) and for a phone caller
 //     (phone::<number>, an actor Core does not know). Verified from the code,
@@ -21,6 +21,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tools, handleToolCall } from "../src/tools.js";
+import { renderAgentDocHeader } from "../src/agentDoc.js";
 
 const tool = (name) => tools.find((t) => t.name === name);
 const voice = () => tool("ateam_test_voice").description;
@@ -33,14 +34,14 @@ test("ateam_test_voice: no blanket 'no skill result' claim, and no 'full pipelin
 
 test("ateam_test_voice: says what a person's key gets, and who is still refused (Core C6)", () => {
   const d = voice();
-  assert.match(d, /A person's key runs it as that person, skill job included/);
+  assert.match(d, /A person's key reaches the skill \(skill job included\)/);
   assert.match(d, /with no person on the key, or a phone caller, Core refuses the skill call today \(C6\)/);
   assert.match(d, /test it with ateam_conversation/, "does not say where to test the skill when it is refused");
 });
 
 test("ateam_test_voice: the scoped claim is in the first 1200 characters an in-app agent reads", () => {
   const seen = voice().slice(0, 1200);
-  assert.match(seen, /A person's key runs it as that person, skill job included/, "an in-app agent is cut off before it reads what a person's key gets");
+  assert.match(seen, /A person's key reaches the skill \(skill job included\)/, "an in-app agent is cut off before it reads what a person's key gets");
   assert.match(seen, /Core refuses the skill call today \(C6\)/, "an in-app agent is cut off before it reads who is refused");
 });
 
@@ -54,9 +55,22 @@ test("ateam_bootstrap: read_first sends an MCP client to ateam_get_spec with sea
   assert.doesNotMatch(rf, /\bGET\b/, `still tells an MCP client to GET: ${rf}`);
 });
 
-test("no tool description and no bootstrap text tells an MCP client to 'GET /spec/…'", async () => {
+// AM28-R6: the first guard looked for the literal "GET /spec", so "GET
+// https://…/spec/skill" or "GET  /spec" got past it. An MCP client cannot GET
+// anything: it calls ateam_get_spec(topic, search).
+const GET_SPEC = /\bGET\s+\S*\/spec/i;
+
+test("the GET guard sees every spelling of 'GET …/spec' (control)", () => {
+  for (const t of ["GET /spec/skill", "GET  /spec/skill", "GET\n/spec", "get /spec/<topic> directly", "GET https://api.ateam-ai.com/spec/skill", "GET ${BASE}/spec/skill"]) {
+    assert.match(t, GET_SPEC, t);
+  }
+  for (const t of ["ateam_get_spec(topic:\"skill\")", "the GET method", "budget /spec"]) assert.doesNotMatch(t, GET_SPEC, t);
+});
+
+test("no tool description, bootstrap text or generated CLAUDE.md tells an MCP client to 'GET …/spec'", async () => {
   const boot = (await handleToolCall("ateam_bootstrap", {}, "sess-claims-today-boot")).content[0].text;
-  const texts = [...tools.map((t) => [t.name, JSON.stringify(t)]), ["ateam_bootstrap", boot]];
-  const bad = texts.filter(([, t]) => /\bGET \/spec/.test(t)).map(([n]) => n);
+  const doc = renderAgentDocHeader({ solution: { id: "walkmate", name: "Walkmate" }, skills: [], connectors: [] });
+  const texts = [...tools.map((t) => [t.name, JSON.stringify(t)]), ["ateam_bootstrap", boot], ["CLAUDE.md", doc]];
+  const bad = texts.filter(([, t]) => GET_SPEC.test(t)).map(([n]) => n);
   assert.deepEqual(bad, [], "an MCP client cannot GET: it calls ateam_get_spec(topic, search)");
 });
