@@ -1,5 +1,10 @@
 // WHO ateam_test_abort ACTS AS, and what its actor_id does.
 //
+// Who the abort acts as is the Builder's to say (key_concepts.actor_id: a test
+// runs as the key's person); ateam-mcp POINTS at it (TEST_RUNS_AS_AT) and says
+// only what is the abort's own: it uses the actor the start ran as, not
+// actor_id, and Core refuses a job that actor may not access.
+//
 // actor_id came in with 852b373 as a copy of the read tools' text — "WHO is
 // asking … Pass it to inspect a job run by a DIFFERENT actor (e.g. a real
 // user's)" — and the handler never read it. The abort is no read: the
@@ -17,6 +22,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setSessionCredentials } from "../src/api.js";
 import { tools, handleToolCall } from "../src/tools.js";
+import { TEST_RUNS_AS_AT } from "../src/testRunsAs.js";
 
 // Core cuts a tool description here for an agent run (ai-dev-assistant
 // anthropicAgentBackend.js:618, openaiAgentBackend.js:242,
@@ -25,19 +31,22 @@ import { tools, handleToolCall } from "../src/tools.js";
 const CORE_DESCRIPTION_CUT = 1200;
 const abort = () => tools.find((t) => t.name === "ateam_test_abort");
 
-test("the description says who the abort acts as and what Core refuses — inside what Core passes on", () => {
+test("the description says which actor the abort uses and what Core refuses, and points at who that is — inside what Core passes on", () => {
   const d = abort().description;
   assert.ok(d.length <= CORE_DESCRIPTION_CUT, `${d.length} characters; an in-app agent sees ${CORE_DESCRIPTION_CUT}`);
-  assert.ok(d.includes("The abort acts as your API key's person, as the test's start did (its ran_as), whatever actor_id says"), d);
+  assert.ok(d.includes("The abort uses the actor the test's start ran as, whatever actor_id says"), d);
   assert.ok(d.includes("refuses any other with 403 JOB_ACCESS_DENIED"), d);
-  assert.ok(d.includes("A key no person minted acts as the platform's service identity, which may stop only anonymous runs."), d);
+  assert.ok(d.includes("so an anonymous abort stops only anonymous runs."), d);
+  assert.ok(d.includes(TEST_RUNS_AS_AT), "the description does not point at who a test runs as");
+  assert.doesNotMatch(d, /service identity|key no person minted|acts as your API key/i, "the description restates who the abort acts as");
 });
 
 test("actor_id no longer offers to act as a DIFFERENT actor, and says it is not who aborts", () => {
   const p = abort().inputSchema.properties.actor_id.description;
   assert.doesNotMatch(p, /Pass it to inspect a job run by a DIFFERENT actor/);
   assert.doesNotMatch(p, /WHO is asking/);
-  assert.ok(p.startsWith("Optional, and NOT who aborts: the abort acts as your API key's person"), p);
+  assert.ok(p.startsWith("Optional, and NOT who aborts (see the description)."), p);
+  assert.doesNotMatch(p, /acts as your API key/i, "actor_id restates who the abort acts as");
   assert.ok(p.includes("in a new session, pass the ran_as of the reply that started the run"), p);
 });
 

@@ -41,6 +41,8 @@ before(async () => {
       hits.push({ key, body: body ? JSON.parse(body) : null });
       const hit = routes[key];
       const reply = typeof hit === "function" ? hit(body ? JSON.parse(body) : null) : hit;
+      // A connection that dies before any answer (a backend restarting mid-run).
+      if (reply?.hangUp) return req.socket.destroy();
       res.writeHead(reply?.status || (reply ? 200 : 404), { "Content-Type": "application/json" });
       res.end(JSON.stringify(reply ? reply.body : { error: "no route" }));
     });
@@ -97,6 +99,66 @@ test("(control) build_and_run: a gateway 524 still falls back to async and polls
   { "GET /deploy/jobs/job_1": { body: { status: "done", ok: true, import: { skills: ["k"], connectors: 0 } } } });
   assert.equal(count("POST /deploy/solution"), 2, "a 524 did not fall back to async");
   assert.ok(out.phases.some((p) => p.phase === "deploy" && p.status === "async_retry"));
+});
+
+// ─── 1a'. build_and_run's VALIDATE phase: retry advice by cause, not by words ─
+//
+// It matched /fetch failed|…|network|aborted/ over err.message (f0bb2c2), and
+// the message carries the response body. So a 400 whose body said "network"
+// was told "the deploy service was UNREACHABLE … RETRY", and a gateway 524 was
+// sent to re-read the spec. Now: isTimeoutError, or a socket errno in err.cause.
+
+const validateWith = (reply) => buildAndRun({ body: { ok: true } }, { "POST /validate/solution": reply });
+
+test("validate: a 400 whose body mentions 'network' is a validation answer, not a dead socket", async () => {
+  const { out } = await validateWith({
+    status: 400,
+    body: { ok: false, error: "connector 'weather-mcp': field `network` must be one of host|bridge (got \"aborted\")" },
+  });
+  assert.equal(out.phase, "validation");
+  assert.equal(out.retryable, false, `a 400 was called retryable: ${out.message}`);
+  assert.doesNotMatch(out.message, /UNREACHABLE|RETRY/, "a 400 was reported as a transport failure");
+  assert.equal(count("POST /deploy/solution"), 0);
+});
+
+test("validate: a gateway 524 is a transport failure, not a format error", async () => {
+  const { out } = await validateWith({ status: 524, body: "A timeout occurred" });
+  assert.equal(out.retryable, true, `a gateway timeout was sent to the spec: ${out.message}`);
+  assert.match(out.message, /UNREACHABLE/);
+});
+
+test("(control) validate: a connection that dies before any answer is still a transport failure", async () => {
+  const { out } = await validateWith({ hangUp: true });
+  assert.equal(out.retryable, true, `a dead socket was reported as: ${out.message}`);
+  assert.match(out.message, /UNREACHABLE/);
+});
+
+test("validate: a refused connection (nothing was sent) is a transport failure — request() rethrows it with no cause, marked neverSent", async () => {
+  // A port nothing listens on: bind one, then close it.
+  const probe = createServer();
+  await new Promise((r) => probe.listen(0, "127.0.0.1", r));
+  const port = probe.address().port;
+  await new Promise((r) => probe.close(r));
+  const refusedSid = "sess-timeout-by-status-refused";
+  setSessionCredentials(refusedSid, {
+    apiKey: "adas_tenanta_00000000000000000000000000000000",
+    apiUrl: `http://127.0.0.1:${port}`,
+    explicit: true,
+  });
+  // request() retries a refused connection after 5s, 10s, 15s: do not wait them out.
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => realSetTimeout(fn, ms >= 5000 && ms <= 15000 ? 0 : ms, ...rest);
+  let res;
+  try {
+    res = await handleToolCall("ateam_build_and_run", { solution: { id: "sol", name: "Sol" }, skills: [{ id: "k" }] }, refusedSid);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  const out = JSON.parse(res.content[0].text);
+  assert.equal(out.phase, "validation", `did not reach the validate phase: ${res.content[0].text}`);
+  assert.match(out.error, /Cannot connect to A-Team API/);
+  assert.equal(out.retryable, true, `a refused connection was sent to the spec: ${out.message}`);
+  assert.match(out.message, /UNREACHABLE/);
 });
 
 // ─── 1b. redeploy ────────────────────────────────────────────────────────────

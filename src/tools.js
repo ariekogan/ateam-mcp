@@ -139,8 +139,8 @@ import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
 import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
-// Who a test job runs as: ONE statement (the Builder's /spec wording), rendered where it is read.
-import { TEST_RUNS_AS, RAN_AS_IN_REPLY, KEY_PERSON } from "./testRunsAs.js";
+// Who a test job runs as: ONE pointer to the Builder's /spec, never a copy of its words.
+import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 // Signing in and switching workspace: ONE statement of the steps, rendered where it is read.
 import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
@@ -1696,7 +1696,7 @@ export const tools = [
       "  • 'chain' — wait until EVERY job in the chain (root + handoffs + askAnySkill subcalls, recursively) reaches a terminal state, then return the full chain tree. Use when testing multi-skill flows (orchestrator → workers, builders → sub-builders, etc.). The response.chain field carries chainJobs[] with parentJobId/relation/depth and executionSteps[] with tool-nesting (opId/parentOpId/_toolDepth).\n\n" +
       "Legacy: wait:false is equivalent to wait_for:'never' — returns job_id immediately for polling via ateam_test_status. wait:true is the same as the default wait_for:'root'.\n\n" +
       "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).\n\n" +
-      "Who it runs as: see actor_id. The reply carries ran_as (with wait_for:'chain', inside response.kickoff) beside actor_id. " + RAN_AS_IN_REPLY,
+      "The reply carries ran_as (with wait_for:'chain', inside response.kickoff) beside actor_id. " + TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",
       properties: {
@@ -1731,7 +1731,7 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional: the conversation thread. Pass the actor_id from a previous test response to continue that thread. " + TEST_RUNS_AS,
+            "Optional: the conversation thread. Pass the actor_id from a previous test response to continue that thread. " + TEST_RUNS_AS_AT,
         },
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
@@ -1795,12 +1795,13 @@ export const tools = [
     // call inside one. This one was 1,489, so that agent never read its last
     // ~290 characters (who a job runs as, attachments). It now fits whole
     // (test/conversation-continues.test.mjs). Parameter descriptions are not
-    // cut there (agentSdk/toolSchema.js), so actor_id carries TEST_RUNS_AS.
+    // cut there (agentSdk/toolSchema.js), so actor_id carries what is not in the
+    // description.
     description:
       "Chat with a deployed solution (auto-routed; no skill_id).\n\n" +
       "ALWAYS ASYNC: returns a chain_id at once; the reply is NOT here. Poll ateam_chain_status(chain_id) every ~2s until chain_done === true (by chain, never by job); ateam_get_chain(chain_id) once at the end.\n\n" +
       "Multi-turn: " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW + " " + WAITING_ON_THE_USER + " " +
-      PLAY_THE_PERSON + " " + RAN_AS_IN_REPLY,
+      PLAY_THE_PERSON + " " + TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",
       properties: {
@@ -1815,10 +1816,9 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional. It picks no identity and continues nothing: your key does both (the description says what continues a conversation, and the window an answer has). " +
-            "What it does: with no person on the key, the reply's actor_id echoes it (or is a test_ id when you pass none); with a person, the reply's actor_id is that person whatever you pass. " +
+            "Optional: the conversation thread (the description says what continues a conversation, and the window an answer has). " +
             "ateam-mcp keeps the actor_id you pass, and the one the reply returns (a test_ id excepted), as this session's actor for later job reads such as ateam_chain_status, so pass only a real one: an id Core does not know makes those reads fail (401). " +
-            TEST_RUNS_AS,
+            TEST_RUNS_AS_AT,
         },
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
@@ -1853,8 +1853,16 @@ export const tools = [
     name: "ateam_test_voice",
     core: true,
     description:
-      "Simulate a voice conversation with a deployed solution, using text instead of audio and no phone call. Returns each turn with bot response, verification status, tool calls, and entities; the reply's identity (auth_method, actor_id, note) is the voice backend's own report, and ran_as repeats its actor_id.\n\n" +
-      TEST_RUNS_AS,
+      // It promised "the full voice pipeline … skill dispatch → response,
+      // end-to-end" (32dec97), then said the voice layer was ALL a test shows.
+      // Neither holds for every caller. Core c93563976 (D7, in prod since
+      // prod-20260929-001): a voice test forwarded with a PERSON's API key
+      // reaches the skill, the job running as that person. Core still refuses
+      // the skill call for a key with no person (an anonymous run) and for a
+      // phone caller (phone::<number>, an actor Core does not know) — C6. Who
+      // the test runs as is the Builder's to say: the pointer.
+      "Simulate a voice call with text, not audio. A person's key reaches the skill (skill job included); with no person on the key, or a phone caller, Core refuses the skill call today (C6): test it with ateam_conversation. Each turn returns response, verification, entities; ran_as repeats its actor_id.\n\n" +
+      TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2605,7 +2613,7 @@ export const tools = [
         },
         actor_id: {
           type: "string",
-          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Usually the session already holds it. Otherwise pass the ran_as of the ateam_conversation / ateam_test_skill reply that started the job, not the actor_id you passed (that names the thread). " + RAN_AS_IN_REPLY,
+          description: "The actor whose job this is. REQUIRED for per-job detail: a job belongs to an actor and Core refuses the detail endpoint without one (the list form does not check). Usually the session already holds it. Otherwise pass the ran_as of the ateam_conversation / ateam_test_skill reply that started the job, not the actor_id you passed. " + TEST_RUNS_AS_AT,
         },
         limit: {
           type: "number",
@@ -2788,7 +2796,7 @@ export const tools = [
     // actor", and the handler below never read it. The abort is no read: the
     // Builder's DELETE …/test/:jobId (routes/solutions.js:3056-3059, 986b2b8d)
     // sends Core testIdentity(req).ranAs — the API key's person, null for a key
-    // no person minted — and nothing the caller names. Core's
+    // with no person — and nothing the caller names. Core's
     // POST /api/job/:id/abort (server.js:3006) refuses an actor that may not
     // access the job (utils/actors.js canAccessActor: itself, a platform admin,
     // or a _system_service job), answered as 403 JOB_ACCESS_DENIED. A key with
@@ -2800,7 +2808,7 @@ export const tools = [
     // since an undeclared actor_id would be latched all the same.
     description:
       "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Stops at the next iteration boundary. " +
-      "The abort acts as your API key's person, as the test's start did (its ran_as), whatever actor_id says: Core stops a job that person may access and refuses any other with 403 JOB_ACCESS_DENIED. A key no person minted acts as the platform's service identity, which may stop only anonymous runs. (Advanced.)",
+      "The abort uses the actor the test's start ran as, whatever actor_id says: Core stops a job that actor may access and refuses any other with 403 JOB_ACCESS_DENIED, so an anonymous abort stops only anonymous runs. " + TEST_RUNS_AS_AT + " (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -2812,7 +2820,7 @@ export const tools = [
         actor_id: {
           type: "string",
           description:
-            "Optional, and NOT who aborts: the abort acts as your API key's person (see the description). What it does is what actor_id does on any call: ateam-mcp keeps it (a test_ thread id excepted) as this session's actor and sends it on later calls, and the chain_id form reads the chain's jobs as that actor before aborting them. The session already holds it after ateam_conversation / ateam_test_skill; in a new session, pass the ran_as of the reply that started the run.",
+            "Optional, and NOT who aborts (see the description). What it does is what actor_id does on any call: ateam-mcp keeps it (a test_ thread id excepted) as this session's actor and sends it on later calls, and the chain_id form reads the chain's jobs as that actor before aborting them. The session already holds it after ateam_conversation / ateam_test_skill; in a new session, pass the ran_as of the reply that started the run.",
         },
         solution_id: {
           type: "string",
@@ -2845,11 +2853,14 @@ export const tools = [
       "Call ONE tool on a running connector DIRECTLY and get its raw result — no skill, no guardrails, no user turn. It proves a tool's plumbing (arguments in, result out). " +
       "It can NOT prove a step that waits for a person — a confirmation, an approval, a value only the user knows: test those with ateam_conversation (ateam_get_spec('skill') → agent_guide.key_concepts.testing_and_runtime.human_step_testing). " +
       TEST_CONNECTOR_NEVER + " " +
-      // CORE review M41x-L3: the key's person is what an API key gets
-      // (Builder #115). A master_key session has no key person: the Builder
-      // passes its own actor through, and with none Core uses its service
-      // identity.
-      "With an API key this call runs as " + KEY_PERSON + "; a master_key session runs as the actor it holds, or the platform's service identity when it holds none. " +
+      // Who a call runs as is the Builder's to say: the pointer. A master_key
+      // session has no key person, which the Builder's page does not say yet
+      // (CORE review M41x-L3), so this tool says it.
+      TEST_RUNS_AS_AT + " " +
+      // DEAD — remove after Builder #158 is on prod (its key_concepts.actor_id
+      // carries the master_key case; CORE: one home). Delete this sentence
+      // together with its ALLOWED entry in test/tests-run-as-key-person.test.mjs.
+      "A master_key session has no key person: this tool runs as the actor_id the session last passed to another tool, or as the platform's service identity when it passed none (a master session's other tests run anonymously). " +
       "If a per-user tool answers NO_INDIVIDUAL_USER here, the call had no person behind it: that is about this test, not a connector bug, and never a reason to change where the connector stores data (ateam_get_spec('connector-multi-user') → storage_decision).",
     inputSchema: {
       type: "object",
@@ -4516,8 +4527,16 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
     // 2026-08-21 (job_aehopl8z): the backend had been restarted mid-run and
     // the agent burned turns on get_spec and spec_search chasing a phantom
     // format problem. The two diagnoses are opposites; pick by the cause.
-    const transport = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|network|aborted/i
-      .test(err.message || "");
+    //
+    // BY THE CAUSE, NOT THE WORDS. f0bb2c2 matched /…|network|aborted/ over
+    // err.message, which carries the response body (formatError), so a 400
+    // whose body said "network" was told to RETRY an unchanged definition,
+    // and a gateway 524 was sent to re-read the spec. Now: isTimeoutError
+    // (a timeout or a gateway, from the status and request()'s own mark);
+    // neverSent (request()'s mark on a refused connection or an unresolvable
+    // host, which it rethrows as a fresh Error with no cause); or the socket's
+    // errno in err.cause for a connection that died before any answer.
+    const transport = isTimeoutError(err) || err?.neverSent === true || typeof err?.cause?.code === "string";
     return {
       ok: false,
       phase: "validation",
@@ -5012,7 +5031,10 @@ export const handlers = {
         "Style block prepended to every skill persona — Phase 1",
       ],
       replace_rule: "REPLACE wins per-field. Any field you write explicitly overrides the platform-generated equivalent. Delete it to opt back into automation.",
-      read_first: "GET /spec/skill → auto_expand block has the full list and a typical_minimal_skill example. GET /spec/solution → same.",
+      // Through the TOOL: the reader is an MCP client and cannot GET anything
+      // (2a07c08 wrote "GET /spec/skill"). search:"auto_expand" returns just that
+      // block, typical_minimal_skill included, from each page.
+      read_first: "ateam_get_spec(topic:\"skill\", search:\"auto_expand\") → the auto_expand block has the full list and a typical_minimal_skill example. ateam_get_spec(topic:\"solution\", search:\"auto_expand\") → same.",
     },
     example_solutions: [
       { name: "Fleet Command Center", description: "Live vehicle tracking, route optimization, safety monitoring, governed execution" },
@@ -5041,9 +5063,9 @@ export const handlers = {
         "3. READ THE REPLY — when chain_done, use result. For full per-job detail / the routed worker's output, call ateam_get_chain(chain_id) ONCE (it returns the entire chain tree: every job + every tool step). Do NOT poll get_chain in a loop — it's heavy.",
         "4. NEXT TURN — a reply or the next message: ateam_conversation(solution_id, message). " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW + " Repeat from step 2.",
       ],
-      who_it_runs_as: TEST_RUNS_AS,
+      who_it_runs_as: TEST_RUNS_AS_AT,
       example: {
-        kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "usr_you", ran_as: "usr_you" }  (a key no person minted: actor_id "test_x", ran_as null)',
+        kickoff: 'ateam_conversation(solution_id: "ada", message: "log 3 glasses of water") → { chain_id: "job_ab12", actor_id: "usr_you", ran_as: "usr_you" }',
         poll: 'ateam_chain_status(chain_id: "job_ab12") → { chain_status: "running", chain_done: false } … repeat … → { chain_status: "completed", chain_done: true, result: "…" }',
         full_tree: 'ateam_get_chain(chain_id: "job_ab12") → { chainJobs: [ {jobId, skill, status, relation, depth} … ], executionSteps: [ … ] }',
         continue: 'ateam_conversation(solution_id: "ada", message: "yes")  (inside the window in steps[3])',
@@ -5569,8 +5591,13 @@ export const handlers = {
   },
 
   // Design-time capability advisor. Proxies to the Builder's /spec/advisor
-  // (LLM over the curated capability catalog). Public endpoint (auth-exempt),
-  // but we forward the session so a base override is honored.
+  // (LLM over the curated capability catalog). SIGNED-IN ONLY: it runs the
+  // tenant's LLM, so the Builder refuses a call with no verified key (401
+  // SIGN_IN_REQUIRED, Builder #81), and the sign-in gate (publicTools.js: every
+  // tool not listed there is refused first) stops a key-less session before
+  // this runs. This comment used to say "Public endpoint (auth-exempt)"
+  // (5f539fa) — the exemption that let a bare X-ADAS-TENANT header bill
+  // another tenant's LLM.
   ateam_design_advisor: async ({ goal, design_state }, sid) => {
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
     // Direct call to the Builder's /spec/advisor. The session's X-ADAS-TENANT
@@ -6497,9 +6524,9 @@ export const handlers = {
             // It said "ateam_conversation(actor_id: …) to continue the thread"
             // (a793b34): actor_id continues nothing (CONVERSATION_CONTINUES).
             continue: "ateam_conversation(solution_id, message). " + CONVERSATION_CONTINUES + " " + REPLY_WINDOW,
-            // The Builder's ran_as rides in ...kickoff above; name it, so an agent
-            // reads WHO the job ran as and not only the thread.
-            who_it_ran_as: RAN_AS_IN_REPLY,
+            // The Builder's ran_as rides in ...kickoff above; point at what it
+            // means, so an agent reads WHO the job ran as and not only the thread.
+            who_it_ran_as: TEST_RUNS_AS_AT,
           }
         : undefined,
     };
@@ -8194,7 +8221,16 @@ const MAX_INDEX_NAMES = 200;
  * Now every check measures the document that will actually be returned.
  */
 function summarizeSpecResult(result) {
-  const how = `GET ${SPEC_PATHS[result.topic] || "/spec/<topic>"} directly, or ateam_spec_search to find the entry you need.`;
+  // Through the TOOL: the reader is an MCP client and cannot GET anything, yet
+  // this said "GET /spec/<topic> directly" (360fb78). The Builder (#67) serves a
+  // page too big for one answer with a `_read_it_in_parts` index — small and
+  // first, so it survives the cut below — and returns any part whole for
+  // search:"<id>".
+  const how = "Call ateam_get_spec again with the same topic (and section, if you gave one) plus search:\"<id>\" — " +
+    (result._read_it_in_parts
+      ? "_read_it_in_parts at the top of this page lists the id of every part, and each part comes back WHOLE."
+      : "an entry id named here returns the entries that match it.") +
+    " ateam_spec_search finds the entry you need when you do not know its id.";
   const sizeOf = (v) => JSON.stringify(v ?? null).length;
   // The pretty-printed length of one top-level entry. Swapping a section's
   // value changes the whole document's length by exactly the difference of
@@ -8442,9 +8478,8 @@ export async function handleToolCall(name, args, sessionId) {
 
     // An actor id comes back here: ateam_conversation/ateam_test_skill return
     // the thread as actor_id, and the docs tell callers to pass it back for
-    // multi-turn. With a person on the key the thread IS that person, the actor
-    // the job ran as (ran_as, testRunsAs.js); a key no person minted gets a
-    // test_ thread key, which api.js drops. Learn it on the way out so the
+    // multi-turn. For a key with a person the thread is that person (ran_as); a
+    // key with none gets a test_ thread key, which api.js drops. Learn it on the way out so the
     // follow-up ateam_get_execution_logs / ateam_get_metrics on that very job
     // is not refused for not knowing who ran it — the single most common dead
     // end when debugging a run.
