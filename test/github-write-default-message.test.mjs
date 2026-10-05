@@ -50,6 +50,9 @@ before(async () => {
         res.end(JSON.stringify(SOURCE));
         return;
       }
+      // The write handler first reads the file (to spot a needless whole-file
+      // rewrite); a read is not a write, so it is not recorded.
+      if (req.method === "GET") { res.end(JSON.stringify({ ok: false })); return; }
       const body = JSON.parse(raw || "{}");
       bodies.push(body);
       res.end(JSON.stringify({ ok: true, mode: body.delete ? "delete" : "full_content", branch: "dev", path: body.path, commit_sha: "abc1234" }));

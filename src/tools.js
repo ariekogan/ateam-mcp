@@ -3178,7 +3178,7 @@ export const tools = [
       "2. SEARCH/REPLACE: provide `search` + `replace` — surgical edit without sending full file (preferred for large files like server.js)\n" +
       "3. DELETE A STRAY: `delete: true` — removes a stray connector file, of either kind: one at the repo root, OUTSIDE connectors/<connector-id>/ (a root server.js, package.json or ui-dist/…), or a copy NESTED under a connector's own prefix (connectors/<connector-id>/connectors/<connector-id>/…). Core runs neither. Only such a file: anything else is refused (DELETE_ONLY_STRAY_CONNECTOR_FILES). It is removed from the working branch (`dev`) only, in one commit — production changes only through ateam_github_promote, like every other edit; git history keeps it. Move what it holds into connectors/<connector-id>/ first if it is still needed — the CONNECTOR_FILE_OUTSIDE_CONNECTOR or CONNECTOR_PATH_NESTED refusal says how the two copies differ and, when the stray is on the branch, names the delete call.\n" +
       "Connector files belong under connectors/<connector-id>/; a write anywhere else is refused (CONNECTOR_FILE_OUTSIDE_CONNECTOR), and so is one to a nested copy, connectors/<connector-id>/connectors/<connector-id>/… (CONNECTOR_PATH_NESTED).\n" +
-      "Always use search/replace for large files (>5KB). Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
+      "Always use search/replace on an existing file. Always read the file first with ateam_github_read to get the exact text to search for.\n\n" +
       "DEFAULTS TO `dev` BRANCH — writes don't touch prod. Use ateam_github_promote to ship dev→main when ready. Pass ref:'main' only for emergency hotfixes. " +
       "After one, run ateam_github_sync_from_main so `dev` has it too. Until `dev` holds the same content, the Builder's copy of that file is `main` content `dev` does not have: " +
       "ateam_redeploy and ateam_patch refuse to deploy the solution — any skill of it, not only that file's — and name the file (they never ship `dev`'s older copy over the hotfix, nor write the hotfix over `dev`), and ateam_build_and_run deploys it from `main`. " +
@@ -3248,8 +3248,9 @@ export const tools = [
     name: "ateam_github_write",
     core: true,
     description:
-      "Write a file to the solution's GitHub repo. Use this to create new connector files or replace existing ones — one file per call. " +
-      "This is the PRIMARY way to write connector code after first deploy. " +
+      "Write a NEW file to the solution's GitHub repo — one file per call. " +
+      "A file that ALREADY EXISTS is changed with ateam_github_patch search/replace (send only the lines that change), never rewritten whole here: streaming a whole file costs minutes. " +
+      "Use it for new connector files. " +
       "Write each file individually under connectors/<connector-id>/ (server.js, package.json, ui-dist/… assets), then call ateam_github_promote() to ship to prod (dev→main), then ateam_build_and_run() to deploy. " +
       "Core deploys connectors/<connector-id>/ only, so a connector file written anywhere else (a root server.js, package.json or ui-dist/) is refused with CONNECTOR_FILE_OUTSIDE_CONNECTOR.\n\n" +
       "DEFAULTS TO `dev` BRANCH.",
@@ -5206,6 +5207,50 @@ async function solutionTriggers(solution_id, skill_id, sid) {
 // test EXECUTE it instead of asserting against this file's source text, which
 // is the difference between proving behaviour and matching a string that a
 // rename would quietly satisfy.
+// ── Needless whole-file rewrites ─────────────────────────────────────────────
+// A whole-file write over an EXISTING file that is mostly unchanged costs the
+// agent minutes of streaming (one builder step: 563s of 948s, 2026-10-05). The
+// write still lands — no work is lost — and the reply carries a hint to use
+// ateam_github_patch search/replace next time. Generic: looks only at the text.
+// Threshold: old file over 3 KB AND at least 80% of its lines unchanged.
+const REWRITE_HINT_MIN_BYTES = 3 * 1024;
+const REWRITE_HINT_MIN_UNCHANGED = 0.8;
+
+async function _existingContentOrNull(solution_id, filePath, wanted, sid) {
+  try {
+    const qs = new URLSearchParams({ path: filePath });
+    if (wanted) qs.set('branch', wanted);
+    const r = await get(apiPath`/deploy/solutions/${solution_id}/github/read?${rawQuery(qs.toString())}`, sid);
+    return typeof r?.content === "string" ? r.content : null;
+  } catch {
+    return null; // new file, or unreadable: no hint, the write goes ahead
+  }
+}
+
+export function rewriteHint(oldText, newText, filePath = "this file") {
+  if (typeof oldText !== "string" || typeof newText !== "string") return null;
+  if (oldText.length < REWRITE_HINT_MIN_BYTES) return null;
+  const counts = new Map();
+  for (const l of oldText.split("\n")) counts.set(l, (counts.get(l) || 0) + 1);
+  const newLines = newText.split("\n");
+  let kept = 0;
+  for (const l of newLines) {
+    const n = counts.get(l);
+    if (n > 0) { kept++; counts.set(l, n - 1); }
+  }
+  const oldLines = oldText.split("\n").length;
+  const unchanged = kept / Math.max(oldLines, newLines.length);
+  if (unchanged < REWRITE_HINT_MIN_UNCHANGED) return null;
+  const changed = Math.max(oldLines, newLines.length) - kept;
+  return `Saved. But only about ${changed} of ${Math.max(oldLines, newLines.length)} lines of ${filePath} changed (${Math.round(unchanged * 100)}% identical). ` +
+    `Next time change an existing file with ateam_github_patch search/replace (send only the lines that change): it is much faster than resending the whole file.`;
+}
+
+function _withRewriteHint(result, before, after, filePath) {
+  const hint = rewriteHint(before, after, filePath);
+  return hint && result && typeof result === "object" ? { ...result, hint } : result;
+}
+
 export const handlers = {
   // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
   //
@@ -5391,8 +5436,8 @@ export const handlers = {
         do_not_skip_promote: BRANCH_WORKFLOW.the_silent_mistake,
       },
       when_to_use_what: {
-        ateam_github_write: `Write/create connector files on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
-        ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
+        ateam_github_write: `Write NEW connector files (not existing ones: change those with ateam_github_patch search/replace) on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
+        ateam_github_patch: "Edit EXISTING files with search/replace, always: send only the lines that change, never the whole file",
         ateam_patch: `Edit skill definitions (intents, tools, policy) — auto-pushes to \`${BRANCH_WORKFLOW.write_branch}\`. Promote when you want it in production.`,
         "ateam_build_and_run()": `Deploy \`${BRANCH_WORKFLOW.deploy_branch}\` (after a promote) — auto-pulls from GitHub if the repo exists. No need to pass mcp_store or github flag.`,
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
@@ -7773,10 +7818,19 @@ export const handlers = {
   ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref, branch, delete: del }, sid) =>
     // `branch` is an alias for `ref` — see ateam_github_read. `delete` (mode 3)
     // is the Builder's to police: it removes only a stray connector file.
-    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch, delete: del }, sid),
+    (async () => {
+      // Whole-file mode only (content, no search): check for a needless rewrite.
+      const whole = typeof content === "string" && search === undefined && !del;
+      const before = whole ? await _existingContentOrNull(solution_id, filePath, ref || branch, sid) : null;
+      const result = await post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch, delete: del }, sid);
+      return whole ? _withRewriteHint(result, before, content, filePath) : result;
+    })(),
 
-  ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) =>
-    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid),
+  ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) => {
+    const before = await _existingContentOrNull(solution_id, filePath, ref, sid);
+    const result = await post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid);
+    return _withRewriteHint(result, before, content, filePath);
+  },
 
   ateam_github_log: async ({ solution_id, limit, ref }, sid) => {
     const qs = new URLSearchParams();
