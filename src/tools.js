@@ -3248,8 +3248,9 @@ export const tools = [
     name: "ateam_github_write",
     core: true,
     description:
-      "Write a file to the solution's GitHub repo. Use this to create new connector files or replace existing ones — one file per call. " +
-      "This is the PRIMARY way to write connector code after first deploy. " +
+      "Write a NEW file to the solution's GitHub repo — one file per call. " +
+      "A file that ALREADY EXISTS is changed with ateam_github_patch search/replace (send only the lines that change), never rewritten whole here: streaming a whole file costs minutes. " +
+      "Use it for new connector files. " +
       "Write each file individually under connectors/<connector-id>/ (server.js, package.json, ui-dist/… assets), then call ateam_github_promote() to ship to prod (dev→main), then ateam_build_and_run() to deploy. " +
       "Core deploys connectors/<connector-id>/ only, so a connector file written anywhere else (a root server.js, package.json or ui-dist/) is refused with CONNECTOR_FILE_OUTSIDE_CONNECTOR.\n\n" +
       "DEFAULTS TO `dev` BRANCH.",
@@ -5391,8 +5392,8 @@ export const handlers = {
         do_not_skip_promote: BRANCH_WORKFLOW.the_silent_mistake,
       },
       when_to_use_what: {
-        ateam_github_write: `Write/create connector files on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
-        ateam_github_patch: "Edit existing files with search/replace (surgical edits to large files)",
+        ateam_github_write: `Write NEW connector files (not existing ones: change those with ateam_github_patch search/replace) on \`${BRANCH_WORKFLOW.write_branch}\` — ONE FILE PER CALL (server.js, package.json, UI assets). Use this after first deploy; ${BRANCH_WORKFLOW.promote_tool} ships it to \`${BRANCH_WORKFLOW.deploy_branch}\`.`,
+        ateam_github_patch: "Edit EXISTING files with search/replace, always: send only the lines that change, never the whole file",
         ateam_patch: `Edit skill definitions (intents, tools, policy) — auto-pushes to \`${BRANCH_WORKFLOW.write_branch}\`. Promote when you want it in production.`,
         "ateam_build_and_run()": `Deploy \`${BRANCH_WORKFLOW.deploy_branch}\` (after a promote) — auto-pulls from GitHub if the repo exists. No need to pass mcp_store or github flag.`,
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
