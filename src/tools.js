@@ -5207,6 +5207,50 @@ async function solutionTriggers(solution_id, skill_id, sid) {
 // test EXECUTE it instead of asserting against this file's source text, which
 // is the difference between proving behaviour and matching a string that a
 // rename would quietly satisfy.
+// ── Needless whole-file rewrites ─────────────────────────────────────────────
+// A whole-file write over an EXISTING file that is mostly unchanged costs the
+// agent minutes of streaming (one builder step: 563s of 948s, 2026-10-05). The
+// write still lands — no work is lost — and the reply carries a hint to use
+// ateam_github_patch search/replace next time. Generic: looks only at the text.
+// Threshold: old file over 3 KB AND at least 80% of its lines unchanged.
+const REWRITE_HINT_MIN_BYTES = 3 * 1024;
+const REWRITE_HINT_MIN_UNCHANGED = 0.8;
+
+async function _existingContentOrNull(solution_id, filePath, wanted, sid) {
+  try {
+    const qs = new URLSearchParams({ path: filePath });
+    if (wanted) qs.set('branch', wanted);
+    const r = await get(apiPath`/deploy/solutions/${solution_id}/github/read?${rawQuery(qs.toString())}`, sid);
+    return typeof r?.content === "string" ? r.content : null;
+  } catch {
+    return null; // new file, or unreadable: no hint, the write goes ahead
+  }
+}
+
+export function rewriteHint(oldText, newText, filePath = "this file") {
+  if (typeof oldText !== "string" || typeof newText !== "string") return null;
+  if (oldText.length < REWRITE_HINT_MIN_BYTES) return null;
+  const counts = new Map();
+  for (const l of oldText.split("\n")) counts.set(l, (counts.get(l) || 0) + 1);
+  const newLines = newText.split("\n");
+  let kept = 0;
+  for (const l of newLines) {
+    const n = counts.get(l);
+    if (n > 0) { kept++; counts.set(l, n - 1); }
+  }
+  const oldLines = oldText.split("\n").length;
+  const unchanged = kept / Math.max(oldLines, newLines.length);
+  if (unchanged < REWRITE_HINT_MIN_UNCHANGED) return null;
+  const changed = Math.max(oldLines, newLines.length) - kept;
+  return `Saved. But only about ${changed} of ${Math.max(oldLines, newLines.length)} lines of ${filePath} changed (${Math.round(unchanged * 100)}% identical). ` +
+    `Next time change an existing file with ateam_github_patch search/replace (send only the lines that change): it is much faster than resending the whole file.`;
+}
+
+function _withRewriteHint(result, before, after, filePath) {
+  const hint = rewriteHint(before, after, filePath);
+  return hint && result && typeof result === "object" ? { ...result, hint } : result;
+}
+
 export const handlers = {
   // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
   //
@@ -7774,10 +7818,19 @@ export const handlers = {
   ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref, branch, delete: del }, sid) =>
     // `branch` is an alias for `ref` — see ateam_github_read. `delete` (mode 3)
     // is the Builder's to police: it removes only a stray connector file.
-    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch, delete: del }, sid),
+    (async () => {
+      // Whole-file mode only (content, no search): check for a needless rewrite.
+      const whole = typeof content === "string" && search === undefined && !del;
+      const before = whole ? await _existingContentOrNull(solution_id, filePath, ref || branch, sid) : null;
+      const result = await post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, search, replace, message, ref: ref || branch, delete: del }, sid);
+      return whole ? _withRewriteHint(result, before, content, filePath) : result;
+    })(),
 
-  ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) =>
-    post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid),
+  ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) => {
+    const before = await _existingContentOrNull(solution_id, filePath, ref, sid);
+    const result = await post(apiPath`/deploy/solutions/${solution_id}/github/patch`, { path: filePath, content, message, ref }, sid);
+    return _withRewriteHint(result, before, content, filePath);
+  },
 
   ateam_github_log: async ({ solution_id, limit, ref }, sid) => {
     const qs = new URLSearchParams();
