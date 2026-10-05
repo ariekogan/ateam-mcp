@@ -22,7 +22,7 @@ test("ateam_github_write is for NEW files and no longer 'the primary way' or 're
 });
 
 test("ateam_github_patch says to always use search/replace for an existing file", () => {
-  assert.match(desc("ateam_github_patch"), /Always use search\/replace for a file that already exists/);
+  assert.match(desc("ateam_github_patch"), /Always use search\/replace on an existing file/);
 });
 
 test("the developer-loop text agrees: write = NEW, patch = existing", async () => {
