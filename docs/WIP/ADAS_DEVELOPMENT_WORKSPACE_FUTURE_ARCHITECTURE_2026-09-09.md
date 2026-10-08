@@ -1,5 +1,13 @@
 # FUTURE ADAS — Development Workspace / GitHub Architecture
 
+> **REPLACED on 2026-10-08 by the single final plan:
+> [ai-dev-assistant `Docs/AGENT_DIRECT_GIT_PLAN.md`](https://github.com/ariekogan/ai-dev-assistant/blob/dev/Docs/AGENT_DIRECT_GIT_PLAN.md).**
+> Kept from this brief: why agents need a computer, not only Git access, and the two
+> source modes. Its open questions are answered there: a job-length workspace for the
+> in-product Builder (Phase B) and a session-length one for outside agents without a
+> computer (Phase C), both on Core's sandbox building blocks. Follow the plan; this file
+> is kept only as history.
+
 **Date:** 2026-09-09  
 **Status:** Architecture project handoff / investigation target  
 **Scope:** Future architecture only. This is not a current Ada Guide, Builder bug-fix, or Core bug-fix work item.

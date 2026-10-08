@@ -1,5 +1,12 @@
 # ADAS Direct GitHub Access — Architecture & Implementation Design
 
+> **REPLACED on 2026-10-08 by the single final plan:
+> [ai-dev-assistant `Docs/AGENT_DIRECT_GIT_PLAN.md`](https://github.com/ariekogan/ai-dev-assistant/blob/dev/Docs/AGENT_DIRECT_GIT_PLAN.md).**
+> Nearly all of this design lives on there as **Phase A**: repo lookup, deploying one
+> exact commit, recording what runs, the `ateam_github_*` tools as fallback, and retiring
+> them only on evidence. The plan adds a read-only data tool for debugging (A6). Follow
+> the plan; this file is kept only as history.
+
 **Date:** 2026-09-07  
 **Status:** Design / implementation target
 
