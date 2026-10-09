@@ -3511,7 +3511,7 @@ export const tools = [
         // the 2026-10-02 release gate's in-app build reported done with its test
         // row still live. The rule is the Builder's TEST_ROW_DONE_RULE
         // (uiPluginRules.js; served in /spec/widgets sections.data_fidelity and
-        // /spec/skill human_step_testing.test_data). This names its two demands
+        // /spec/skill human_step_testing.test_data). This names its one demand
         // and POINTS at it, never a copy. The example values and plugin_id's
         // example are the bias audit's (M7), in their own PR.
         expect: {
@@ -3521,8 +3521,8 @@ export const tools = [
             "{ values: ['<a value from a row you created, exactly as the widget shows it, e.g. 7.2 km, Living room, Pasta carbonara>'] } — each string must appear in visible_text AND must DISAPPEAR when the data " +
             "path is disabled: the probe renders the plugin a second time with every data call answered by an error, and a " +
             "value still rendered then is hardcoded in the plugin, so the probe fails it. Use a value from a record you " +
-            "created, formatted as the widget shows it. Then finish: delete that record through the solution's own delete, " +
-            "and show it gone with the SAME read that showed it after you created it. The whole rule, TEST_ROW_DONE_RULE: " +
+            "created, formatted as the widget shows it. Then finish: delete that record by its id through the solution's own delete. " +
+            "The whole rule, TEST_ROW_DONE_RULE: " +
             DATA_FIDELITY_AT + ".",
           properties: {
             tools: { type: "array", items: { type: "string" } },
