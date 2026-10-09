@@ -3511,7 +3511,7 @@ export const tools = [
         // the 2026-10-02 release gate's in-app build reported done with its test
         // row still live. The rule is the Builder's TEST_ROW_DONE_RULE
         // (uiPluginRules.js; served in /spec/widgets sections.data_fidelity and
-        // /spec/skill human_step_testing.test_data). This names its two demands
+        // /spec/skill human_step_testing.test_data). This names its one demand
         // and POINTS at it, never a copy. The example values and plugin_id's
         // example are the bias audit's (M7), in their own PR.
         expect: {
@@ -3521,8 +3521,8 @@ export const tools = [
             "{ values: ['<a value from a row you created, exactly as the widget shows it, e.g. 7.2 km, Living room, Pasta carbonara>'] } — each string must appear in visible_text AND must DISAPPEAR when the data " +
             "path is disabled: the probe renders the plugin a second time with every data call answered by an error, and a " +
             "value still rendered then is hardcoded in the plugin, so the probe fails it. Use a value from a record you " +
-            "created, formatted as the widget shows it. Then finish: delete that record through the solution's own delete, " +
-            "and show it gone with the SAME read that showed it after you created it. The whole rule, TEST_ROW_DONE_RULE: " +
+            "created, formatted as the widget shows it. Then finish: delete that record by its id through the solution's own delete. " +
+            "The whole rule, TEST_ROW_DONE_RULE: " +
             DATA_FIDELITY_AT + ".",
           properties: {
             tools: { type: "array", items: { type: "string" } },
@@ -6101,7 +6101,8 @@ export const handlers = {
           intents: { supported: [], thresholds: { accept: 0.8, clarify: 0.5, reject: 0.5 }, out_of_domain: { action: "redirect", message: "" } },
           tools: [],
           policy: { access: { requires_roles: [] }, guardrails: { never: [], always: [] }, approvals: [], workflows: [], escalation: { enabled: false, conditions: [], target: "" } },
-          engine: { rv2: { max_iterations: 10, iteration_timeout_ms: 120000, allow_parallel_tools: false, on_max_iterations: "ask_user" }, hlr: { enabled: true, critic: { enabled: true, check_interval: 3, strictness: "medium" }, reflection: { enabled: true, depth: "shallow" }, replanning: { enabled: true, max_replans: 3 } }, autonomy: { level: "supervised" }, finalization_gate: { enabled: true, max_retries: 2 } },
+          // No step limit here: Core owns the one default (same as the Builder's ensureDefaults).
+          engine: { rv2: { iteration_timeout_ms: 120000, allow_parallel_tools: false }, hlr: { enabled: true, critic: { enabled: true, check_interval: 3, strictness: "medium" }, reflection: { enabled: true, depth: "shallow" }, replanning: { enabled: true, max_replans: 3 } }, autonomy: { level: "supervised" }, finalization_gate: { enabled: true, max_retries: 2 } },
           access_policy: { rules: [{ tools: ["*"], effect: "allow" }] },
           grant_mappings: [],
           channels: [],

@@ -25,9 +25,9 @@ const tool = (name) => tools.find((t) => t.name === name);
 const topics = () => tool("ateam_get_spec").inputSchema.properties.topic.description;
 const line = (name, next) => topics().slice(topics().indexOf(`'${name}' =`), topics().indexOf(`'${next}' =`));
 
-test("verify_surface expect: after proving a value, delete the record through the solution's own delete and show it gone with the SAME read", () => {
+test("verify_surface expect: after proving a value, delete the record by its id through the solution's own delete", () => {
   const e = tool("ateam_verify_surface").inputSchema.properties.expect.description;
-  assert.ok(e.includes("Then finish: delete that record through the solution's own delete, and show it gone with the SAME read that showed it after you created it."), e);
+  assert.ok(e.includes("Then finish: delete that record by its id through the solution's own delete."), e);
   // A pointer, not a copy: the rule's name and where it is read whole.
   assert.ok(e.endsWith(`The whole rule, TEST_ROW_DONE_RULE: ${READ_WHOLE}.`), e);
   assert.doesNotMatch(e, /DONE means BOTH|reversing|soft delete/, "a copy of TEST_ROW_DONE_RULE, not a pointer");
