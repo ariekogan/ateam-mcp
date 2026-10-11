@@ -56,7 +56,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // Both are deliberate, which is the point: nothing lands on main BY DEFAULT.
   deploy_side: '`main` is production, and nothing writes it by default. Work reaches it through ateam_github_promote; '
     + 'the only other writes are deliberate ones: ateam_github_rollback, and a write that names ref:"main" (the emergency hotfix path). '
-    + 'ateam_build_and_run(solution_id) deploys `main` and has no ref parameter; a part you pass it inline (solution, skills, mcp_store) deploys as you sent it.',
+    + 'ateam_build_and_run(solution_id) deploys `main`; pass ref (a branch, tag or commit) to deploy exactly that commit of the bound repository instead. A part you pass it inline (solution, skills, mcp_store) deploys as you sent it, and cannot be combined with ref.',
   // It used to say "NOTHING you wrote is running". That is false the moment
   // ateam_patch has run: it deploys from `dev`. The real trap is the next step.
   // build_and_run then deploys `main` over what was just tested.
@@ -78,7 +78,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
     'ateam_github_promote SHIPS: it merges dev → main, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
   // THE ITERATION LOOP, which is NOT the ship loop and kept being mistaken for it.
   //
-  // ateam_build_and_run deploys `main` and has no ref parameter, so reading the
+  // ateam_build_and_run deploys `main` unless it is given a ref, so reading the
   // ship loop alone leaves you believing NOTHING can be tested before it is in
   // production. That is false, and the doc that said it shipped into a tenant
   // repo. ateam_patch and ateam_upload_connector deploy to Core from `dev`

@@ -226,9 +226,19 @@ const WHAT_MAIN_LACKS = Object.freeze({
  * @param {"solution"|"skills"} missing  what `main` does not hold
  * @returns {object}
  */
-function deployBranchHoldsNo(missing) {
+function deployBranchHoldsNo(missing, deployedRef = null) {
   const said = WHAT_MAIN_LACKS[missing];
   if (!said) throw new Error(`deployBranchHoldsNo: unknown part "${missing}"`);
+  // An exact-commit deploy (ref) read THAT commit, not `main`: promoting would
+  // not change what it holds, so the road is another ref.
+  if (deployedRef) {
+    return {
+      ok: false,
+      phase: "pre_check",
+      error: `\`${deployedRef.ref}\` (commit ${deployedRef.commit}) ${said} Nothing was deployed.`,
+      message: "Pick a ref whose commit holds the whole solution (solution.json and skills/<id>/skill.json), e.g. a prod-… tag from ateam_github_list_versions, or deploy `main` by leaving ref out.",
+    };
+  }
   const { deploy_branch: deploy, write_branch: write, promote_tool: promote } = BRANCH_WORKFLOW;
   return {
     ok: false,
@@ -250,8 +260,7 @@ function deployBranchHoldsNo(missing) {
  * @param {object} pull  pull-bundle's answer
  * @returns {object|null}
  */
-function bundleNotRead(pull) {
-  const branch = BRANCH_WORKFLOW.deploy_branch;
+function bundleNotRead(pull, branch = BRANCH_WORKFLOW.deploy_branch) {
   const u = pull.solution_unreadable;
   if (u) {
     const path = u.path || "solution.json";
@@ -669,7 +678,7 @@ async function probeGithubConnected(solution_id, sid) {
  *   `false` means "no repo" — null is unknown and keeps the branch story
  * @param {object}  [p.widgetHealth]
  */
-export function describeDeployBranches({ pulledFromRepo, githubResult, githubConnected, widgetHealth }) {
+export function describeDeployBranches({ pulledFromRepo, githubResult, githubConnected, widgetHealth, deployedRef = null }) {
   const W = BRANCH_WORKFLOW;
   const noRepo = githubConnected === false && !pulledFromRepo && !githubResult?.branch;
   const pushLine = noRepo
@@ -681,6 +690,7 @@ export function describeDeployBranches({ pulledFromRepo, githubResult, githubCon
       // sends them to reconcile a repo that is already correct. The divergence
       // that DOES exist on that path is the one nobody mentions: dev may be
       // ahead of the main we deployed.
+      : githubResult?.skipped && deployedRef ? `— GitHub push skipped (Core was built from commit ${deployedRef.commit.slice(0, 7)} itself)`
       : githubResult?.skipped ? `⚠️ GitHub push skipped${githubResult.reason ? ` (${githubResult.reason})` : ''}`
         + (/from github/i.test(githubResult.reason || '')
             ? ` — Core matches the branch it was built from. If you have unpromoted work on \`${W.write_branch}\`, it is NOT in this deploy: ${W.promote_tool}(solution_id), then deploy again.`
@@ -689,7 +699,16 @@ export function describeDeployBranches({ pulledFromRepo, githubResult, githubCon
       : '⚠️ no GitHub push attempted — Core and GitHub may differ';
   return {
     // WHAT WAS DEPLOYED vs WHERE THE PUSH LANDED are two different facts.
-    ...(pulledFromRepo && { deployed_from_branch: W.deploy_branch }),
+    // An exact-commit deploy names the commit it built, and a branch only when
+    // that is what the caller named: it never claims `main`.
+    ...(pulledFromRepo && !deployedRef && { deployed_from_branch: W.deploy_branch }),
+    ...(deployedRef && {
+      deployed_commit: deployedRef.commit,
+      requested_ref: deployedRef.ref,
+      ...(deployedRef.kind && { ref_kind: deployedRef.kind }),
+      ...(deployedRef.repo && { repo: deployedRef.repo }),
+      ...(deployedRef.kind === 'branch' && { deployed_from_branch: deployedRef.ref }),
+    }),
     ...(githubResult?.branch && { pushed_to_branch: githubResult.branch }),
     _status: [
       '✅ Deployed to Core',
@@ -702,6 +721,8 @@ export function describeDeployBranches({ pulledFromRepo, githubResult, githubCon
     // side effect.
     _next: noRepo
       ? `No GitHub repo is connected, so there are no branches and nothing to promote. ${W.no_git_at_all}`
+      : pulledFromRepo && deployedRef
+        ? `This deployed exactly commit ${deployedRef.commit} (${deployedRef.kind || 'ref'} \`${deployedRef.ref}\`), not necessarily the tip of \`${W.deploy_branch}\`. Work promoted or patched after that commit is NOT in it; ateam_build_and_run(solution_id) with no ref deploys \`${W.deploy_branch}\`.`
       : pulledFromRepo
         ? `This deployed \`${W.deploy_branch}\`. Anything you patched since the last promote is still on \`${W.write_branch}\` and is NOT in this deploy — ${W.promote_tool}(solution_id) merges ${W.write_branch} → ${W.deploy_branch} (dry_run:true to preview), then deploy again.`
         : `This deployed the payload you passed, not a branch. ${W.deploy_side} ${W.promote_tool}(solution_id) (dry_run:true to preview) is what ships \`${W.write_branch}\` there.`,
@@ -1670,8 +1691,9 @@ export const tools = [
       "  2. (Optional) Preview what's about to ship → ateam_github_diff\n" +
       "  3. Ship dev → main → ateam_github_promote (merges + auto-tags `prod-YYYY-MM-DD-NNN`)\n" +
       "  4. Deploy main to Core → ateam_build_and_run\n\n" +
-      "Whatever you do not pass inline comes from the `main` branch — there is no `ref` parameter. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
-      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. After that, edit via ateam_github_patch + promote, then build_and_run. For small changes prefer ateam_patch (faster, incremental). Requires authentication.\n\n" +
+      "Whatever you do not pass inline comes from the `main` branch. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
+      "`ref` (branch, tag or commit SHA; with solution_id only) deploys that exact commit instead; `deployed_commit` names it.\n\n" +
+      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. For small changes prefer ateam_patch (faster, incremental).\n\n" +
       "REFUSED, before anything is saved or deployed (409 UNPUSHED_BUILDER_CHANGE, naming the files), while a solution or skill file it would take from `main` holds a Builder change that no branch has: a Builder save held off `dev` (after a ref:'main' hotfix or a rollback) or one whose push to GitHub failed. Deploying would overwrite it and it would exist nowhere. " +
       "Place it: ateam_redeploy(solution_id) — the whole solution, not one skill — writes the Builder's copy of solution.json and of every skill to `dev` (run ateam_github_sync_from_main first when the file holds a hotfix — ateam_redeploy says so; its not_written_to_github says what it could not place), then ateam_github_promote and deploy again. Or drop it: ateam_github_pull(solution_id, discard_builder_changes:true) replaces the Builder's copy with `dev`'s.",
     inputSchema: {
@@ -1710,6 +1732,10 @@ export const tools = [
         test_skill_id: {
           type: "string",
           description: "Optional: which skill to test (defaults to the first skill).",
+        },
+        ref: {
+          type: "string",
+          description: "Optional: deploy exactly this commit instead of `main`. A branch, a tag (e.g. a prod-… one from ateam_github_list_versions), a commit SHA, or `owner/repo@<ref>`. The Builder resolves it to ONE commit of this workspace's bound repository (another repository or workspace is refused), builds that commit, and the answer's `deployed_commit` names it; a branch that moves later changes nothing. Pass only solution_id with it: no solution, skills, connectors or mcp_store.",
         },
         resume: {
           type: "boolean",
@@ -4624,13 +4650,54 @@ function withServedBy(doc, sid) {
   return { served_by: servedBy(sid), ...doc };
 }
 
+// ─── ateam_build_and_run(ref): deploy ONE EXACT COMMIT ─────────────────
+//
+// `ref` is a branch, a tag or a commit. The Builder resolves it to one commit of
+// the workspace's own bound repository (pull-bundle with pin_commit, then the
+// deploy door, which resolves the SHA again and checks the repository), and the
+// pipeline carries that SHA, never the name, from there on: a branch that moves
+// between the two calls cannot change what is built. Without `ref` none of this
+// runs.
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/** A ref the call cannot use at all, refused before anything is read or sent. */
+function refRefused(code, error, hint) {
+  return { ok: false, phase: "pre_check", code, error, ...(hint && { hint }) };
+}
+
+/**
+ * What a ref deploy may be called with: the commit is the whole payload, so an
+ * inline part would be something else deployed under the commit's name.
+ * @returns {object|null} the refusal, or null when the call is fine
+ */
+function refCallRefused(ref, { solutionArg, skills, connectors, mcp_store }) {
+  if (typeof ref !== "string" || ref.trim() === "") {
+    return refRefused("REF_INVALID", "ref must be a non-empty string: a branch, a tag or a commit SHA.");
+  }
+  const inlineParts = [
+    solutionArg && "solution",
+    Array.isArray(skills) && skills.length > 0 && "skills",
+    Array.isArray(connectors) && connectors.length > 0 && "connectors",
+    mcp_store && "mcp_store",
+  ].filter(Boolean);
+  if (inlineParts.length > 0) {
+    return refRefused(
+      "REF_WITH_INLINE_PARTS",
+      `ref deploys exactly one commit, so it cannot be combined with an inline ${inlineParts.join(", ")}: that part would ship under the commit's name without being in it. Nothing was deployed.`,
+      "Pass only solution_id and ref. To change what a commit holds, write it to the repo (ateam_github_patch), promote or pick the new commit, then deploy that ref.",
+    );
+  }
+  return null;
+}
+
 // ─── Composite: Build & Run — the pipeline ────────────────────────────
 // Validates → Deploys → Health-checks → Optionally tests
 // One call replaces: validate_solution + deploy_solution + get_solution(health)
 //
 // ateam_build_and_run runs it: for as long as it takes on stdio, and within
 // HOSTED_CALL_BUDGET_MS over the hosted transport (buildRunWithinBudget).
-async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, skills, connectors, mcp_store, github, test_message, test_skill_id }, sid) {
+async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, skills, connectors, mcp_store, github, test_message, test_skill_id, ref }, sid) {
   let solution = solutionArg;
   // If only solution_id passed (no full solution), we'll pull from GitHub
   const solutionId = solution?.id || solIdArg;
@@ -4641,6 +4708,17 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // would be a solution no later tool call could address.
   pathSeg(solutionId);
   const phases = [];
+
+  // A2: an exact-commit deploy. `wantedRef` is set only when the caller passed
+  // one; every line below that reads it is skipped otherwise.
+  const refGiven = ref !== undefined && ref !== null && ref !== "";
+  if (refGiven) {
+    const refused = refCallRefused(ref, { solutionArg, skills, connectors, mcp_store });
+    if (refused) return refused;
+  }
+  const wantedRef = refGiven ? ref.trim() : null;
+  // Set once pull-bundle has resolved it: { ref, commit, kind, repo }.
+  let deployedRef = null;
 
   // Guard: reject large mcp_store — agent should use github_patch instead
   if (mcp_store) {
@@ -4677,7 +4755,11 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // that: a caller may pass github:true together with mcp_store, and then
   // nothing is pulled.
   let pulledMcpStore = false;
-  if (!mcp_store) {
+  if (wantedRef) {
+    // The pull below is the authority on the repo (it refuses with its own
+    // code when there is none): a ref deploy has no inline fallback.
+    github = true;
+  } else if (!mcp_store) {
     try {
       const ghStatus = await get(apiPath`/deploy/solutions/${solutionId}/github/status`, sid);
       // repo_url only says a REPO EXISTS. It has never said the repo carries
@@ -4704,7 +4786,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
       // one owner of the branch story.
       const pullResult = await post(
         apiPath`/deploy/solutions/${solutionId}/github/pull-bundle`,
-        { branch: BRANCH_WORKFLOW.deploy_branch },
+        wantedRef === null ? { branch: BRANCH_WORKFLOW.deploy_branch } : { branch: wantedRef, pin_commit: true },
         sid,
         // A read over POST (it bundles the repo, writes nothing): declared
         // idempotent, so one lost answer does not fail the whole deploy.
@@ -4715,8 +4797,21 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
       // (Builder #144, B144R-6). The bundle comes back without it, and saying
       // so in a note while deploying the rest shipped the solution without a
       // skill, without its solution.json, or with a connector short of a file.
-      const notRead = bundleNotRead(pullResult);
+      const notRead = bundleNotRead(pullResult, wantedRef || undefined);
       if (notRead) return notRead;
+      if (wantedRef) {
+        // THE COMMIT, OR NO DEPLOY. A Builder from before ref ignores
+        // pin_commit and answers with the branch's current content and no
+        // commit: deploying that would report a SHA nobody resolved.
+        if (typeof pullResult.commit !== "string" || !FULL_SHA.test(pullResult.commit)) {
+          return refRefused(
+            "REF_NOT_SUPPORTED_BY_BUILDER",
+            "The Builder did not resolve the ref to a commit (it is older than this client's ref support), so what it read cannot be named. Nothing was deployed.",
+            "Deploy without ref (deploys `main`), or ask for the Builder to be updated.",
+          );
+        }
+        deployedRef = { ref: wantedRef, commit: pullResult.commit, kind: pullResult.ref_kind || null, repo: pullResult.repo || null };
+      }
       effectiveMcpStore = pullResult.mcp_store || {};
       pulledMcpStore = true;
       // Use solution from GitHub if not passed inline
@@ -4771,6 +4866,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
       phases.push({
         phase: "github_pull",
         status: "done",
+        ...(deployedRef && { ref: deployedRef.ref, commit: deployedRef.commit }),
         skills_found: pullResult.skills_found || 0,
         connectors_found: pullResult.connectors_found || 0,
         files_loaded: pullResult.files_loaded || 0,
@@ -4789,7 +4885,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // Guard: solution required (either inline or from GitHub)
   if (!solution) {
     // Phase 0 READ an existing repo's deploy branch and it holds no solution.
-    if (pulledMcpStore) return deployBranchHoldsNo("solution");
+    if (pulledMcpStore) return deployBranchHoldsNo("solution", deployedRef);
     return {
       ok: false,
       phase: "pre_check",
@@ -4801,7 +4897,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // Guard: skills required (either inline or from GitHub)
   if (!effectiveSkills?.length) {
     // Same as the solution guard: Phase 0 read an existing repo's deploy branch.
-    if (pulledMcpStore) return deployBranchHoldsNo("skills");
+    if (pulledMcpStore) return deployBranchHoldsNo("skills", deployedRef);
     return {
       ok: false,
       phase: "pre_check",
@@ -4902,6 +4998,9 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
     solution, skills: effectiveSkills, connectors, mcp_store: effectiveMcpStore,
     ...(github && { skip_github_push: true }),
     pulled_from_github: pulledFromGithub,
+    // The commit pull-bundle resolved, not the name the caller typed: the
+    // deploy door resolves and checks THIS sha again and echoes it back.
+    ...(deployedRef && { ref: deployedRef.commit }),
   };
   let deploy;
   try {
@@ -4970,6 +5069,21 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
     };
   }
 
+  // THE DOOR'S OWN WORD for the commit. It resolved the same SHA and checked it
+  // against the bound repository; an answer naming another commit is not a
+  // deploy of the one asked for, whatever it says about success.
+  if (deployedRef && deploy.deployed_commit && deploy.deployed_commit !== deployedRef.commit) {
+    return {
+      ok: false,
+      phase: "deployment",
+      phases,
+      code: "REF_COMMIT_MISMATCH",
+      error: `The deploy door reports commit ${deploy.deployed_commit}, but ${deployedRef.commit} was asked for. Do not trust this deploy.`,
+      requested_commit: deployedRef.commit,
+      reported_commit: deploy.deployed_commit,
+    };
+  }
+
   // Phase 2.5: Restart connectors that have source code (upload triggers stop+start)
   //
   // A SECOND UPLOAD, AND STILL THE ONLY ONE FOR SOME CHANGES. The deploy above
@@ -5018,7 +5132,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
         // iteration, and dev is where iteration lives.
         const uploadResult = await post(
           apiPath`/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
-          { files, ...(pulledMcpStore && { ref: BRANCH_WORKFLOW.deploy_branch }) },
+          { files, ...(pulledMcpStore && { ref: deployedRef ? deployedRef.commit : BRANCH_WORKFLOW.deploy_branch }) },
           sid,
           { timeoutMs: 120_000 },
         );
@@ -5145,7 +5259,7 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
     ? true
     : await probeGithubConnected(solutionId, sid);
   const branches = describeDeployBranches({
-    pulledFromRepo, githubResult: github_result, githubConnected, widgetHealth: widget_health,
+    pulledFromRepo, githubResult: github_result, githubConnected, widgetHealth: widget_health, deployedRef,
   });
 
   return {
@@ -5155,6 +5269,12 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
     // and for a tenant with no repo, neither exists. describeDeployBranches
     // decides all three.
     ...(branches.deployed_from_branch && { deployed_from_branch: branches.deployed_from_branch }),
+    ...(branches.deployed_commit && {
+      deployed_commit: branches.deployed_commit,
+      requested_ref: branches.requested_ref,
+      ...(branches.ref_kind && { ref_kind: branches.ref_kind }),
+      ...(branches.repo && { repo: branches.repo }),
+    }),
     ...(branches.pushed_to_branch && { pushed_to_branch: branches.pushed_to_branch }),
     phases,
     deploy: {
