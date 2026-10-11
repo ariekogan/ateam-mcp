@@ -5130,6 +5130,13 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
         // merge), e.g. one a dev iteration uploaded earlier. An inline
         // mcp_store keeps the default: those files are the caller's
         // iteration, and dev is where iteration lives.
+        //
+        // An exact-commit deploy (ref) sends the commit's SHA here, the one the
+        // deploy door built from: the GitHub half of the merge is then that
+        // commit's own files, never `main`'s or `dev`'s. The same floor applies:
+        // a file already running in Core that the commit lacks is not removed by
+        // this upload. No branch is written for a SHA (a rebuilt bundle stays in
+        // Core only).
         const uploadResult = await post(
           apiPath`/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
           { files, ...(pulledMcpStore && { ref: deployedRef ? deployedRef.commit : BRANCH_WORKFLOW.deploy_branch }) },
