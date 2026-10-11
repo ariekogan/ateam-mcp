@@ -49,3 +49,16 @@ test("a disconnected workspace is passed on as it is", async () => {
   const r = await handleToolCall("ateam_get_repository_binding", { solution_id: "sol-1" }, SID);
   assert.equal(JSON.parse(r.content[0].text).binding.status, "disconnected");
 });
+
+test("its text promises only what Core emits", () => {
+  const d = coreTools.find((t) => t.name === "ateam_get_repository_binding").description;
+  assert.ok(d.length < 800, `description is ${d.length} characters`);
+  assert.match(d, /not recorded yet/);
+  assert.doesNotMatch(d, /private \/ public|private or public/);
+});
+
+test("GitHub switched off is passed on as it is", async () => {
+  reply = { ok: true, enabled: false };
+  const r = await handleToolCall("ateam_get_repository_binding", { solution_id: "sol-1" }, SID);
+  assert.deepEqual(JSON.parse(r.content[0].text), { ok: true, enabled: false });
+});

@@ -3138,10 +3138,9 @@ export const tools = [
     name: "ateam_get_repository_binding",
     core: true,
     description:
-      "Which repository is this solution? Read-only. Returns provider, solution_id, the stable repository_id, owner, repo, web_url, clone_url, " +
-      "default_branch, production_branch (`" + BRANCH_WORKFLOW.deploy_branch + "`, where promoted versions land) and development_branch (`" + BRANCH_WORKFLOW.write_branch + "`), " +
-      "status (linked / provisioning / disconnected / error, with a plain `reason`), visibility (private / public, or `unknown` when it is not recorded) and permissions (null when not recorded). " +
-      "A workspace with no repository answers status `disconnected`: the solution then lives only on the platform. Never returns a credential. Use it before cloning or deploying to know which repo is the bound one.",
+      "Which repository is this solution? Read-only; never returns a credential. Returns the repository id, owner, repo, web and clone URLs, default branch, " +
+      "production_branch (`" + BRANCH_WORKFLOW.deploy_branch + "`) and development_branch (`" + BRANCH_WORKFLOW.write_branch + "`), and a status: linked, provisioning, disconnected or error, with a `reason`. " +
+      "No repository means `disconnected` (the solution lives only on the platform). `visibility` and `permissions` are not recorded yet: expect `unknown` and null.",
     inputSchema: {
       type: "object",
       properties: {
