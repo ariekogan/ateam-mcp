@@ -226,3 +226,48 @@ test("the tool declares ref and no longer says it has none", () => {
   assert.match(tool.description, /`ref` \(branch, tag or commit SHA/);
   assert.match(tool.description, /deployed_commit/);
 });
+
+/** Runs `run`, with the agent-doc writer replaced by a counter: the doc is written to dev. */
+async function runCountingDocWrites(args, opts) {
+  const real = handlers.ateam_write_agent_doc;
+  const writes = [];
+  handlers.ateam_write_agent_doc = async (a) => { writes.push(a); return { ok: true, created: true }; };
+  try {
+    const out = await run(args, opts);
+    return { ...out, writes };
+  } finally { handlers.ateam_write_agent_doc = real; }
+}
+
+test("NO WRITE TO DEV FOR AN OLDER COMMIT: the post-deploy CLAUDE.md write is skipped, and the phase says why", async () => {
+  // The Builder says the commit is not main's tip.
+  const { result, writes } = await runCountingDocWrites({ ref: "prod-2026-10-01-001" }, {
+    door: (b) => ({ ok: true, deployed_commit: b.ref, at_main_tip: false, import: { skills: [], connectors: 1 } }),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result).slice(0, 300));
+  assert.equal(writes.length, 0, "a deploy of an older commit wrote the agent doc to dev");
+  const phase = result.phases.find((p) => p.phase === "agent_doc");
+  assert.equal(phase.status, "skipped");
+  assert.match(phase.reason, /not the tip of main/);
+  assert.equal("agent_doc" in result, false);
+});
+
+test("an answer that does not say it is the tip is not the tip: no write to dev (an older Builder)", async () => {
+  const { writes } = await runCountingDocWrites({ ref: "prod-2026-10-01-001" });
+  assert.equal(writes.length, 0);
+});
+
+test("a ref that IS main's tip is a deploy of main: the doc is written as it is without ref", async () => {
+  const { result, writes } = await runCountingDocWrites({ ref: "main" }, {
+    door: (b) => ({ ok: true, deployed_commit: b.ref, at_main_tip: true, import: { skills: [], connectors: 1 } }),
+  });
+  assert.equal(writes.length, 1);
+  assert.equal(result.phases.find((p) => p.phase === "agent_doc").status, "done");
+});
+
+test("WITHOUT ref the doc is written, as it always was", async () => {
+  const { writes } = await runCountingDocWrites({}, {
+    pull: pulled({ commit: undefined, ref: undefined, ref_kind: undefined, repo: undefined }),
+    door: () => ({ ok: true, import: { skills: [], connectors: 1 } }),
+  });
+  assert.equal(writes.length, 1);
+});

@@ -5261,18 +5261,31 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
   // here is swallowed so it can't break a successful deploy. The tool is
   // idempotent: if the rendered doc is byte-identical to what's in the
   // repo, it returns unchanged:true and writes no commit.
+  //
+  // NOT for a deploy of an older commit. The doc is written to `dev`, and a
+  // deploy of a commit that is not main's tip is a look at the past: it must not
+  // add a commit to dev. Only the Builder knows whether the commit is the tip
+  // (`at_main_tip`); an answer that does not say is treated as "not the tip".
   let agent_doc_result = null;
-  try {
-    agent_doc_result = await handlers.ateam_write_agent_doc({ solution_id: solutionId }, sid);
+  if (deployedRef && deploy.at_main_tip !== true) {
     phases.push({
       phase: "agent_doc",
-      status: agent_doc_result?.unchanged ? "unchanged" : "done",
-      created: agent_doc_result?.created || false,
-      preserved_notes: agent_doc_result?.preserved_notes || false,
+      status: "skipped",
+      reason: `commit ${deployedRef.commit.slice(0, 7)} is not the tip of main: a deploy of an older commit does not write to ${BRANCH_WORKFLOW.write_branch}`,
     });
-  } catch (err) {
-    agent_doc_result = { error: err.message };
-    phases.push({ phase: "agent_doc", status: "skipped", reason: err.message });
+  } else {
+    try {
+      agent_doc_result = await handlers.ateam_write_agent_doc({ solution_id: solutionId }, sid);
+      phases.push({
+        phase: "agent_doc",
+        status: agent_doc_result?.unchanged ? "unchanged" : "done",
+        created: agent_doc_result?.created || false,
+        preserved_notes: agent_doc_result?.preserved_notes || false,
+      });
+    } catch (err) {
+      agent_doc_result = { error: err.message };
+      phases.push({ phase: "agent_doc", status: "skipped", reason: err.message });
+    }
   }
 
   // Phase 6: Widget health — if the solution declares UI plugins, verify each
