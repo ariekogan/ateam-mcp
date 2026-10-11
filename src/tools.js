@@ -3697,8 +3697,6 @@ export const TOOL_SAFETY = Object.freeze({
   ],
   additive: [
     "ateam_auth",
-    // Moves this workspace's builder onto another existing profile; reversible with null.
-    "ateam_set_engine_profile",
     // Intent detection + planning only: Core plans the first step and executes
     // none of the skill's tools (server.js /api/test-pipeline).
     "ateam_test_pipeline",
@@ -3718,6 +3716,8 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_github_push", "ateam_github_pull", "ateam_github_patch", "ateam_github_write",
     "ateam_github_promote", "ateam_github_reconcile", "ateam_github_sync_from_main", "ateam_github_rollback",
     "ateam_sync_all", "ateam_test_abort",
+    // Overwrites this workspace's builder-profile setting (undone by passing null).
+    "ateam_set_engine_profile",
     // RUNS CODE THIS SERVER CANNOT SEE.
     //   a connector tool, by name:            ateam_test_connector
     //   one per connector, "read-shaped" name: ateam_verify (its smoke call)
