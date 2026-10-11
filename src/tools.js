@@ -1687,12 +1687,12 @@ export const tools = [
       `OVER A HOSTED CONNECTION (HTTP), which is cut off after ~100s without an answer, the call answers within ${HOSTED_CALL_BUDGET_MS / 1000}s. A run not finished by then answers status:"running" with a run_id and goes on: nothing is stopped or sent again. ` +
       "ateam_build_and_run(solution_id, resume:true, run_id) then answers with THAT run's result (waiting up to the same time again) and deploys nothing. A local (stdio) connection waits for the whole run.\n\n" +
       "🌳 DEV/PROD WORKFLOW:\n" +
-      "  1. Edit files → ateam_github_patch (writes to `dev` branch by default)\n" +
-      "  2. (Optional) Preview what's about to ship → ateam_github_diff\n" +
+      "  1. Edit files → ateam_github_patch (writes `dev` by default)\n" +
+      "  2. (Optional) Preview → ateam_github_diff\n" +
       "  3. Ship dev → main → ateam_github_promote (merges + auto-tags `prod-YYYY-MM-DD-NNN`)\n" +
       "  4. Deploy main to Core → ateam_build_and_run\n\n" +
       "Whatever you do not pass inline comes from the `main` branch. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
-      "`ref` (branch, tag or commit SHA; with solution_id only) deploys that exact commit instead; `deployed_commit` names it. Recorded: `running_record`.\n\n" +
+      "`ref` (branch, tag or commit SHA; with solution_id only) deploys that exact commit (a Git push); off `main` it warns. `deployed_commit` names it; `running_record` records it.\n\n" +
       "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main. First deploy requires mcp_store. For small changes prefer ateam_patch.\n\n" +
       "REFUSED, before anything is saved or deployed (409 UNPUSHED_BUILDER_CHANGE, naming the files), while a solution or skill file it would take from `main` holds a Builder change that no branch has: a Builder save held off `dev` (after a ref:'main' hotfix or a rollback) or one whose push to GitHub failed. Deploying would overwrite it and it would exist nowhere. " +
       "Place it: ateam_redeploy(solution_id) — the whole solution, not one skill — writes the Builder's copy of solution.json and of every skill to `dev` (run ateam_github_sync_from_main first when the file holds a hotfix — ateam_redeploy says so; its not_written_to_github says what it could not place), then ateam_github_promote and deploy again. Or drop it: ateam_github_pull(solution_id, discard_builder_changes:true) replaces the Builder's copy with `dev`'s.",
@@ -1735,7 +1735,7 @@ export const tools = [
         },
         ref: {
           type: "string",
-          description: "Optional: deploy exactly this commit instead of `main`. A branch, a tag (e.g. a prod-… one from ateam_github_list_versions), a commit SHA, or `owner/repo@<ref>`. The Builder resolves it to ONE commit of this workspace's bound repository (another repository or workspace is refused), builds that commit, and the answer's `deployed_commit` names it; a branch that moves later changes nothing. Pass only solution_id with it: no solution, skills, connectors or mcp_store.",
+          description: "Optional: deploy exactly this commit instead of `main`. A branch, a tag (e.g. a prod-… one from ateam_github_list_versions), a commit SHA, or `owner/repo@<ref>`. The Builder resolves it to ONE commit of this workspace's bound repository (ateam_get_repository_binding names it), builds that commit, and the answer's `deployed_commit` names it; a branch that moves later changes nothing. Pass only solution_id with it: no solution, skills, connectors or mcp_store. " + BRANCH_WORKFLOW.ref_deploy_note,
         },
         resume: {
           type: "boolean",
@@ -3167,7 +3167,8 @@ export const tools = [
     description:
       "Which repository is this solution? Read-only; never returns a credential. Returns the repository id, owner, repo, web and clone URLs, default branch, " +
       "production_branch (`" + BRANCH_WORKFLOW.deploy_branch + "`) and development_branch (`" + BRANCH_WORKFLOW.write_branch + "`), and a status: linked, provisioning, disconnected or error, with a `reason`. " +
-      "No repository means `disconnected` (the solution lives only on the platform). `visibility` and `permissions` are not recorded yet: expect `unknown` and null.",
+      "No repository means `disconnected` (the solution lives only on the platform). `visibility` and `permissions` are not recorded yet: expect `unknown` and null. " +
+      "Can you run Git? Clone `clone_url`, push to `dev`, deploy the commit with ateam_build_and_run(ref). If not, or the clone is refused, use the ateam_github_* tools.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5555,7 +5556,7 @@ export const handlers = {
       { name: "Enterprise Compliance Platform", description: "Approval flows, audit logs, policy enforcement" },
     ],
     developer_loop: {
-      _note: "This is the recommended build loop. 6 steps from definition to running skill with GitHub version control.",
+      _note: "This is the recommended build loop. 6 steps from definition to running skill with GitHub version control. " + BRANCH_WORKFLOW.git_or_tools,
       steps: [
         { step: 1, action: "Learn", description: "Get the spec and study examples", tools: ["ateam_get_spec", "ateam_get_examples"] },
         { step: 2, action: "Build & Run", description: "Define your solution + skills + connector code, then validate, deploy, and health-check in one call. Include mcp_store with connector source code on the first deploy.", tools: ["ateam_build_and_run"] },
@@ -5565,7 +5566,7 @@ export const handlers = {
         // often told it to ship every change.
         { step: 4, action: "Iterate", description: `Change it on \`${BRANCH_WORKFLOW.write_branch}\` and deploy it from \`${BRANCH_WORKFLOW.write_branch}\` to test it, with no promote. Connector code: ateam_github_patch, ONE FILE AT A TIME, then ateam_upload_connector(solution_id, connector_id, github:true). Skill or solution definitions: ateam_patch, which writes \`${BRANCH_WORKFLOW.write_branch}\` and redeploys in the same call. ${BRANCH_WORKFLOW.iterate_note} NEVER re-pass all connector code inline after first deploy.`, tools: ["ateam_github_patch", "ateam_upload_connector", "ateam_patch", "ateam_redeploy"] },
         { step: 5, action: "Test & Debug", description: `Test BEFORE you ship, against what step 4 deployed from \`${BRANCH_WORKFLOW.write_branch}\`. ` + "Chat with the solution via ateam_conversation (auto-routes; the next turn: conversation_flow.steps[3]; who it runs as: conversation_flow.who_it_runs_as). It is ASYNC — see conversation_flow below: kick off → get chain_id → poll ateam_chain_status until chain_done → read the reply. Use ateam_test_pipeline for intent debugging, ateam_test_voice for voice. For a UI plugin, ateam_verify_surface PROVES it renders with data (required evidence for a user-visible fix). Diagnose with logs and metrics. ⚠️ A tool answering ok:true with EMPTY/zero data is not proof it worked — that is the signature of a connector swallowing its own error. Read ateam_connector_logs before you believe a green result.", tools: ["ateam_conversation", "ateam_chain_status", "ateam_get_chain", "ateam_test_pipeline", "ateam_test_skill", "ateam_test_voice", "ateam_verify_surface", "ateam_connector_logs", "ateam_get_execution_logs", "ateam_get_metrics"] },
-        { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} Then ateam_build_and_run(solution_id) deploys \`${BRANCH_WORKFLOW.deploy_branch}\`. ${BRANCH_WORKFLOW.the_silent_mistake} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_github_list_versions", "ateam_github_rollback"] },
+        { step: 6, action: "Ship", description: `${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} Then ateam_build_and_run(solution_id) deploys \`${BRANCH_WORKFLOW.deploy_branch}\`; with ref it deploys one exact commit instead. ${BRANCH_WORKFLOW.the_silent_mistake} ${BRANCH_WORKFLOW.rollback}`, tools: [BRANCH_WORKFLOW.promote_tool, "ateam_build_and_run", "ateam_github_list_versions", "ateam_github_rollback"] },
       ],
     },
     conversation_flow: {
@@ -5594,6 +5595,8 @@ export const handlers = {
       promote_is_a_ship: BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint,
       rollback: BRANCH_WORKFLOW.rollback,
       no_git_at_all: BRANCH_WORKFLOW.no_git_at_all,
+      with_git_or_without: BRANCH_WORKFLOW.git_or_tools,
+      deploy_an_exact_commit: BRANCH_WORKFLOW.ref_deploy_note,
     },
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
@@ -5602,7 +5605,7 @@ export const handlers = {
       { id: "security", question: "What environment constraints?", type: "enum", options: ["sandbox", "controlled", "regulated"] },
     ],
     github_tools: {
-      _note: `Version control for solutions. ${BRANCH_WORKFLOW.one_line}. See \`branching\` above — it is the same definition.`,
+      _note: `Version control for solutions. ${BRANCH_WORKFLOW.one_line}. See \`branching\` above — it is the same definition. These tools are the fallback for an agent that cannot run Git. ${BRANCH_WORKFLOW.git_or_tools}`,
       tools: ["ateam_github_push", "ateam_github_pull", "ateam_github_status", "ateam_github_read", "ateam_github_patch", "ateam_github_log", "ateam_github_promote", "ateam_github_rollback", "ateam_github_list_versions"],
       repo_structure: {
         "solution.json": "Full solution definition",
@@ -5631,6 +5634,7 @@ export const handlers = {
         ateam_github_patch: "Edit EXISTING files with search/replace, always: send only the lines that change, never the whole file",
         ateam_patch: `Edit skill definitions (intents, tools, policy) — auto-pushes to \`${BRANCH_WORKFLOW.write_branch}\`. Promote when you want it in production.`,
         "ateam_build_and_run()": `Deploy \`${BRANCH_WORKFLOW.deploy_branch}\` (after a promote) — auto-pulls from GitHub if the repo exists. No need to pass mcp_store or github flag.`,
+        "ateam_build_and_run(ref)": BRANCH_WORKFLOW.ref_deploy_note,
         "ateam_build_and_run(mcp_store)": "FIRST DEPLOY ONLY — creates the GitHub repo. Never use mcp_store again after first deploy.",
         ateam_github_promote: `SHIP ${BRANCH_WORKFLOW.write_branch} → ${BRANCH_WORKFLOW.deploy_branch}. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint} dry_run:true previews what would ship.`,
         ateam_github_rollback: BRANCH_WORKFLOW.rollback,

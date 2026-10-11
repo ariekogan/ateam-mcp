@@ -138,6 +138,12 @@ ${BRANCH_WORKFLOW.write_side}
 
 ${BRANCH_WORKFLOW.deploy_side}
 
+### With Git, or without
+
+${BRANCH_WORKFLOW.git_or_tools}
+
+${BRANCH_WORKFLOW.ref_deploy_note}
+
 ### Iterate — deploy and TEST without promoting
 
 ${BRANCH_WORKFLOW.iterate_note}
@@ -160,6 +166,8 @@ Editing files by hand instead of via the tools:
 ${cloneStep(solId)}
 # edit, then:
 git commit && git push origin ${BRANCH_WORKFLOW.write_branch}
+# then deploy exactly that commit to test it (ref is the SHA you pushed):
+ateam_build_and_run(solution_id: "${solId}", ref: "<sha>")
 \`\`\`
 
 **${BRANCH_WORKFLOW.the_silent_mistake}**
@@ -299,6 +307,10 @@ function buildToolTable() {
     "| Run a skill end-to-end | `ateam_test_skill(solution_id, skill_id, message)` |",
     "| Call one connector tool in isolation | `ateam_test_connector(solution_id, connector_id, tool, args)` |",
     "| Inspect deployed state | `ateam_get_solution(solution_id, view: \"definition\"|\"skills\"|\"health\")` |",
+    "| Which repository is this (for `git clone`) | `ateam_get_repository_binding(solution_id)` |",
+    "| Deploy one exact commit (e.g. one you pushed to `dev` with Git) | `ateam_build_and_run(solution_id, ref: \"<sha>\")` — warns when the commit is not part of `main`, pushes nothing |",
+    "| Which commit is running | `ateam_get_solution(solution_id, view: \"status\"|\"health\")` — the `running` field |",
+    "| Read what is stored (read-only, may be switched off) | `ateam_inspect_data` |",
     "| Read file from repo | `ateam_github_read(solution_id, path)` |",
     // promote SHIPS (dev → main); calling it "Checkpoint" is the framing
     // BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint retires.
