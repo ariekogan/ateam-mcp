@@ -3135,6 +3135,25 @@ export const tools = [
     },
   },
   {
+    name: "ateam_get_repository_binding",
+    core: true,
+    description:
+      "Which repository is this solution? Read-only. Returns provider, solution_id, the stable repository_id, owner, repo, web_url, clone_url, " +
+      "default_branch, production_branch (`" + BRANCH_WORKFLOW.deploy_branch + "`, where promoted versions land) and development_branch (`" + BRANCH_WORKFLOW.write_branch + "`), " +
+      "status (linked / provisioning / disconnected / error, with a plain `reason`), visibility (private / public, or `unknown` when it is not recorded) and permissions (null when not recorded). " +
+      "A workspace with no repository answers status `disconnected`: the solution then lives only on the platform. Never returns a credential. Use it before cloning or deploying to know which repo is the bound one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+      },
+      required: ["solution_id"],
+    },
+  },
+  {
     name: "ateam_github_read",
     core: true,
     description:
@@ -3670,7 +3689,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_get_widget_catalog",
     "ateam_get_connector_source", "ateam_get_deployed_connector_source",
     "ateam_diff", "ateam_verify_consistency",
-    "ateam_github_status", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
+    "ateam_github_status", "ateam_get_repository_binding", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
   ],
   additive: [
     "ateam_auth",
@@ -7797,6 +7816,15 @@ export const handlers = {
 
   ateam_github_status: async ({ solution_id }, sid) =>
     get(apiPath`/deploy/solutions/${solution_id}/github/status`, sid),
+
+  // Core owns the pin and the stable repo id; the Builder relays Core's binding.
+  // The two branch names are the platform flow's (BRANCH_WORKFLOW), added here
+  // so there is one place that names them.
+  ateam_get_repository_binding: async ({ solution_id }, sid) => {
+    const r = await get(apiPath`/deploy/solutions/${solution_id}/github/binding`, sid);
+    if (!r?.binding) return r;
+    return { ...r, binding: { ...r.binding, production_branch: BRANCH_WORKFLOW.deploy_branch, development_branch: BRANCH_WORKFLOW.write_branch } };
+  },
 
   ateam_github_read: async ({ solution_id, path: filePath, ref, branch }, sid) => {
     // `branch` is an ALIAS for `ref`. The underlying API param is literally
