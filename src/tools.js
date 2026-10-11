@@ -1692,8 +1692,8 @@ export const tools = [
       "  3. Ship dev → main → ateam_github_promote (merges + auto-tags `prod-YYYY-MM-DD-NNN`)\n" +
       "  4. Deploy main to Core → ateam_build_and_run\n\n" +
       "Whatever you do not pass inline comes from the `main` branch. A part you DO pass (solution, skills, mcp_store) deploys as you sent it. To TEST dev work without shipping it, use the iterate tools (ateam_patch, ateam_upload_connector, ateam_redeploy), which deploy from `dev`; to SHIP it, promote first.\n\n" +
-      "`ref` (branch, tag or commit SHA; with solution_id only) deploys that exact commit instead; `deployed_commit` names it.\n\n" +
-      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main automatically. First deploy requires mcp_store. For small changes prefer ateam_patch (faster, incremental).\n\n" +
+      "`ref` (branch, tag or commit SHA; with solution_id only) deploys that exact commit instead; `deployed_commit` names it. Recorded: `running_record`.\n\n" +
+      "AUTO-DETECTS GitHub repo: if you omit mcp_store and a repo exists, connector code is pulled from main. First deploy requires mcp_store. For small changes prefer ateam_patch.\n\n" +
       "REFUSED, before anything is saved or deployed (409 UNPUSHED_BUILDER_CHANGE, naming the files), while a solution or skill file it would take from `main` holds a Builder change that no branch has: a Builder save held off `dev` (after a ref:'main' hotfix or a rollback) or one whose push to GitHub failed. Deploying would overwrite it and it would exist nowhere. " +
       "Place it: ateam_redeploy(solution_id) — the whole solution, not one skill — writes the Builder's copy of solution.json and of every skill to `dev` (run ateam_github_sync_from_main first when the file holds a hotfix — ateam_redeploy says so; its not_written_to_github says what it could not place), then ateam_github_promote and deploy again. Or drop it: ateam_github_pull(solution_id, discard_builder_changes:true) replaces the Builder's copy with `dev`'s.",
     inputSchema: {
@@ -2030,7 +2030,8 @@ export const tools = [
     name: "ateam_get_solution",
     core: true,
     description:
-      "Read solution state — definition, skills, health, status, or export. Use this to inspect deployed solutions.",
+      "Read solution state — definition, skills, health, status, or export. Use this to inspect deployed solutions. " +
+      "status and health also answer `running`: the commit last deployed, the ref asked, who deployed it and when, and whether the solution was deployed to again since (known:false and the reason when no deploy was recorded).",
     inputSchema: {
       type: "object",
       properties: {
@@ -5310,6 +5311,9 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
       ...(branches.ref_kind && { ref_kind: branches.ref_kind }),
       ...(branches.repo && { repo: branches.repo }),
     }),
+    // The Builder's deploy record for THIS deploy: { recorded: true, commit, result, deployed_by, at } or
+    // { recorded: false, reason }. Relayed as the door said it; a missing one is not made up.
+    ...(deploy.running_record && { running_record: deploy.running_record }),
     ...(branches.pushed_to_branch && { pushed_to_branch: branches.pushed_to_branch }),
     phases,
     deploy: {
