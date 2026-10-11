@@ -3906,6 +3906,8 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_sync_all", "ateam_test_abort",
     // exec runs any command in the workspace; save makes the work live; close may save.
     "ateam_workspace_exec", "ateam_workspace_save", "ateam_workspace_close",
+    // Overwrites this workspace's builder-profile setting (undone by passing null).
+    "ateam_set_engine_profile",
     // RUNS CODE THIS SERVER CANNOT SEE.
     //   a connector tool, by name:            ateam_test_connector
     //   one per connector, "read-shaped" name: ateam_verify (its smoke call)
