@@ -75,3 +75,11 @@ test("a refusal reaches the caller with its code and what to do", async () => {
   const r2 = await run({ method: "find", collection: "secrets" });
   assert.equal(r2.out.code, "COLLECTION_HIDDEN");
 });
+
+test("the tool text and schema describe paging (hasMore, nextSkip, skip for aggregate)", () => {
+  const t = tools.find((x) => x.name === "ateam_inspect_data");
+  assert.match(t.description, /hasMore/);
+  assert.match(t.description, /nextSkip/);
+  assert.match(t.inputSchema.properties.skip.description, /aggregate/);
+  assert.match(t.inputSchema.properties.skip.description, /nextSkip/);
+});
