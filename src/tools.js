@@ -7822,6 +7822,7 @@ export const handlers = {
   ateam_get_repository_binding: async ({ solution_id }, sid) => {
     const r = await get(apiPath`/deploy/solutions/${solution_id}/github/binding`, sid);
     if (!r?.binding) return r;
+    if (!r.binding.repo) return r; // no repository, so no branches to name
     return { ...r, binding: { ...r.binding, production_branch: BRANCH_WORKFLOW.deploy_branch, development_branch: BRANCH_WORKFLOW.write_branch } };
   },
 

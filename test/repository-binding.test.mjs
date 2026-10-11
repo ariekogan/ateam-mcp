@@ -34,7 +34,7 @@ test("it is a listed core tool and a read", () => {
 
 test("it asks the Builder's binding route and adds the two branch names", async () => {
   asked.length = 0;
-  reply = { ok: true, binding: { provider: "github", solution_id: "sol-1", repository_id: 4242, status: "linked", visibility: "unknown" } };
+  reply = { ok: true, binding: { provider: "github", solution_id: "sol-1", repository_id: 4242, repo: "r", status: "linked", visibility: "unknown" } };
   const r = await handleToolCall("ateam_get_repository_binding", { solution_id: "sol-1" }, SID);
   assert.ok(!r.isError, r.content?.[0]?.text);
   assert.deepEqual(asked, ["/deploy/solutions/sol-1/github/binding"]);
@@ -47,7 +47,9 @@ test("it asks the Builder's binding route and adds the two branch names", async 
 test("a disconnected workspace is passed on as it is", async () => {
   reply = { ok: true, binding: { provider: "github", status: "disconnected", reason: "No GitHub repository is linked (local mode).", repo: null } };
   const r = await handleToolCall("ateam_get_repository_binding", { solution_id: "sol-1" }, SID);
-  assert.equal(JSON.parse(r.content[0].text).binding.status, "disconnected");
+  const b = JSON.parse(r.content[0].text).binding;
+  assert.equal(b.status, "disconnected");
+  assert.equal("production_branch" in b, false, "no repository, so no branch names");
 });
 
 test("its text promises only what Core emits", () => {
