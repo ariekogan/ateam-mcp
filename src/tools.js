@@ -9,7 +9,7 @@
  */
 
 import {
-  get, post, patch, del,
+  get, post, patch, del, put,
   setSessionCredentials, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
@@ -3080,6 +3080,29 @@ export const tools = [
     },
   },
   {
+    name: "ateam_list_engine_profiles",
+    core: false,
+    description:
+      "List the model profiles the platform defines (each with its CLASSIFY/FAST/NORMAL/DEEP models) and which one this workspace's builder runs on: the system's choice, this workspace's own override, and the effective one. Use before ateam_set_engine_profile. (Advanced.)",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "ateam_set_engine_profile",
+    core: false,
+    description:
+      "Choose the model profile this workspace's BUILDER runs on (skills that declare engine.profile \"builder\"), for this workspace only; other workspaces are untouched. Pass builder_profile as a profile name from ateam_list_engine_profiles, or null to go back to the system's choice. Takes effect on the next run. Does not create or edit profiles. (Advanced.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        builder_profile: {
+          type: ["string", "null"],
+          description: "A profile name from ateam_list_engine_profiles, or null to clear this workspace's override.",
+        },
+      },
+      required: ["builder_profile"],
+    },
+  },
+  {
     name: "ateam_get_metrics",
     monitoring: { safe: true, cost: "cheap", latency_ms_p95: 1000, output: "bounded", poll_interval_s: 30 },
     // Advertised (was core:false): these are the RUNTIME DIAGNOSTICS a caller needs
@@ -3852,7 +3875,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_list_solutions", "ateam_get_solution", "ateam_show_skill_minimal", "ateam_show_solution_minimal",
     "ateam_get_progress", "ateam_get_lessons",
     "ateam_get_execution_logs", "ateam_test_status", "ateam_get_chain", "ateam_chain_status",
-    "ateam_get_metrics", "ateam_connector_logs", "ateam_inspect_data", "ateam_status_all",
+    "ateam_get_metrics", "ateam_connector_logs", "ateam_inspect_data", "ateam_status_all", "ateam_list_engine_profiles",
     "ateam_get_widget_catalog",
     "ateam_get_connector_source", "ateam_get_deployed_connector_source",
     "ateam_diff", "ateam_verify_consistency",
@@ -7960,6 +7983,15 @@ export const handlers = {
       commit_url: res?.commit_url || null,
       commit_sha: res?.commit_sha || null,
     };
+  },
+
+  ateam_list_engine_profiles: async (_args, sid) => get("/deploy/engine-profiles", sid),
+
+  ateam_set_engine_profile: async ({ builder_profile }, sid) => {
+    if (builder_profile !== null && typeof builder_profile !== "string") {
+      return { ok: false, error: "builder_profile must be a profile name (see ateam_list_engine_profiles) or null." };
+    }
+    return put("/deploy/engine-profiles", { builderProfile: builder_profile }, sid);
   },
 
   ateam_get_metrics: async ({ solution_id, job_id, chain_id, skill_id }, sid) => {

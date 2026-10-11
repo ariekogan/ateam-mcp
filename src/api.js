@@ -1790,6 +1790,10 @@ export async function post(path, body, sessionId, opts) {
   return request("POST", path, body, sessionId, opts);
 }
 
+export async function put(path, body, sessionId, opts) {
+  return request("PUT", path, body, sessionId, opts);
+}
+
 export async function patch(path, body, sessionId, opts) {
   return request("PATCH", path, body, sessionId, opts);
 }
