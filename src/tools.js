@@ -9,7 +9,7 @@
  */
 
 import {
-  get, post, patch, del,
+  get, post, patch, del, put,
   setSessionCredentials, isExplicitlyAuthenticated,
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
@@ -2991,6 +2991,27 @@ export const tools = [
     },
   },
   {
+    name: "ateam_list_engine_profiles",
+    core: false,
+    description:
+      "List the model profiles the platform defines (each with its CLASSIFY/FAST/NORMAL/DEEP models) and, for each of the three roles (live, shadow, builder), the platform's choice, this workspace's own override and the effective one. Use before ateam_set_engine_profile. (Advanced.)",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "ateam_set_engine_profile",
+    core: false,
+    description:
+      "Choose the model profiles this workspace runs on, for this workspace only (other workspaces are untouched). There are three roles: live (ordinary traffic), shadow (shadow comparison replays) and builder (skills that declare engine.profile \"builder\"). Pass a profile name from ateam_list_engine_profiles for each role you want; a role you leave out (or pass as null) uses the platform's default. This REPLACES the whole choice every time, so state all the roles you want. Takes effect on the next run. Does not create or edit profiles. (Advanced.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        live_profile: { type: ["string", "null"], description: "Profile for live traffic, or omit/null for the platform default." },
+        shadow_profile: { type: ["string", "null"], description: "Profile for shadow replays, or omit/null for the platform default." },
+        builder_profile: { type: ["string", "null"], description: "Profile for the builder role, or omit/null for the platform default." },
+      },
+    },
+  },
+  {
     name: "ateam_get_metrics",
     monitoring: { safe: true, cost: "cheap", latency_ms_p95: 1000, output: "bounded", poll_interval_s: 30 },
     // Advertised (was core:false): these are the RUNTIME DIAGNOSTICS a caller needs
@@ -3666,7 +3687,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_list_solutions", "ateam_get_solution", "ateam_show_skill_minimal", "ateam_show_solution_minimal",
     "ateam_get_progress", "ateam_get_lessons",
     "ateam_get_execution_logs", "ateam_test_status", "ateam_get_chain", "ateam_chain_status",
-    "ateam_get_metrics", "ateam_connector_logs", "ateam_status_all",
+    "ateam_get_metrics", "ateam_connector_logs", "ateam_status_all", "ateam_list_engine_profiles",
     "ateam_get_widget_catalog",
     "ateam_get_connector_source", "ateam_get_deployed_connector_source",
     "ateam_diff", "ateam_verify_consistency",
@@ -3693,6 +3714,8 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_github_push", "ateam_github_pull", "ateam_github_patch", "ateam_github_write",
     "ateam_github_promote", "ateam_github_reconcile", "ateam_github_sync_from_main", "ateam_github_rollback",
     "ateam_sync_all", "ateam_test_abort",
+    // Overwrites this workspace's builder-profile setting (undone by passing null).
+    "ateam_set_engine_profile",
     // RUNS CODE THIS SERVER CANNOT SEE.
     //   a connector tool, by name:            ateam_test_connector
     //   one per connector, "read-shaped" name: ateam_verify (its smoke call)
@@ -7562,6 +7585,20 @@ export const handlers = {
       commit_url: res?.commit_url || null,
       commit_sha: res?.commit_sha || null,
     };
+  },
+
+  ateam_list_engine_profiles: async (_args, sid) => get("/deploy/engine-profiles", sid),
+
+  ateam_set_engine_profile: async ({ live_profile, shadow_profile, builder_profile } = {}, sid) => {
+    const roles = { activeProfile: live_profile, shadowProfile: shadow_profile, builderProfile: builder_profile };
+    for (const [k, v] of Object.entries(roles)) {
+      if (v !== undefined && v !== null && typeof v !== "string") {
+        return { ok: false, error: `${k} must be a profile name (see ateam_list_engine_profiles) or null.` };
+      }
+    }
+    // A role left out is sent as null: the platform default, never "whatever was set last time".
+    const body = Object.fromEntries(Object.entries(roles).map(([k, v]) => [k, v ?? null]));
+    return put("/deploy/engine-profiles", body, sid);
   },
 
   ateam_get_metrics: async ({ solution_id, job_id, chain_id, skill_id }, sid) => {
