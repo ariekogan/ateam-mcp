@@ -3802,6 +3802,69 @@ for (const t of tools) {
   if (cls) t.annotations = { ...SAFETY_HINTS[cls] };
 }
 
+// ─── AGENT EXPOSURE — who may SEE a tool (git plan B4) ──────────────
+//
+// The in-product Solution Builder, when it works in a Core development
+// workspace (dev.* tools, a real Git checkout), must not also edit source
+// behind Git's back through these tools: its own checkout would silently
+// diverge from what they write. Outside agents (Claude Code, Codex, a chat
+// client) keep the whole server.
+//
+//   all           — every agent sees it. The default for anything that
+//                   reads, validates, deploys, tests or reports status.
+//   outside_only  — writes SOURCE (solution/skill/connector files, repo
+//                   files). Core hides it from a job running in a dev
+//                   workspace; nobody else is affected.
+//
+// ONE TABLE, like TOOL_SAFETY, and TOTAL: test/tool-exposure.test.mjs fails
+// when a tool is in neither list or in both, so a NEW source-writing tool
+// cannot ship without someone deciding. Each tool carries the answer in its
+// own `_meta.agent_exposure` (the MCP convention for custom tool fields), which
+// is what Core copies (runtimeMap.js) and filters on (sys.callAiWithTools.js).
+// A tool that writes source belongs in outside_only; when unsure, put it there
+// only if the Builder has a dev.* equivalent, otherwise leave it visible.
+export const AGENT_EXPOSURE = Object.freeze({
+  outside_only: [
+    "ateam_github_write", "ateam_github_patch", "ateam_patch", "ateam_upload_connector",
+  ],
+  all: [
+    "ateam_bootstrap", "ateam_auth", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
+    "ateam_design_advisor", "ateam_spec_search",
+    "ateam_validate_skill", "ateam_validate_solution",
+    "ateam_list_solutions", "ateam_get_solution", "ateam_show_skill_minimal", "ateam_show_solution_minimal",
+    "ateam_get_progress", "ateam_get_lessons", "ateam_log_progress", "ateam_log_lesson",
+    "ateam_get_execution_logs", "ateam_test_status", "ateam_get_chain", "ateam_chain_status",
+    "ateam_get_metrics", "ateam_connector_logs", "ateam_inspect_data", "ateam_status_all",
+    "ateam_get_widget_catalog",
+    "ateam_get_connector_source", "ateam_get_deployed_connector_source", "ateam_recover_connector_source",
+    "ateam_diff", "ateam_verify_consistency", "ateam_verify", "ateam_verify_surface",
+    // Deploy (an exact commit or the Builder's current files) and tests.
+    "ateam_build_and_run", "ateam_redeploy", "ateam_update",
+    "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector",
+    "ateam_test_skill", "ateam_test_notification", "ateam_conversation", "ateam_test_pipeline",
+    "ateam_test_voice", "ateam_test_connector", "ateam_test_abort", "ateam_solution_chat",
+    // Scaffolding and deletes: the Builder has no dev.* equivalent for them yet.
+    "ateam_create_connector", "ateam_create_plugin", "ateam_upload_connector_files", "ateam_write_agent_doc",
+    "ateam_delete_solution", "ateam_delete_skill", "ateam_delete_connector",
+    // Repo state and the branch flow (read, push/pull/promote): not file edits.
+    "ateam_github_status", "ateam_get_repository_binding", "ateam_github_read", "ateam_github_log",
+    "ateam_github_diff", "ateam_github_list_versions",
+    "ateam_github_push", "ateam_github_pull", "ateam_github_promote", "ateam_github_reconcile",
+    "ateam_github_sync_from_main", "ateam_github_rollback",
+    "ateam_sync_all",
+  ],
+});
+/** tool name -> "all" | "outside_only". Exported for tests. */
+export const toolExposure = new Map(
+  Object.entries(AGENT_EXPOSURE).flatMap(([cls, names]) => names.map((n) => [n, cls])),
+);
+// An unlabeled tool carries no _meta.agent_exposure; test/tool-exposure.test.mjs
+// refuses to let that ship.
+for (const t of tools) {
+  const exposure = toolExposure.get(t.name);
+  if (exposure) t._meta = { ...(t._meta || {}), agent_exposure: exposure };
+}
+
 /**
  * Core tools — shown in MCP tools/list.
  * Advanced tools are still callable but not advertised.
