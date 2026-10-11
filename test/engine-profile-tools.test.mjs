@@ -31,18 +31,21 @@ test("list is a GET of the door", async () => {
   assert.deepEqual(seen.map((s) => [s.method, s.url]), [["GET", "/deploy/engine-profiles"]]);
 });
 
-test("set sends a PUT with builderProfile, and null clears", async () => {
+test("set sends all three roles; one left out goes as null (the platform default)", async () => {
   seen.length = 0;
-  await handleToolCall("ateam_set_engine_profile", { builder_profile: "strong" }, SID);
-  await handleToolCall("ateam_set_engine_profile", { builder_profile: null }, SID);
-  assert.deepEqual(seen.map((s) => [s.method, s.body]), [["PUT", { builderProfile: "strong" }], ["PUT", { builderProfile: null }]]);
+  await handleToolCall("ateam_set_engine_profile", { live_profile: "a", builder_profile: "strong" }, SID);
+  await handleToolCall("ateam_set_engine_profile", {}, SID);
+  assert.deepEqual(seen.map((s) => [s.method, s.body]), [
+    ["PUT", { activeProfile: "a", shadowProfile: null, builderProfile: "strong" }],
+    ["PUT", { activeProfile: null, shadowProfile: null, builderProfile: null }],
+  ]);
 });
 
 test("a non-string profile is refused before anything is sent", async () => {
   seen.length = 0;
-  const r = await handleToolCall("ateam_set_engine_profile", { builder_profile: 5 }, SID);
+  const r = await handleToolCall("ateam_set_engine_profile", { shadow_profile: 5 }, SID);
   assert.equal(seen.length, 0);
-  assert.match(r.content[0].text, /profile name/);
+  assert.match(r.content[0].text, /shadowProfile must be a profile name/);
 });
 
 test("both tools are registered and safety-classed", () => {

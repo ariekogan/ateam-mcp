@@ -3083,23 +3083,21 @@ export const tools = [
     name: "ateam_list_engine_profiles",
     core: false,
     description:
-      "List the model profiles the platform defines (each with its CLASSIFY/FAST/NORMAL/DEEP models) and which one this workspace's builder runs on: the system's choice, this workspace's own override, and the effective one. Use before ateam_set_engine_profile. (Advanced.)",
+      "List the model profiles the platform defines (each with its CLASSIFY/FAST/NORMAL/DEEP models) and, for each of the three roles (live, shadow, builder), the platform's choice, this workspace's own override and the effective one. Use before ateam_set_engine_profile. (Advanced.)",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "ateam_set_engine_profile",
     core: false,
     description:
-      "Choose the model profile this workspace's BUILDER runs on (skills that declare engine.profile \"builder\"), for this workspace only; other workspaces are untouched. Pass builder_profile as a profile name from ateam_list_engine_profiles, or null to go back to the system's choice. Takes effect on the next run. Does not create or edit profiles. (Advanced.)",
+      "Choose the model profiles this workspace runs on, for this workspace only (other workspaces are untouched). There are three roles: live (ordinary traffic), shadow (shadow comparison replays) and builder (skills that declare engine.profile \"builder\"). Pass a profile name from ateam_list_engine_profiles for each role you want; a role you leave out (or pass as null) uses the platform's default. This REPLACES the whole choice every time, so state all the roles you want. Takes effect on the next run. Does not create or edit profiles. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
-        builder_profile: {
-          type: ["string", "null"],
-          description: "A profile name from ateam_list_engine_profiles, or null to clear this workspace's override.",
-        },
+        live_profile: { type: ["string", "null"], description: "Profile for live traffic, or omit/null for the platform default." },
+        shadow_profile: { type: ["string", "null"], description: "Profile for shadow replays, or omit/null for the platform default." },
+        builder_profile: { type: ["string", "null"], description: "Profile for the builder role, or omit/null for the platform default." },
       },
-      required: ["builder_profile"],
     },
   },
   {
@@ -7989,11 +7987,16 @@ export const handlers = {
 
   ateam_list_engine_profiles: async (_args, sid) => get("/deploy/engine-profiles", sid),
 
-  ateam_set_engine_profile: async ({ builder_profile }, sid) => {
-    if (builder_profile !== null && typeof builder_profile !== "string") {
-      return { ok: false, error: "builder_profile must be a profile name (see ateam_list_engine_profiles) or null." };
+  ateam_set_engine_profile: async ({ live_profile, shadow_profile, builder_profile } = {}, sid) => {
+    const roles = { activeProfile: live_profile, shadowProfile: shadow_profile, builderProfile: builder_profile };
+    for (const [k, v] of Object.entries(roles)) {
+      if (v !== undefined && v !== null && typeof v !== "string") {
+        return { ok: false, error: `${k} must be a profile name (see ateam_list_engine_profiles) or null.` };
+      }
     }
-    return put("/deploy/engine-profiles", { builderProfile: builder_profile }, sid);
+    // A role left out is sent as null: the platform default, never "whatever was set last time".
+    const body = Object.fromEntries(Object.entries(roles).map(([k, v]) => [k, v ?? null]));
+    return put("/deploy/engine-profiles", body, sid);
   },
 
   ateam_get_metrics: async ({ solution_id, job_id, chain_id, skill_id }, sid) => {
