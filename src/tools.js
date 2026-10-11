@@ -3826,6 +3826,8 @@ for (const t of tools) {
 export const AGENT_EXPOSURE = Object.freeze({
   outside_only: [
     "ateam_github_write", "ateam_github_patch", "ateam_patch", "ateam_upload_connector",
+    // Raw connector upload: a dev-workspace job changes connector code through git and deploys the exact commit.
+    "ateam_upload_connector_files",
   ],
   all: [
     "ateam_bootstrap", "ateam_auth", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
@@ -3844,7 +3846,7 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_test_skill", "ateam_test_notification", "ateam_conversation", "ateam_test_pipeline",
     "ateam_test_voice", "ateam_test_connector", "ateam_test_abort", "ateam_solution_chat",
     // Scaffolding and deletes: the Builder has no dev.* equivalent for them yet.
-    "ateam_create_connector", "ateam_create_plugin", "ateam_upload_connector_files", "ateam_write_agent_doc",
+    "ateam_create_connector", "ateam_create_plugin", "ateam_write_agent_doc",
     "ateam_delete_solution", "ateam_delete_skill", "ateam_delete_connector",
     // Repo state and the branch flow (read, push/pull/promote): not file edits.
     "ateam_github_status", "ateam_get_repository_binding", "ateam_github_read", "ateam_github_log",
