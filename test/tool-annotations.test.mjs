@@ -180,6 +180,7 @@ const ADD_BY_POST = [
   [/^\/deploy\/solutions\/[^/]+\/lessons$/, "appends a lesson"],
   [/^\/deploy\/solutions\/[^/]+\/skills\/[^/]+\/test-pipeline$/, "plans one step; executes none of the skill's tools"],
   [/^\/api\/internal\/notify-user$/, "a new [TEST] notification to an existing actor"],
+  [/^\/workspace\/(open|status)$/, "opens or reports on the one workspace; no file of the solution changes"],
 ];
 const isAdditive = (r) =>
   isRead(r) || (!r.outside && r.method === "POST" && ADD_BY_POST.some(([rx]) => rx.test(r.path)));
@@ -193,6 +194,7 @@ const ARGS = {
   // exists for, and no longer than one round trip.
   message: "m", messages: ["m"], actor_id: "a", content: "c", step: "st", status: "built",
   tool: "c.list_items", error: "e", api_key: KEY, wait: false, wait_for: "never",
+  workspace_id: "ws-0123456789ab", command: "true",
   plugin_name: "p", files: [{ path: "server.js", content: "x" }], confirm: true, confirm_solution_id: "s",
 };
 
@@ -202,7 +204,9 @@ const ARGS = {
 async function drive(name) {
   setSessionCredentials(SID, { apiKey: KEY, apiUrl: origin, explicit: true });
   requests.length = 0;
-  await handleToolCall(name, { ...ARGS }, SID);
+  // The workspace tools refuse an actor_id or chain_id (the key says who is calling); every other argument is ignored or used.
+  const { actor_id: _actor, chain_id: _chain, ...withoutActor } = ARGS;
+  await handleToolCall(name, name.startsWith("ateam_workspace_") ? withoutActor : { ...ARGS }, SID);
   return [...requests];
 }
 

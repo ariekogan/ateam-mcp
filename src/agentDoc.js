@@ -131,6 +131,8 @@ ${BRANCH_WORKFLOW.one_line}
 
 ${BRANCH_WORKFLOW.write_side}
 
+${BRANCH_WORKFLOW.workspace}
+
 > \`${BRANCH_WORKFLOW.write_branch}\` may not exist yet in this repo. The platform creates it from
 > \`${BRANCH_WORKFLOW.deploy_branch}\` on the first write it makes (ensureDevBranch), so a repo that has
 > only ever been written to by hand will not have it until then — hence the
@@ -293,6 +295,7 @@ function buildToolTable() {
     // deploys `main`, so that sequence is refused (MAIN_BEHIND_DEV) or ships
     // without the edit. Test from dev; ship with promote.
     "| Edit connector source code | `ateam_github_patch` / `ateam_github_write`, then `ateam_upload_connector(solution_id, connector_id, github:true)` to test it from `dev` |",
+    "| Many files or real commands, with no shell of your own | `ateam_workspace_open`, `ateam_workspace_exec`, then `ateam_workspace_save` to make it live; `ateam_workspace_close` when done |",
     "| Edit skill definition (persona, tools, intents, guardrails) | `ateam_patch(target:\"skill\", skill_id, updates)` |",
     "| Edit solution definition | `ateam_patch(target:\"solution\", updates)` |",
     "| First deploy (with `mcp_store`) / deploy `main` after a promote | `ateam_build_and_run(solution_id)` |",
