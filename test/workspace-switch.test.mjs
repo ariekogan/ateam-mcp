@@ -79,10 +79,30 @@ test("switching moves the session, is kept per bearer, and asks with the home ke
   await run("ws-switch", "ateam_list_workspaces");
   assert.equal(asked("/auth/workspaces")[0].key, HOME);
   // …and the way back works the same.
-  api.swtch = (b) => (b.tenant === "home" ? [200, { ok: true, tenant: "home", same: false, name: "Home", env: "prod", api_key: HOME }] : [403, { ok: false, code: "NOT_YOUR_WORKSPACE", error: "no" }]);
+  // The real API answers the key's OWN workspace with same:true and no key.
+  api.swtch = (b) => (b.tenant === "home" ? [200, { ok: true, tenant: "home", same: true }] : [403, { ok: false, code: "NOT_YOUR_WORKSPACE", error: "no" }]);
   const back = await run("ws-switch", "ateam_switch_workspace", { tenant: "home" });
   assert.equal(back.ok, true, JSON.stringify(back));
   assert.equal(getCredentials("ws-switch").tenant, "home");
+  assert.equal(getCredentials("ws-switch").apiKey, HOME);
+  assert.equal(getAuthOverride(HOME)?.tenant, "home", "the way back is kept per bearer too");
+});
+
+test("after a switch away, the list says where THIS session is, and asking for home again moves back", async () => {
+  hosted("ws-current");
+  await run("ws-current", "ateam_switch_workspace", { tenant: "beta" });
+  // Real API: `current` is the home key's workspace, and home answers same:true.
+  api.swtch = (b) => (b.tenant === "home" ? [200, { ok: true, tenant: "home", same: true }] : [403, { ok: false, code: "NOT_YOUR_WORKSPACE", error: "no" }]);
+  const list = await run("ws-current", "ateam_list_workspaces");
+  assert.equal(list.current, "beta");
+  assert.deepEqual(list.workspaces.filter((w) => w.current).map((w) => w.tenant), ["beta"]);
+  const back = await run("ws-current", "ateam_switch_workspace", { tenant: "home" });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.match(back.message, /Switched to workspace "home"/);
+  assert.equal(getCredentials("ws-current").tenant, "home");
+  // Asking for where it already is changes nothing.
+  const again = await run("ws-current", "ateam_switch_workspace", { tenant: "home" });
+  assert.match(again.message, /Already on workspace "home"/);
 });
 
 test("a workspace the API refuses changes nothing and says why; no key in the result", async () => {

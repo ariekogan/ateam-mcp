@@ -5914,10 +5914,13 @@ export const handlers = {
     const r = await workspaceRequest(sessionId, { path: "/auth/workspaces" }).catch((err) => ({ error: err }));
     if (r.error) return workspaceUnreachable(r.error);
     if (r.status !== 200 || !r.json?.ok) return workspaceRefusal(r);
+    // The API's `current` is the HOME key's workspace. After a switch the session
+    // is somewhere else, and "current" is where THIS session is.
+    const here = (() => { try { return getCredentials(sessionId)?.tenant || null; } catch { return null; } })() || r.json.current;
     return {
       ok: true,
-      current: r.json.current,
-      workspaces: r.json.workspaces,
+      current: here,
+      workspaces: Array.isArray(r.json.workspaces) ? r.json.workspaces.map((w) => ({ ...w, current: w.tenant === here })) : r.json.workspaces,
       next: "To move, call ateam_switch_workspace({ tenant: \"<id>\" }) with one of these ids, after telling the user which workspace it is.",
     };
   },
@@ -5931,14 +5934,21 @@ export const handlers = {
       .catch((err) => ({ error: err }));
     if (r.error) return workspaceUnreachable(r.error);
     if (r.status !== 200 || !r.json?.ok) return workspaceRefusal(r);
-    if (r.json.same) return { ok: true, tenant: r.json.tenant, message: `Already on workspace "${r.json.tenant}". Nothing changed.` };
-    if (typeof r.json.api_key !== "string" || !r.json.tenant) {
+    const from = getCredentials(sessionId)?.tenant || null;
+    // `same` from the API means the key's OWN (home) workspace; it hands no key
+    // over, because the home key is that workspace's key. It says nothing about
+    // where this session is NOW: after a switch away, "same" is the way back.
+    let nextKey = r.json.api_key;
+    if (r.json.same) {
+      if (from === r.json.tenant) return { ok: true, tenant: r.json.tenant, message: `Already on workspace "${r.json.tenant}". Nothing changed.` };
+      nextKey = workspaceHomeKey(sessionId);
+    }
+    if (typeof nextKey !== "string" || !r.json.tenant) {
       return { ok: false, code: "WORKSPACE_ANSWER_INCOMPLETE", message: "The API answered without a key for that workspace. Nothing changed." };
     }
     // The same sign-in a key given to ateam_auth gets (verified against the
     // API, kept per bearer), with the session's home key left as it was.
-    const from = getCredentials(sessionId)?.tenant || null;
-    const out = await handlers.ateam_auth({ api_key: r.json.api_key, tenant: r.json.tenant }, sessionId, { viaSwitch: true });
+    const out = await handlers.ateam_auth({ api_key: nextKey, tenant: r.json.tenant }, sessionId, { viaSwitch: true });
     if (!out?.ok) { const { tenant: _stays, ...failed } = out || {}; return { ...failed, ok: false, message: `Switching to "${r.json.tenant}" failed, and this session stays on ${from ? `"${from}"` : "where it was"}: ${out?.message || "the new workspace's key was refused"}` }; }
     return { ...out, switched_from: from, switched_to: r.json.tenant, ...(r.json.note ? { note: r.json.note } : {}), message: `Switched to workspace "${r.json.tenant}"${from ? ` (was "${from}")` : ""}. ${out.message || ""}`.trim() };
   },
