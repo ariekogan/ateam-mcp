@@ -4612,6 +4612,19 @@ export function _chainIsFinished(resp, isTerminal) {
   return !!(jobs && jobs.length > 0 && jobs.every(j => isTerminal(j.status)));
 }
 
+// What a chain wait last saw, in one small object, for its timeout reply.
+function lastSeen(resp) {
+  const c = resp?.data || resp || {};
+  const jobs = chainTreeOf(resp).jobs;
+  return {
+    top_level_keys: Object.keys(resp || {}).slice(0, 8),
+    chain_status: c.status ?? null,
+    active_job_ids: Array.isArray(c.activeJobIds) ? c.activeJobIds.length : null,
+    job_statuses: Array.isArray(jobs) ? jobs.map(j => j?.status ?? null).slice(0, 10) : null,
+    exit_test_says_finished: _chainIsFinished(resp, (st) => ["done", "completed", "error", "failed", "aborted"].includes(st)),
+  };
+}
+
 // A docs answer says which environment gave it (MGAP-A15; api.js servedBy).
 // FIRST, so it is the first thing read, before any section a long answer is
 // cut at. The Builder's docs are JSON objects; anything else passes unchanged.
@@ -6989,6 +7002,9 @@ export const handlers = {
     return {
       ok: false,
       error: `Chain wait timed out after ${totalTimeoutMs}ms — some jobs are still running. Increase chain_timeout_ms or poll manually via ateam_test_status(include_chain:true).`,
+      // What the last poll showed and what the exit test made of it: a timeout that says "still running"
+      // while the chain says done is then explained in the reply itself (two live misses on dev, 2026-10-12).
+      last_seen: lastSeen(lastChain),
       job_id: rootJobId,
       wait_for: "chain",
       chain: lastChain,
