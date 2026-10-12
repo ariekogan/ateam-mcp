@@ -117,6 +117,11 @@ export function connectSteps({ audience = "hosted", environment = null } = {}) {
   ].join("\n");
 }
 
+/** The way that needs no sign-out: the user's own workspaces, by the key's person. */
+const SWITCH_IN_PLACE =
+  "FIRST call ateam_list_workspaces: it lists the workspaces the key's person owns or administers, and " +
+  "ateam_switch_workspace({ tenant: \"<id>\" }) moves this session to one of them with no sign-out and no key. ";
+
 /** How to move this session to another workspace (or sign in again after a key is rotated). */
 export function switchSteps({ audience = "hosted", environment = null, masterMode = false } = {}) {
   if (audience === "platform") return PLATFORM_CHOOSES;
@@ -126,15 +131,15 @@ export function switchSteps({ audience = "hosted", environment = null, masterMod
   }
   if (audience === "stdio") {
     return [
-      "HOW TO SWITCH WORKSPACE — this local process (stdio) is on the workspace of the key ateam_auth was given:",
+      `HOW TO SWITCH WORKSPACE — ${SWITCH_IN_PLACE}Only when the workspace is not listed: this local process (stdio) is on the workspace of the key ateam_auth was given:`,
       "1. Call ateam_auth(api_key) with the other workspace's key, read from a local file outside the chat as when " +
         `signing in. ${whereTheKeyIs(environment)}`,
       "2. Call ateam_bootstrap: its `session` field names the workspace this session is on now.",
     ].join("\n");
   }
   return [
-    "HOW TO SWITCH WORKSPACE — the key given on the A-Team sign-in page IS the workspace, so switching means signing in " +
-      "again with the other workspace's key (the same steps sign in again after a key is rotated):",
+    `HOW TO SWITCH WORKSPACE — ${SWITCH_IN_PLACE}Only when the workspace is not listed: the key given on the A-Team sign-in page IS the workspace, ` +
+      "so switching means signing in again with the other workspace's key (the same steps sign in again after a key is rotated):",
     `1. Open ${CLAUDE_CONNECTORS_URL} (Claude Desktop: Customize in the sidebar, then Connectors), select the A-Team ` +
       "connector and click Disconnect. Claude Code: /mcp, select the server, Clear authentication.",
     "2. Click Connect on it (Claude Code: authenticate). The A-Team sign-in page opens in the browser: paste the key of " +

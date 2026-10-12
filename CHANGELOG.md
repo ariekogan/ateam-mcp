@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Switch workspace without signing out
+
+- `ateam_list_workspaces` and `ateam_switch_workspace`: the workspaces the key's
+  person owns or administers, and a move to one of them inside the same
+  connection. The platform checks the person's current membership (a key that no
+  person minted, a demoted person, a member-only or deleted workspace are all
+  refused by name); the key of the new workspace never appears in the chat.
+  Needs a Core and Builder that carry `/auth/workspaces`. Sign-out and sign-in
+  with the other workspace's key remains for a workspace that is not listed.
+
 ## 0.4.115 — 2026-10-04
 
 Released together with Builder builder-prod-20261004-001, whose served texts these tools point at.

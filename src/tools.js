@@ -14,6 +14,7 @@ import {
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
   servedBy, KEY_ENVIRONMENTS, signInContext, sessionEnvironment, beginSignIn, shownBase, envApiKeyPresent,
+  workspaceHomeKey, workspaceRequest,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -1508,6 +1509,31 @@ export const tools = [
             "Leave it out for a current A-Team key: the key already names its API, and a url that contradicts it is refused.",
         },
       },
+    },
+  },
+  {
+    name: "ateam_list_workspaces",
+    core: true,
+    description:
+      "List the workspaces the person behind this session's key owns or administers, so the user can move between them without signing out and in again. Marks the one this session is on. " +
+      "The answer comes from the platform's own records of that person's memberships, never from anything typed in the chat. Empty or refused when the key was not minted by a person (a service key), or the person is no longer an owner or admin of this workspace. " +
+      "Then call ateam_switch_workspace with one of the listed ids. Not available to the A-Team app's own builder sessions, which choose the workspace themselves.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "ateam_switch_workspace",
+    core: true,
+    description:
+      "Move this session to another of the user's workspaces (see ateam_list_workspaces) without disconnecting the connector or pasting any key. " +
+      "Only a workspace the key's person owns or administers right now, in the same environment, is accepted; anything else is refused and nothing changes. " +
+      "Name the workspace to the user before changing anything in it. Every tool afterwards acts on the new workspace, and ateam_bootstrap's `session` field names it. " +
+      "No key ever appears in the chat. To go back, switch to the first workspace again.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", description: "The workspace id exactly as ateam_list_workspaces shows it." },
+      },
+      required: ["tenant"],
     },
   },
   {
@@ -3671,9 +3697,10 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_get_connector_source", "ateam_get_deployed_connector_source",
     "ateam_diff", "ateam_verify_consistency",
     "ateam_github_status", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
+    "ateam_list_workspaces",
   ],
   additive: [
-    "ateam_auth",
+    "ateam_auth", "ateam_switch_workspace",
     // Intent detection + planning only: Core plans the first step and executes
     // none of the skill's tools (server.js /api/test-pipeline).
     "ateam_test_pipeline",
@@ -5251,6 +5278,33 @@ function _withRewriteHint(result, before, after, filePath) {
   return hint && result && typeof result === "object" ? { ...result, hint } : result;
 }
 
+/** Why a session has no home key to ask "which workspaces are mine?" with. */
+function noHomeKeyRefusal(sessionId) {
+  const ctx = signInContext(sessionId);
+  if (ctx.audience === "platform") {
+    return { ok: false, code: "PLATFORM_SESSION", message: "This session belongs to the A-Team app's own builder: the app chooses the workspace (the one the user has open). Switch it in the app." };
+  }
+  if (ctx.masterMode) {
+    return { ok: false, code: "MASTER_SESSION", message: "This session holds a master key, which is nobody's person. Pass `tenant: \"<workspace>\"` on a workspace tool instead." };
+  }
+  return { ok: false, code: "NOT_SIGNED_IN_WITH_A_KEY", message: `This session is not signed in with a workspace key, so there is no person to list workspaces for.\n${connectSteps(ctx)}` };
+}
+
+/** The API answered no (or something unexpected): its words and code, nothing invented. */
+function workspaceRefusal(r) {
+  const j = r.json && typeof r.json === "object" ? r.json : {};
+  const why = j.error || j.message || `HTTP ${r.status}`;
+  const code = j.code || (r.status === 401 ? "KEY_REFUSED" : "REFUSED");
+  const hint = code === "NOT_YOUR_WORKSPACE"
+    ? " Call ateam_list_workspaces for the ones this key's person can switch to. If it is another person's workspace, they sign in with its key themselves."
+    : "";
+  return { ok: false, code, message: `${why}${hint} Nothing changed: this session is still on the workspace it was on.` };
+}
+
+function workspaceUnreachable(err) {
+  return { ok: false, code: "WORKSPACE_API_UNREACHABLE", message: `Could not reach the API to ask about workspaces (${err?.message || err}). Nothing changed.` };
+}
+
 export const handlers = {
   // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
   //
@@ -5630,7 +5684,7 @@ export const handlers = {
     },
   }),
 
-  ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId) => {
+  ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId, { viaSwitch = false } = {}) => {
     // A platform session (ateam-proxy-mcp's one session for every tenant) is
     // signed in AFRESH: nothing the previous tenant left — url, master key,
     // actor, context — reaches this one. First, before anything below reads the
@@ -5748,7 +5802,7 @@ export const handlers = {
     // A refused key leaves the session exactly as it was (api.js beginSignIn):
     // it stayed on the refused key, and its opening said it was signed in.
     const refused = beginSignIn(sessionId);
-    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true });
+    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true, viaSwitch });
     // Verify the key works by listing solutions
     try {
       const result = await get("/deploy/solutions", sessionId);
@@ -5848,6 +5902,45 @@ export const handlers = {
         message: `Authentication failed: ${upstream} (tried ${base ? shownBase(base) : "the default base"}).`,
       };
     }
+  },
+
+  // ── Switching workspace inside one connection ──────────────────────────
+  // The platform decides (Core utils/keyWorkspaces.js, through the validator's
+  // /auth/workspaces): from the session's HOME key it knows the person, and
+  // from that person's current owner/admin memberships it answers. Nothing
+  // here picks a workspace, falls back to one, or reads a key from the chat.
+  ateam_list_workspaces: async (_args, sessionId) => {
+    if (!workspaceHomeKey(sessionId)) return noHomeKeyRefusal(sessionId);
+    const r = await workspaceRequest(sessionId, { path: "/auth/workspaces" }).catch((err) => ({ error: err }));
+    if (r.error) return workspaceUnreachable(r.error);
+    if (r.status !== 200 || !r.json?.ok) return workspaceRefusal(r);
+    return {
+      ok: true,
+      current: r.json.current,
+      workspaces: r.json.workspaces,
+      next: "To move, call ateam_switch_workspace({ tenant: \"<id>\" }) with one of these ids, after telling the user which workspace it is.",
+    };
+  },
+
+  ateam_switch_workspace: async ({ tenant }, sessionId) => {
+    if (typeof tenant !== "string" || !tenant.trim()) {
+      return { ok: false, code: "WORKSPACE_REQUIRED", message: "Name the workspace to switch to (ateam_list_workspaces shows the ids). There is no default workspace." };
+    }
+    if (!workspaceHomeKey(sessionId)) return noHomeKeyRefusal(sessionId);
+    const r = await workspaceRequest(sessionId, { method: "POST", path: "/auth/workspaces/switch", body: { tenant: tenant.trim() } })
+      .catch((err) => ({ error: err }));
+    if (r.error) return workspaceUnreachable(r.error);
+    if (r.status !== 200 || !r.json?.ok) return workspaceRefusal(r);
+    if (r.json.same) return { ok: true, tenant: r.json.tenant, message: `Already on workspace "${r.json.tenant}". Nothing changed.` };
+    if (typeof r.json.api_key !== "string" || !r.json.tenant) {
+      return { ok: false, code: "WORKSPACE_ANSWER_INCOMPLETE", message: "The API answered without a key for that workspace. Nothing changed." };
+    }
+    // The same sign-in a key given to ateam_auth gets (verified against the
+    // API, kept per bearer), with the session's home key left as it was.
+    const from = getCredentials(sessionId)?.tenant || null;
+    const out = await handlers.ateam_auth({ api_key: r.json.api_key, tenant: r.json.tenant }, sessionId, { viaSwitch: true });
+    if (!out?.ok) return { ...out, message: `Switching to "${r.json.tenant}" failed, and this session stays on ${from ? `"${from}"` : "where it was"}: ${out?.message || "the new workspace's key was refused"}` };
+    return { ...out, switched_from: from, switched_to: r.json.tenant, message: `Switched to workspace "${r.json.tenant}"${from ? ` (was "${from}")` : ""}. ${out.message || ""}`.trim() };
   },
 
   ateam_get_spec: async ({ topic, section, search }, sid) => {

@@ -180,6 +180,8 @@ const ADD_BY_POST = [
   [/^\/deploy\/solutions\/[^/]+\/lessons$/, "appends a lesson"],
   [/^\/deploy\/solutions\/[^/]+\/skills\/[^/]+\/test-pipeline$/, "plans one step; executes none of the skill's tools"],
   [/^\/api\/internal\/notify-user$/, "a new [TEST] notification to an existing actor"],
+  // Asks the API whether the key's person may move to a workspace, and is given that workspace's own key: nothing is written.
+  [/^\/auth\/workspaces\/switch$/, "the key of another workspace the key's person administers"],
 ];
 const isAdditive = (r) =>
   isRead(r) || (!r.outside && r.method === "POST" && ADD_BY_POST.some(([rx]) => rx.test(r.path)));
@@ -193,7 +195,7 @@ const ARGS = {
   // exists for, and no longer than one round trip.
   message: "m", messages: ["m"], actor_id: "a", content: "c", step: "st", status: "built",
   tool: "c.list_items", error: "e", api_key: KEY, wait: false, wait_for: "never",
-  plugin_name: "p", files: [{ path: "server.js", content: "x" }], confirm: true, confirm_solution_id: "s",
+  tenant: "t2", plugin_name: "p", files: [{ path: "server.js", content: "x" }], confirm: true, confirm_solution_id: "s",
 };
 
 // Drives one tool through the real dispatcher; returns what it asked for. The

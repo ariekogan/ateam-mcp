@@ -457,7 +457,7 @@ export function servedBy(sessionId) {
  * Set explicit=true when called from ateam_auth (not from seedCredentials).
  * Set masterKey for cross-tenant master mode (uses shared secret auth).
  */
-export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, explicit = false, masterKey = null }) {
+export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, explicit = false, masterKey = null, viaSwitch = false }) {
   let resolvedTenant = tenant;
   if (!resolvedTenant && apiKey) {
     const parsed = parseApiKey(apiKey);
@@ -506,6 +506,11 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     apiUrl: apiUrl || existing?.apiUrl || null,
     authExplicit: explicit || existing?.authExplicit || false,
     masterKey: masterKey || existing?.masterKey || null,
+    // The key the session was signed in with ON PURPOSE, kept across a switch to
+    // another workspace (ateam_switch_workspace): it is the key whose person is
+    // asked "which workspaces are yours?", so listing still works after the
+    // session moved to a workspace whose own key names someone else.
+    homeKey: viaSwitch ? (existing?.homeKey || null) : (explicit && apiKey ? apiKey : existing?.homeKey || null),
     lastActivity: Date.now(),
     // The context (active solution, last skill, bound actor) carries over: on a
     // bearer's session this is one user signing in again (4dc8f17). It stays
@@ -945,6 +950,45 @@ export function clearAuthOverride(bearerToken) {
   if (bearerToken && authOverrides.delete(bearerToken)) {
     console.log("[Auth] Override dropped for bearer: a new sign-in on the A-Team page");
   }
+}
+
+/**
+ * THE KEY THAT SAYS WHICH PERSON IS ASKING, for listing and switching
+ * workspaces: the hosted connector's bearer (the key typed on the sign-in page,
+ * which a switch never replaces), or — for a local process — the key it was
+ * signed in with on purpose. null for a platform session (the A-Team app picks
+ * the workspace itself, and one session serves every tenant: a "last key" there
+ * would list the wrong person's workspaces), a master-key session (no person),
+ * and a session that is not signed in. Never invented, never the env var.
+ */
+export function workspaceHomeKey(sessionId) {
+  if (!sessionId || sessionOwners.get(sessionId) === PLATFORM_PRINCIPAL) return null;
+  const bearer = bearerOf(sessionId);
+  const key = bearer || sessionRecord(sessionId)?.homeKey || null;
+  return key && parseApiKey(key).isValid ? key : null;
+}
+
+/**
+ * One call to the API's workspace routes (GET /auth/workspaces, POST
+ * /auth/workspaces/switch) as the session's HOME key. A bare fetch, like
+ * whoami: request() would send the session's CURRENT key, which after a
+ * switch is another workspace's. Returns { status, json } and never throws on
+ * an HTTP answer; the key appears in no error text.
+ */
+export async function workspaceRequest(sessionId, { method = "GET", path, body, timeoutMs = 15_000 }) {
+  const key = workspaceHomeKey(sessionId);
+  if (!key) throw new Error("workspaceRequest: no home key for this session");
+  const base = (baseUrlForKeyEnv(key) || getBaseUrl(sessionId)).replace(/\/+$/, "");
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers: { "X-API-KEY": key, ...(body ? { "Content-Type": "application/json" } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text().catch(() => "");
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* not JSON: the status speaks */ }
+  return { status: res.status, json, base };
 }
 
 /**
