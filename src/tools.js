@@ -3436,8 +3436,8 @@ export const tools = [
     name: "ateam_github_rollback",
     core: true,
     description:
-      "PRODUCTION IS NEVER ROLLED BACK DIRECTLY — this tool is refused for `main`. A direct reset would put production on a state dev never had, and the two would split.\n\n" +
-      `To go back to a known good version: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) put that version back on \`dev\` with the Restore button in the A-Team app (an additive commit on dev, history preserved) → 3) try it → 4) ateam_github_promote. ${BRANCH_WORKFLOW.legacy_tag_note}`,
+      "RESTORE `dev` TO A PROMOTED VERSION. Puts the files of a previous promoted version (an exact promoted-version tag) back on `dev` as a new commit on top of it, history preserved, and deploys nothing by itself. Production is never rolled back directly (that would put it on a state dev never had): restore, try it on dev, then ateam_github_promote.\n\n" +
+      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run to try it → 4) ateam_github_promote. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3447,7 +3447,7 @@ export const tools = [
         },
         target: {
           type: "string",
-          description: `A ${BRANCH_WORKFLOW.tag_format} tag or a commit SHA to revert main to. Use ateam_github_list_versions to find the tags. ${BRANCH_WORKFLOW.legacy_tag_note}`,
+          description: `A ${BRANCH_WORKFLOW.tag_format} tag (an exact promoted version) to restore dev to. Use ateam_github_list_versions to find the tags. ${BRANCH_WORKFLOW.legacy_tag_note}`,
         },
       },
       required: ["solution_id", "target"],
@@ -3457,7 +3457,7 @@ export const tools = [
     name: "ateam_github_list_versions",
     core: true,
     description:
-      `List the ${BRANCH_WORKFLOW.tag_format} tags each ${BRANCH_WORKFLOW.promote_tool} wrote for a solution — the points ateam_github_rollback can return main to. Shows tag name, date, counter, and commit SHA. ${BRANCH_WORKFLOW.legacy_tag_note}`,
+      `List the ${BRANCH_WORKFLOW.tag_format} tags each ${BRANCH_WORKFLOW.promote_tool} wrote for a solution — the points ateam_github_rollback can restore dev to. Shows tag name, date, counter, and commit SHA. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -7864,7 +7864,7 @@ export const handlers = {
 
   ateam_github_rollback: async ({ solution_id, target, tag }, sid) =>
     // Accept both `target` (new spec) and `tag` (legacy callers)
-    post(apiPath`/deploy/solutions/${solution_id}/rollback`, { target: target || tag }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/rollback`, { target: target || tag, branch: "dev" }, sid),
 
   ateam_github_list_versions: async ({ solution_id }, sid) =>
     get(apiPath`/deploy/solutions/${solution_id}/versions/dev`, sid),

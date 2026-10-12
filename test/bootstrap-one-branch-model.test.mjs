@@ -401,10 +401,10 @@ check("the CLAUDE.md no longer says every iterate deploy (upload_connector inclu
 // Production is never reset directly (stage 2): the Builder refuses a rollback of main, so no text may teach one.
 check("rollback text says production is never rolled back directly: Restore onto dev, then promote",
       /never rolled back directly/.test(BRANCH_WORKFLOW.rollback)
-      && /Restore/.test(BRANCH_WORKFLOW.rollback) && /ateam_github_promote/.test(BRANCH_WORKFLOW.rollback)
+      && /ateam_github_rollback/.test(BRANCH_WORKFLOW.rollback) && /ateam_github_promote/.test(BRANCH_WORKFLOW.rollback)
       && !/rolls `main` back/.test(BRANCH_WORKFLOW.rollback));
-check("the rollback tool says it is refused for main and points at Restore then promote",
-      (d => /refused for `main`/.test(d) && /Restore/.test(d) && /ateam_github_promote/.test(d))(tools.find((t) => t.name === "ateam_github_rollback").description));
+check("the rollback tool restores dev (never main) and points at promote",
+      (d => /RESTORE `dev`/.test(d) && /never rolled back directly/.test(d) && /ateam_github_promote/.test(d))(tools.find((t) => t.name === "ateam_github_rollback").description));
 check("promote text says it moves main forward to the tested dev version, not a merge with a 409 recovery",
       (d => /Moves `main` forward to the exact version tried on `dev`/.test(d) && !/ON 409 MERGE CONFLICT/.test(d))(tools.find((t) => t.name === "ateam_github_promote").description));
 check("sync_from_main is described as an old-repo repair, never as the recovery for a promote 409",

@@ -303,7 +303,7 @@ function buildToolTable() {
     // promote SHIPS (dev → main); calling it "Checkpoint" is the framing
     // BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint retires.
     "| Ship `dev` → `main` | `ateam_github_promote(solution_id)` (`dry_run:true` first shows what would ship) |",
-    "| Rollback `main` | `ateam_github_rollback(solution_id, target)`, then `ateam_github_sync_from_main(solution_id)` |",
+    "| Go back to a shipped version | `ateam_github_rollback(solution_id, target)` restores it on `dev`; try it, then `ateam_github_promote(solution_id)` |",
     "| List shipped versions | `ateam_github_list_versions(solution_id)` |",
   ].join("\n");
 }

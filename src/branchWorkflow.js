@@ -109,7 +109,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // `dev` has it too (its guard walks every file) — neither shipping dev's copy
   // over the rollback nor writing the rollback over dev. ateam_upload_connector reads `dev` directly and has no
   // such check.
-  rollback: 'Production is never rolled back directly (ateam_github_rollback is refused for `main`). To go back: find a prod-* tag with ateam_github_list_versions, put that version back on `dev` with the Restore button in the A-Team app, try it, then ateam_github_promote.',
+  rollback: 'Production is never rolled back directly. To go back: find a prod-* tag with ateam_github_list_versions, put that version back on `dev` with ateam_github_rollback(solution_id, target) (the Restore button in the A-Team app does the same), try it, then ateam_github_promote.',
   no_git_at_all:
     'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',
 });
