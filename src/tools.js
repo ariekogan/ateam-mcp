@@ -6967,7 +6967,8 @@ export const handlers = {
       const data = await get(apiPath`/deploy/jobs/${rootJobId}/chain?${rawQuery(qs)}`, sid)
         .catch(err => ({ ok: false, error: err.message }));
       lastChain = data;
-      const jobs = Array.isArray(data?.chainJobsList) ? data.chainJobsList : Array.isArray(data?.chainJobs) ? data.chainJobs : null;
+      const tree = chainTreeOf(data).jobs; // the chain lives at data.data.chainJobs, see chainTreeOf
+      const jobs = Array.isArray(data?.chainJobsList) ? data.chainJobsList : tree.length ? tree : null;
       if (jobs && jobs.length > 0 && jobs.every(j => isTerminal(j.status))) {
         return { ok: true, job_id: rootJobId, wait_for: "chain", chain: data, kickoff, elapsed_ms: Date.now() - startedAt };
       }
