@@ -4597,6 +4597,21 @@ function chainTreeOf(resp) {
   };
 }
 
+// WHEN IS A CHAIN FINISHED. Core answers {ok, success, data:{status, activeJobIds, chainJobs}}.
+// Its own chain-level `status` and `activeJobIds` come from the same per-job check the platform
+// uses everywhere (done flag OR status done/error/failed), so they are the answer. A job's
+// `status` string alone is NOT: a finished job can still carry another status word, and the wait
+// then ran to its timeout while the chain it returned said status "done", activeJobIds [].
+// (Live on dev, job_z6kmny9p: finished in 16 s, call returned at the 60 s limit.)
+// The per-job words stay as a second way to see "finished".
+export function _chainIsFinished(resp, isTerminal) {
+  const c = resp?.data || resp || {};
+  if (Array.isArray(c.activeJobIds) && c.activeJobIds.length === 0 && isTerminal(c.status)) return true;
+  const tree = chainTreeOf(resp).jobs;
+  const jobs = Array.isArray(resp?.chainJobsList) ? resp.chainJobsList : tree.length ? tree : null;
+  return !!(jobs && jobs.length > 0 && jobs.every(j => isTerminal(j.status)));
+}
+
 // A docs answer says which environment gave it (MGAP-A15; api.js servedBy).
 // FIRST, so it is the first thing read, before any section a long answer is
 // cut at. The Builder's docs are JSON objects; anything else passes unchanged.
@@ -6966,9 +6981,7 @@ export const handlers = {
       const data = await get(apiPath`/deploy/jobs/${rootJobId}/chain?${rawQuery(qs)}`, sid)
         .catch(err => ({ ok: false, error: err.message }));
       lastChain = data;
-      const tree = chainTreeOf(data).jobs; // the chain lives at data.data.chainJobs, see chainTreeOf
-      const jobs = Array.isArray(data?.chainJobsList) ? data.chainJobsList : tree.length ? tree : null;
-      if (jobs && jobs.length > 0 && jobs.every(j => isTerminal(j.status))) {
+      if (_chainIsFinished(data, isTerminal)) {
         return { ok: true, job_id: rootJobId, wait_for: "chain", chain: data, kickoff, elapsed_ms: Date.now() - startedAt };
       }
       await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
