@@ -3390,24 +3390,6 @@ export const tools = [
     },
   },
   {
-    name: "ateam_github_reconcile",
-    core: true,
-    description:
-      "JOIN a diverged dev and main. Use when ateam_github_promote returns PROMOTE_NEEDS_HUMAN or PROMOTE_PRECONDITION_FAILED — i.e. the automatic main→dev back-merge could not resolve itself.\n\n" +
-      "TRY sync_from_main FIRST; this tool calls it internally (a plain merge keeps both sides with no judgement call) and only escalates when git genuinely conflicts.\n\n" +
-      "On conflict it writes a TWO-PARENT merge commit so the histories actually join. That matters: copying one branch's tree onto the other makes the contents match while leaving NO merge base, so the very next promote conflicts again — equal content is not a reconciled history.\n\n" +
-      "Conflicting files are resolved per file, NEWEST WINS, and every decision is reported. Recency is a heuristic, not intent: read the decisions. On a real tenant main held the newer solution.json while dev held the newer widget, so a blanket choice would have reverted one of them.\n\n" +
-      "WHO NEEDS THIS: any tenant whose deploys predate the dev-routing fix carries main-only commits the platform itself wrote, and hits this on its first promote afterwards. Pass dry_run:true to see the decisions before writing anything.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solution_id: { type: "string", description: "The solution ID" },
-        dry_run: { type: "boolean", description: "Report the per-file decisions without writing the merge commit." },
-      },
-      required: ["solution_id"],
-    },
-  },
-  {
     name: "ateam_github_sync_from_main",
     core: true,
     description:
@@ -3690,7 +3672,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_delete_solution", "ateam_delete_skill", "ateam_delete_connector",
     "ateam_recover_connector_source", "ateam_write_agent_doc",
     "ateam_github_push", "ateam_github_pull", "ateam_github_patch", "ateam_github_write",
-    "ateam_github_promote", "ateam_github_reconcile", "ateam_github_sync_from_main", "ateam_github_rollback",
+    "ateam_github_promote", "ateam_github_sync_from_main", "ateam_github_rollback",
     "ateam_sync_all", "ateam_test_abort",
     // RUNS CODE THIS SERVER CANNOT SEE.
     //   a connector tool, by name:            ateam_test_connector
@@ -7853,11 +7835,6 @@ export const handlers = {
 
   ateam_github_promote: async ({ solution_id, label, dry_run, skip_tag }, sid) =>
     post(apiPath`/deploy/solutions/${solution_id}/promote`, { label, dry_run, skip_tag }, sid),
-
-  ateam_github_reconcile: async ({ solution_id, dry_run }, sid) => {
-    if (!solution_id) throw new Error("solution_id required");
-    return await post(apiPath`/deploy/solutions/${solution_id}/reconcile`, { dry_run: dry_run === true }, sid);
-  },
 
   ateam_github_sync_from_main: async ({ solution_id, dry_run }, sid) =>
     post(apiPath`/deploy/solutions/${solution_id}/sync-from-main`, { dry_run }, sid, { idempotent: dry_run === true }),
