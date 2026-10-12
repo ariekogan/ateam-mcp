@@ -5939,8 +5939,8 @@ export const handlers = {
     // API, kept per bearer), with the session's home key left as it was.
     const from = getCredentials(sessionId)?.tenant || null;
     const out = await handlers.ateam_auth({ api_key: r.json.api_key, tenant: r.json.tenant }, sessionId, { viaSwitch: true });
-    if (!out?.ok) return { ...out, message: `Switching to "${r.json.tenant}" failed, and this session stays on ${from ? `"${from}"` : "where it was"}: ${out?.message || "the new workspace's key was refused"}` };
-    return { ...out, switched_from: from, switched_to: r.json.tenant, message: `Switched to workspace "${r.json.tenant}"${from ? ` (was "${from}")` : ""}. ${out.message || ""}`.trim() };
+    if (!out?.ok) { const { tenant: _stays, ...failed } = out || {}; return { ...failed, ok: false, message: `Switching to "${r.json.tenant}" failed, and this session stays on ${from ? `"${from}"` : "where it was"}: ${out?.message || "the new workspace's key was refused"}` }; }
+    return { ...out, switched_from: from, switched_to: r.json.tenant, ...(r.json.note ? { note: r.json.note } : {}), message: `Switched to workspace "${r.json.tenant}"${from ? ` (was "${from}")` : ""}. ${out.message || ""}`.trim() };
   },
 
   ateam_get_spec: async ({ topic, section, search }, sid) => {

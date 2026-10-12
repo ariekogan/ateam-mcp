@@ -166,3 +166,19 @@ test("a session that never signed in is refused at the gate, before anything run
   assert.equal(res.structuredContent.stage, "auth_gate");
   assert.equal(calls.length, 0);
 });
+
+test("a session that signed in with a key and then a master key has no person to list for", async () => {
+  const sid = "ws-key-then-master";
+  hosted(sid);
+  setSessionCredentials(sid, { tenant: "acme", apiKey: null, explicit: true, masterKey: "m" });
+  assert.equal((await run(sid, "ateam_list_workspaces")).code, "MASTER_SESSION");
+  assert.equal(calls.length, 0);
+});
+
+test("a failed switch does not name the target as the session's tenant", async () => {
+  hosted("ws-fail-tenant");
+  api.deploy = () => [401, { error: "Invalid or unconfigured API key" }];
+  const r = await run("ws-fail-tenant", "ateam_switch_workspace", { tenant: "beta" });
+  assert.equal(r.ok, false);
+  assert.equal(r.tenant, undefined);
+});

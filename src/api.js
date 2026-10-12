@@ -963,6 +963,7 @@ export function clearAuthOverride(bearerToken) {
  */
 export function workspaceHomeKey(sessionId) {
   if (!sessionId || sessionOwners.get(sessionId) === PLATFORM_PRINCIPAL) return null;
+  if (sessionRecord(sessionId)?.masterKey) return null;
   const bearer = bearerOf(sessionId);
   const key = bearer || sessionRecord(sessionId)?.homeKey || null;
   return key && parseApiKey(key).isValid ? key : null;
