@@ -49,6 +49,13 @@ export const BRANCH_WORKFLOW = Object.freeze({
   write_side: 'Every write lands on `dev`: ateam_github_patch, ateam_github_write and ateam_patch all default there. '
     + 'ateam_github_patch and ateam_github_write only change the repo; nothing is deployed until a deploy tool runs. '
     + 'ateam_patch also redeploys what it patched, from `dev`.',
+  // A chat agent with no shell (ChatGPT, Claude.ai) edits many files with real commands in a workspace instead of
+  // one file per call. Plain words by design: the user of such an agent is a business user, so this text
+  // names no branch, commit or other git term, and tells the agent to show the user none.
+  workspace: 'No shell of your own? ateam_workspace_open gives you one workspace for this conversation: your files are in /workspace and ateam_workspace_exec runs any command there. '
+    + 'The other ateam_* tools cannot see your edits until ateam_workspace_save; only saving makes them live. '
+    + 'While it is open the single-file write tools are switched off; ateam_workspace_close brings them back. '
+    + 'Show the user only each answer\'s `summary`, never branches, commits or git words. A refusal lists the single-file tools to use instead: use them.',
   // It said "ONLY ateam_github_promote writes it" and, in write_side, "Nothing
   // reaches `main` without a promote". One write does: any write that names
   // ref:'main' (ateam_github_patch documents that as the emergency hotfix).

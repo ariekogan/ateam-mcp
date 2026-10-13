@@ -106,6 +106,13 @@ Developers find ateam-mcp through:
 | `adas_update` | Update a solution or skill incrementally (PATCH) |
 | `adas_redeploy` | Push changes live — regenerates MCP servers, deploys to ADAS Core |
 | `adas_solution_chat` | Talk to the Solution Bot for guided modifications |
+| `ateam_workspace_open` | For a chat agent with no shell: open one private workspace (files in `/workspace`) for the conversation |
+| `ateam_workspace_exec` | Run one command in the workspace (100 s foreground; `run_in_background` for long builds) |
+| `ateam_workspace_status` | Check the workspace: unsaved changes, a long save or background command |
+| `ateam_workspace_save` | Make the workspace's work live (the only way the other tools see it) |
+| `ateam_workspace_close` | Finish; optionally save first. Brings back the single-file write tools withheld while it was open |
+
+The `ateam_workspace_*` tools are listed only when the platform says workspaces are available for the signed-in workspace (they are switched off by default); otherwise they are absent.
 
 ## Setup
 
