@@ -146,10 +146,10 @@ import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
-import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId, getWorkspaceAvailability, setWorkspaceAvailability, noteWorkspaceListed } from "./api.js";
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
-  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult,
+  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure,
 } from "./workspaceTools.js";
 
 // A step that waits for a person: the Builder's human_step_testing words, verbatim.
@@ -5335,7 +5335,9 @@ export const handlers = {
   // dev-api.ateam-ai.com was told base_url: https://api.ateam-ai.com, and had
   // to learn from deploy errors which environment it was actually on. The
   // dangerous direction is the mirror image — believing you are on dev.
-  ateam_bootstrap: async (_args, sid) => ({
+  ateam_bootstrap: async (_args, sid) => {
+    const workspaces = await workspaceAvailable(sid);
+    return ({
     // FIRST: where this session is and how to move (signInSteps.js). A session
     // was on one workspace while the user needed another, and nothing said which.
     session: openingFor(sid),
@@ -5491,7 +5493,7 @@ export const handlers = {
       // It said "main for every deploy" and "promote is the ONLY thing that
       // moves work", in the same response as the iterate loop that deploys dev
       // with no promote. Rendered from the owner now, like `branching`.
-      chat_workspace: BRANCH_WORKFLOW.workspace,
+      ...(workspaces && { chat_workspace: BRANCH_WORKFLOW.workspace }),
       branch: `${BRANCH_WORKFLOW.write_side} ${BRANCH_WORKFLOW.deploy_side}`,
       checkpoints: `${BRANCH_WORKFLOW.tag_format} tags are created automatically by each promote. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint}`,
       iteration_workflow: {
@@ -5698,7 +5700,8 @@ export const handlers = {
         "Write connector code that starts a web server — connectors MUST use stdio transport",
       ],
     },
-  }),
+  });
+  },
 
   ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId) => {
     // A platform session (ateam-proxy-mcp's one session for every tenant) is
@@ -7588,7 +7591,7 @@ export const handlers = {
     } catch { /* no skills yet — render anyway */ }
     const connectors = Array.isArray(solution?.connectors) ? solution.connectors : [];
 
-    const freshHeader = renderAgentDocHeader({ solution, skills, connectors });
+    const freshHeader = renderAgentDocHeader({ solution, skills, connectors, workspaces: await workspaceAvailable(sid) });
     let existing = null;
     try {
       const r = await get(
@@ -7898,10 +7901,10 @@ export const handlers = {
     })(),
 
   // ─── Session workspace (Phase C): the Builder's POST /workspace/:method ──────
-  ateam_workspace_open: (args, sid) => workspaceCall("open", {}, sid),
+  ateam_workspace_open: (args, sid) => workspaceCall("open", {}, sid, { timeoutMs: 140_000 }),
   ateam_workspace_exec: ({ workspace_id, command, workingDir, timeout, run_in_background }, sid) =>
     workspaceCall("exec", { workspace_id, command, workingDir, timeout, run_in_background }, sid, { timeoutMs: 140_000 }),
-  ateam_workspace_status: ({ workspace_id }, sid) => workspaceCall("status", { workspace_id }, sid),
+  ateam_workspace_status: ({ workspace_id }, sid) => workspaceCall("status", { workspace_id }, sid, { timeoutMs: 140_000 }),
   ateam_workspace_save: ({ workspace_id, message }, sid) =>
     workspaceCall("save", { workspace_id, message }, sid, { timeoutMs: 140_000 }),
   ateam_workspace_close: ({ workspace_id, save }, sid) =>
@@ -8872,10 +8875,33 @@ function whyNotSignedIn(ctx) {
 // from the session's key; these tools take no tenant, person or solution. A refusal is DATA (HTTP 200
 // with `summary` + `fallback`), never a thrown error, so the agent reads it and uses the fallback.
 
-/** The tools a session lists: the core tools, minus the old `dev` writers while a workspace is open. */
-export function listedTools(sessionId) {
-  if (!getWorkspaceId(sessionId)) return coreTools;
-  return coreTools.filter((t) => !WORKSPACE_WITHHELD.has(t.name));
+const AVAILABILITY_TTL_MS = 60_000;
+
+/**
+ * Are workspaces usable for this session's tenant right now? Asked of the platform (cp.workspace_api.available: the switch and
+ * the trial rule, read at that moment), cached per session for a minute. Any failure to ask is "no": a tool that cannot work is
+ * not offered. A session that is not signed in is not asked.
+ */
+export async function workspaceAvailable(sessionId) {
+  if (!isExplicitlyAuthenticated(sessionId)) return false;
+  const known = getWorkspaceAvailability(sessionId);
+  if (known && Date.now() - known.at < AVAILABILITY_TTL_MS) return known.value;
+  let value = false;
+  try {
+    const r = await post("/workspace/available", { params: {} }, sessionId, { timeoutMs: 15_000, retries: 0 });
+    value = r?.ok === true && r.available === true;
+  } catch { /* not askable = not offered */ }
+  setWorkspaceAvailability(sessionId, value);
+  return value;
+}
+
+/** The tools a session lists: the core tools, minus the workspace tools while workspaces are unavailable, minus the old `dev` writers while a workspace is open. */
+export async function listedTools(sessionId) {
+  const available = await workspaceAvailable(sessionId);
+  noteWorkspaceListed(sessionId, available);
+  const offered = available ? coreTools : coreTools.filter((t) => !WORKSPACE_TOOL_NAMES.includes(t.name));
+  if (!getWorkspaceId(sessionId)) return offered;
+  return offered.filter((t) => !WORKSPACE_WITHHELD.has(t.name));
 }
 
 async function workspaceCall(method, params, sid, opts = { timeoutMs: 60_000 }) {
@@ -8892,11 +8918,20 @@ async function workspaceCall(method, params, sid, opts = { timeoutMs: 60_000 }) 
       };
     }
   }
-  const result = await post(`/workspace/${method}`, { params: body }, sid, opts);
+  let result;
+  try {
+    result = await post(`/workspace/${method}`, { params: body }, sid, opts);
+  } catch (err) {
+    // Never Core's answer: the Builder or the network failed. A failed open leaves nothing open, so it forgets any
+    // workspace the session held (the single-file tools come back); every other call keeps what it remembers.
+    console.error(`[MCP] ateam_workspace_${method} failed before Core answered: ${err?.message || err}`);
+    if (method === "open") setWorkspaceId(sid, null);
+    return workspaceFailure(method, isTimeoutError(err), Boolean(getWorkspaceId(sid)));
+  }
   const memory = workspaceMemoryAfter(method, result);
   if (memory.clear) setWorkspaceId(sid, null);
   else if (memory.set) setWorkspaceId(sid, memory.set);
-  return shapeWorkspaceResult(method, result);
+  return shapeWorkspaceResult(method, result, { keepWorkspace: Boolean(getWorkspaceId(sid)) });
 }
 
 export async function handleToolCall(name, args, sessionId) {
@@ -9022,6 +9057,9 @@ export async function handleToolCall(name, args, sessionId) {
     if (result && typeof result === "object" && result.actor_id && ACTOR_MINTING_TOOLS.has(name)) {
       touchSession(sessionId, { actorId: result.actor_id });
     }
+
+    // A new sign-in may change whether workspaces are usable: ask now, so a client that honours list_changed is told.
+    if (name === "ateam_auth" && result?.ok !== false) await workspaceAvailable(sessionId);
 
     // Stamp WHERE this landed (tenant + app URL) on mutating-tool results, so
     // any client — desktop, mobile, cloud agent — can tell the user where to

@@ -167,6 +167,7 @@ const READ_BY_POST = [
   [/^\/validate\/(skill|solution)$/, "validation of the definition in the body; stores nothing"],
   [/^\/spec\/advisor$/, "an LLM answer over the capability catalog"],
   [/^\/spec\/search$/, "a semantic search over the public spec docs"],
+  [/^\/workspace\/available$/, "asks whether workspaces are usable for the tenant; reads the switch, changes nothing"],
 ];
 const isRead = ({ method, path, outside }) =>
   !outside && (method === "GET" || (method === "POST" && READ_BY_POST.some(([rx]) => rx.test(path))));

@@ -112,6 +112,8 @@ Developers find ateam-mcp through:
 | `ateam_workspace_save` | Make the workspace's work live (the only way the other tools see it) |
 | `ateam_workspace_close` | Finish; optionally save first. Brings back the single-file write tools withheld while it was open |
 
+The `ateam_workspace_*` tools are listed only when the platform says workspaces are available for the signed-in workspace (they are switched off by default); otherwise they are absent.
+
 ## Setup
 
 ```bash

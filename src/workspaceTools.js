@@ -80,7 +80,7 @@ const KEYS_FIRST = ["ok", "summary", "next_step", "use_instead"];
  * The model is told to show the user the summary only; putting it first makes that the easy thing to do.
  * Adds nothing the answer does not say, except a plain `next_step` for the three states that need one.
  */
-export function shapeWorkspaceResult(method, result) {
+export function shapeWorkspaceResult(method, result, { keepWorkspace = false } = {}) {
   if (!result || typeof result !== "object" || Array.isArray(result)) return result;
   const { details, fallback, error, ...rest } = result;
   const summary = typeof rest.summary === "string" && rest.summary ? rest.summary : (typeof error === "string" ? error : undefined);
@@ -93,8 +93,9 @@ export function shapeWorkspaceResult(method, result) {
   const step = nextStep(method, result);
   if (step) out.next_step = step;
 
-  // A refusal carries the tools that work without a workspace. The agent uses them; it does not give up.
-  if (Array.isArray(fallback) && fallback.length) {
+  // A refusal carries the tools that work without a workspace. The agent uses them; it does not give up. Not while the
+  // workspace is still remembered: those tools are withheld then, and pointing at them would send the agent into a refusal.
+  if (!keepWorkspace && Array.isArray(fallback) && fallback.length) {
     out.use_instead = {
       tools: fallback,
       how: `That was not done in a workspace. Carry on with ${fallback.join(" / ")} instead (one file per call); do not stop and do not ask the user to do it.`,
@@ -104,6 +105,26 @@ export function shapeWorkspaceResult(method, result) {
   for (const [k, v] of Object.entries(rest)) if (!KEYS_FIRST.includes(k)) out[k] = v;
   if (details !== undefined) out.details = details;
   return out;
+}
+
+/** The tools that work without a workspace (Core's fallback list), for a failure Core never answered. */
+export const SINGLE_FILE_TOOLS = Object.freeze(["ateam_github_patch", "ateam_github_write"]);
+
+/**
+ * A call that failed before Core answered (the Builder was down, a 4xx/5xx, a timeout) as plain data, the same shape as a
+ * refusal. No hint or error text of the transport: the agent may repeat it to a business user.
+ * @param {string} method
+ * @param {boolean} timedOut
+ * @param {boolean} keepWorkspace the session still remembers a workspace (so the single-file tools stay withheld)
+ */
+export function workspaceFailure(method, timedOut, keepWorkspace) {
+  const long = method === "exec" || method === "save" || method === "close";
+  const summary = timedOut
+    ? (long
+      ? "That took longer than expected and may still be running; nothing is lost. Wait a minute, then call ateam_workspace_status to see how it ended."
+      : "The workspace did not answer in time. Try again in a minute.")
+    : "The workspace could not be reached just now, so nothing was changed. Try again in a minute.";
+  return shapeWorkspaceResult(method, { ok: false, summary, ...(!keepWorkspace && { fallback: [...SINGLE_FILE_TOOLS] }) }, { keepWorkspace });
 }
 
 function nextStep(method, r) {

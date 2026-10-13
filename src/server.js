@@ -62,7 +62,7 @@ export function createServer(sessionId = "stdio", { transport = null } = {}) {
   // old route are left out (listedTools), and a client that honours
   // notifications/tools/list_changed is told when that changes. One that does
   // not is still refused in the call itself (handleToolCall).
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools(sessionId) }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: await listedTools(sessionId) }));
   const unwatch = watchWorkspace(sessionId, () => {
     // Before a transport is connected there is nobody to tell.
     Promise.resolve(server.sendToolListChanged()).catch(() => {});

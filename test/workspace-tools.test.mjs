@@ -20,6 +20,9 @@ import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/typ
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { setSessionCredentials, getWorkspaceId } from "../src/api.js";
 import { handleToolCall, tools, coreTools, listedTools } from "../src/tools.js";
+import { setWorkspaceAvailability } from "../src/api.js";
+import { renderAgentDocHeader } from "../src/agentDoc.js";
+import { workspaceFailure } from "../src/workspaceTools.js";
 import { PUBLIC_TOOLS } from "../src/publicTools.js";
 import { createServer } from "../src/server.js";
 import { WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD } from "../src/workspaceTools.js";
@@ -39,8 +42,9 @@ before(async () => {
       const body = raw ? JSON.parse(raw) : {};
       const method = req.url.replace(/^\/workspace\//, "");
       calls.push({ http: req.method, path: req.url, headers: req.headers, body });
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(answer(method, body.params || {})));
+      const out = answer(method, body.params || {});
+      res.writeHead(out?.__status || 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(out));
     });
   });
   await new Promise((r) => api.listen(0, "127.0.0.1", r));
@@ -57,6 +61,7 @@ const signedIn = () => {
 };
 const OPEN_OK = { ok: true, workspace_id: "ws-0123456789ab", state: "open", summary: "Your workspace is ready.", details: { branch: "dev", head: "abc" } };
 const happy = (method, p) => {
+  if (method === "available") return { ok: true, available: true, summary: "Workspaces are available." };
   if (method === "open") return OPEN_OK;
   if (method === "close") return { ok: true, workspace_id: p.workspace_id, state: "closed", summary: "Closed. Nothing was left unsaved.", details: {} };
   return { ok: true, workspace_id: p.workspace_id, summary: "ok", details: {} };
@@ -205,7 +210,7 @@ test("old writers are withheld from tools/list and refused in the call while ope
   answer = () => ({ ok: false, code: "WORKSPACE_BOX_FULL", summary: "No room right now.", fallback: FALLBACK });
   await client.callTool({ name: "ateam_workspace_open", arguments: {} });
   assert.ok((await names()).includes("ateam_github_patch"));
-  assert.equal(listedTools(sid).length, coreTools.length);
+  assert.equal((await listedTools(sid)).length, coreTools.length);
   await client.close();
 });
 
@@ -274,4 +279,106 @@ test("a tenant, person or chain argument is refused before anything acts on it, 
   await handleToolCall("ateam_workspace_open", { solution_id: "other" }, sid);
   assert.deepEqual(calls[0].body, { params: {} });
   assert.deepEqual(Object.keys(calls[0].body), ["params"]);
+});
+
+// ── availability: tools and teaching appear only where the platform says workspaces work ──────────────────
+const listedNames = async (sid) => (await listedTools(sid)).map((t) => t.name);
+const withWorkspaceTools = (names) => WORKSPACE_TOOL_NAMES.every((n) => names.includes(n));
+const withoutWorkspaceTools = (names) => WORKSPACE_TOOL_NAMES.every((n) => !names.includes(n));
+
+test("workspaces switched off, a trial, a failing platform or no sign-in: the five tools are not listed", async () => {
+  const sid = signedIn();
+  answer = (m) => m === "available" ? { ok: true, available: false, summary: "Workspaces are switched off for this tenant." } : happy(m, {});
+  assert.ok(withoutWorkspaceTools(await listedNames(sid)));
+  assert.ok((await listedNames(sid)).includes("ateam_github_patch"), "the single-file tools stay");
+  const sid2 = signedIn();
+  answer = (m) => m === "available" ? { __status: 502, ok: false, code: "CORE_TOOL_FAILED" } : happy(m, {});
+  assert.ok(withoutWorkspaceTools(await listedNames(sid2)), "an answer that is an error means not offered");
+  const sid3 = signedIn();
+  answer = (m) => m === "available" ? { ok: false, code: "WORKSPACE_KEY_HAS_NO_PERSON", summary: "This key is not tied to a person." } : happy(m, {});
+  assert.ok(withoutWorkspaceTools(await listedNames(sid3)), "a refusal means not offered");
+  calls = [];
+  assert.ok(withoutWorkspaceTools(await listedNames("never-signed-in")));
+  assert.equal(calls.length, 0, "a session that is not signed in is not asked");
+});
+
+test("workspaces on: the tools are listed; the answer is cached for the session, and a change is told with list_changed", async () => {
+  const sid = signedIn();
+  answer = happy;
+  const server = createServer(sid);
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "ws", version: "1" });
+  let changed = 0;
+  client.setNotificationHandler(ToolListChangedNotificationSchema, () => { changed++; });
+  await server.connect(serverT);
+  await client.connect(clientT);
+  assert.ok(withWorkspaceTools((await client.listTools()).tools.map((t) => t.name)));
+  await client.listTools();
+  assert.equal(calls.filter((c) => c.path === "/workspace/available").length, 1, "asked once, then cached");
+  assert.equal(changed, 0, "a first listing is not a change");
+  setWorkspaceAvailability(sid, false); // the platform now says no (what the next probe would store)
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(changed, 1, "list_changed after the answer flipped");
+  await client.close();
+});
+
+test("the teaching text about workspaces is given only where they are available (get-started and the agent doc)", async () => {
+  const on = signedIn(); answer = happy;
+  assert.match(JSON.stringify(await handleToolCall("ateam_bootstrap", {}, on)), /ateam_workspace_open/);
+  const off = signedIn(); answer = (m) => m === "available" ? { ok: true, available: false } : happy(m, {});
+  assert.doesNotMatch(JSON.stringify(await handleToolCall("ateam_bootstrap", {}, off)), /ateam_workspace_open/);
+  const base = { solution: { id: "s", name: "S" }, skills: [], connectors: [] };
+  assert.match(renderAgentDocHeader({ ...base, workspaces: true }), /ateam_workspace_open/);
+  assert.doesNotMatch(renderAgentDocHeader(base), /ateam_workspace/);
+});
+
+// ── a call that fails before Core answers is plain data, never the generic hint text ──────────────────────
+test("a Builder error on a workspace call comes back as plain data; a failed open forgets the workspace; other calls keep it and do not point at withheld tools", async () => {
+  const sid = signedIn();
+  answer = happy;
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  assert.ok(getWorkspaceId(sid));
+  answer = (m) => m === "exec" ? { __status: 500, ok: false, code: "CORE_TOOL_FAILED", error: "Core unreachable (hint: check docker git branch)" } : happy(m, {});
+  const r = await handleToolCall("ateam_workspace_exec", { command: "ls" }, sid);
+  const body = json(r);
+  assert.equal(body.ok, false);
+  assert.match(body.summary, /could not be reached just now/);
+  assert.doesNotMatch(JSON.stringify(body), /hint|docker|CORE_TOOL_FAILED|git|branch|unreachable/i, "no transport or hint text");
+  assert.equal(body.use_instead, undefined, "the single-file tools are withheld while the workspace is remembered");
+  assert.ok(getWorkspaceId(sid), "a failed exec keeps the workspace");
+  answer = (m) => m === "open" ? { __status: 500, ok: false } : happy(m, {});
+  const o = json(await handleToolCall("ateam_workspace_open", {}, sid));
+  assert.equal(o.ok, false);
+  assert.equal(getWorkspaceId(sid), null, "a failed open leaves nothing remembered");
+  assert.deepEqual(o.use_instead.tools, FALLBACK, "now the single-file tools are the way on");
+  assert.ok((await listedNames(sid)).includes("ateam_github_patch"));
+});
+
+test("a refusal from Core that keeps the workspace does not name the withheld tools; one that clears it does", async () => {
+  const sid = signedIn();
+  answer = happy;
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  answer = (m) => m === "save" ? { ok: false, code: "WORKSPACE_SAVE_RUNNING", summary: "A save is still running.", fallback: FALLBACK } : happy(m, {});
+  const kept = json(await handleToolCall("ateam_workspace_save", {}, sid));
+  assert.equal(kept.use_instead, undefined);
+  assert.equal(kept.summary, "A save is still running.");
+  answer = (m) => m === "status" ? { ok: false, code: "WORKSPACE_EXPIRED", summary: "This workspace reached its maximum age.", fallback: FALLBACK } : happy(m, {});
+  const gone = json(await handleToolCall("ateam_workspace_status", {}, sid));
+  assert.deepEqual(gone.use_instead.tools, FALLBACK);
+});
+
+test("a timeout says it may still be running, not that it failed; the long calls wait 140 s", async (t) => {
+  assert.match(workspaceFailure("save", true, true).summary, /may still be running.*ateam_workspace_status/);
+  assert.match(workspaceFailure("open", true, false).summary, /did not answer in time/);
+  assert.equal(workspaceFailure("save", true, true).use_instead, undefined);
+  assert.deepEqual(workspaceFailure("open", false, false).use_instead.tools, FALLBACK);
+  const sid = signedIn();
+  answer = happy;
+  const delays = [];
+  const real = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (fn, ms, ...rest) => { delays.push(ms); return real(fn, ms, ...rest); });
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  await handleToolCall("ateam_workspace_status", {}, sid);
+  await handleToolCall("ateam_workspace_exec", { command: "ls" }, sid);
+  assert.equal(delays.filter((d) => d === 140_000).length, 3, `open, status and exec wait 140 s (saw ${delays})`);
 });
