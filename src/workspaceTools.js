@@ -52,6 +52,9 @@ export function withheldSentence(toolName) {
  */
 export const QUICK_WAIT_SECONDS = 40;
 
+/** The time limit a background start gets when the agent gave none: what a foreground command had (Core stops it at 100 s), not Core's one hour, so a hung command cannot hold one of the 8 task slots. */
+export const BACKGROUND_DEFAULT_MS = 100_000;
+
 /** Should this exec start in the background and be waited for? */
 export function execWaitsInBackground(timeout, runInBackground) {
   if (typeof runInBackground === "boolean") return false;
@@ -70,20 +73,27 @@ export function waitCommand(outputFile, seconds = QUICK_WAIT_SECONDS) {
  * The answer of the waiting command as a foreground answer, or null when the task is still running (or the answer is not
  * understood): the caller then returns the background handle it already has.
  */
+const BACKGROUND_SENTENCE = "The command is running in the background; read its output file with another command to follow it.";
+
 export function foregroundFromWait(waited, started) {
   const out = waited?.stdout;
   if (!waited || waited.ok !== true || typeof out !== "string") return null;
   const m = /^__EXIT__ (\d+)\n?/.exec(out);
   if (!m) return null;
   const code = Number(m[1]);
+  // What the start call said about earlier unsaved work brought back (Core's withRecovery: extra summary sentences and
+  // details.recovered / conflicts / failed) belongs to this answer too: it is the first exec after a workspace comes back.
+  const d = started?.details || {};
+  const hasRecovery = ["recovered", "conflicts", "failed"].some((k) => Array.isArray(d[k]) && d[k].length);
+  const extra = hasRecovery && typeof started.summary === "string" ? started.summary.replace(BACKGROUND_SENTENCE, "").trim() : "";
   return {
     ok: true,
     workspace_id: started.workspace_id,
-    summary: code === 0 ? "The command finished." : `The command finished with exit code ${code}.`,
+    summary: [code === 0 ? "The command finished." : `The command finished with exit code ${code}.`, extra].filter(Boolean).join(" "),
     exit_code: code,
-    stdout: out.slice(m[0].length),
-    stderr: "",
+    stdout: out.slice(m[0].length), // the command's output, errors included (one output file)
     ...(waited.truncated ? { truncated: true } : {}),
+    ...(hasRecovery && { details: { recovered: d.recovered || [], conflicts: d.conflicts || [], failed: d.failed || [] } }),
   };
 }
 
@@ -180,7 +190,7 @@ function nextStep(method, r) {
       : "The save is still going and nothing is lost. Wait a minute, then call ateam_workspace_status (or ateam_workspace_save again) to see how it ended. Do not tell the user it is live until a call says so.";
   }
   if (method === "exec" && r.ok && r.details?.task_id) {
-    return "The command is running in the background. Follow it with ateam_workspace_exec: `tail -n 50 details.output_file` shows the output so far, and `cat \"$(dirname details.output_file)/exit\"` holds the exit code once the command has ended (the file does not exist while it is still running). Poll that every 20 to 30 seconds; ateam_workspace_status does not report background commands.";
+    return "The command is running in the background. Follow it with ateam_workspace_exec: `tail -n 50 details.output_file` shows the output so far, and `cat \"$(dirname details.output_file)/exit\"` holds the exit code once the command has ended (the file does not exist while it is still running). Poll that every 20 to 30 seconds; to stop it early run `kill -- -$(cat \"$(dirname details.output_file)/pid\")`; ateam_workspace_status does not report background commands.";
   }
   if (method === "exec" && r.code === "DEV_TIMEOUT") {
     return "The command ran past the 100 second limit and was stopped. Run it again with run_in_background: true and poll.";
@@ -204,9 +214,9 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
   exec:
     "Run ONE shell command in your workspace (you have no shell of your own; this is it). Files live in /workspace: read with cat/ls/grep, edit with sed, heredocs or git apply, run npm test, node, python. " +
     "Network reaches only npm, PyPI and the A-Team gateway. workspace_id is optional once you have opened one. " +
-    "A quick command answers at once (exit_code, stdout, stderr). One still running after about 40 seconds is left running; the answer gives an output_file: follow it with another exec every 20-30 s (`tail -n 50 <output_file>`; `cat \"$(dirname <output_file>)/exit\"` holds the exit code once it has ended, and is missing while it runs). status does not show it. For a long command pass a timeout in ms. " +
+    "A quick command answers at once (exit_code, stdout; errors are in stdout). One still running after about 40 seconds is left running; the answer gives an output_file: follow it with another exec every 20-30 s (`tail -n 50 <output_file>`; `cat \"$(dirname <output_file>)/exit\"` holds the exit code once it has ended, and is missing while it runs). status does not show it. For a long command pass a timeout in ms. A command that waits counts as two calls toward the hourly limit. " +
     "What you change is NOT live and the other ateam_* tools cannot see it until ateam_workspace_save. " +
-    "The answer has `summary` first, then exit_code, stdout, stderr. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
+    "The answer has `summary` first, then exit_code and stdout. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   status:
     "Check your workspace: whether it is open, whether it holds changes that are not saved yet, and how a long save is going (not background commands: follow those with ateam_workspace_exec). " +
     "Call it when ateam_workspace_save said the save is still going, until it says it is done. " +

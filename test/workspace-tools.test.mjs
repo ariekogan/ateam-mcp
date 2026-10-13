@@ -477,3 +477,41 @@ test("background commands are followed with exec and the exit file, never with s
   assert.match(d("ateam_workspace_exec"), /pass a timeout/);
   assert.doesNotMatch(d("ateam_workspace_status"), /background command is going|after run_in_background/);
 });
+
+test("exec: a background start with no timeout gets 100 s, an asked-for timeout is kept (a hung command cannot hold a task slot for an hour)", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const seen = [];
+  answer = (m, p) => {
+    if (m !== "exec") return happy(m, p);
+    seen.push(p);
+    if (p.run_in_background === true) return { ok: true, workspace_id: p.workspace_id, summary: "bg", details: { task_id: "t1", output_file: "/tmp/devtasks/t1/out" } };
+    return { ok: true, workspace_id: p.workspace_id, summary: "ok", stdout: "__RUNNING__\n" };
+  };
+  await handleToolCall("ateam_workspace_exec", { command: "x" }, sid);
+  await handleToolCall("ateam_workspace_exec", { command: "y", timeout: 250000 }, sid);
+  const starts = seen.filter((p) => p.run_in_background === true);
+  assert.equal(starts[0].timeout, 100000);
+  assert.equal(starts[1].timeout, 250000);
+});
+
+test("exec: the quick answer keeps the draft-recovery message and details of the start call, and has no stderr key", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  answer = (m, p) => {
+    if (m !== "exec") return happy(m, p);
+    if (p.run_in_background === true) return {
+      ok: true, workspace_id: p.workspace_id,
+      summary: "The command is running in the background; read its output file with another command to follow it. Earlier unsaved work came back: fix src/a.js and save.",
+      details: { task_id: "t1", output_file: "/tmp/devtasks/t1/out", recovered: ["src/b.js"], conflicts: ["src/a.js"], failed: [] },
+    };
+    return { ok: true, workspace_id: p.workspace_id, summary: "ok", stdout: "__EXIT__ 0\nfine\n" };
+  };
+  const r = json(await handleToolCall("ateam_workspace_exec", { command: "ls" }, sid));
+  assert.match(r.summary, /^The command finished\. Earlier unsaved work came back: fix src\/a\.js and save\.$/);
+  assert.deepEqual(r.details, { recovered: ["src/b.js"], conflicts: ["src/a.js"], failed: [] });
+  assert.ok(!("stderr" in r));
+  assert.equal(r.stdout, "fine\n");
+});
