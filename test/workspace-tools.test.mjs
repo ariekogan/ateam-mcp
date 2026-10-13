@@ -382,3 +382,25 @@ test("a timeout says it may still be running, not that it failed; the long calls
   await handleToolCall("ateam_workspace_exec", { command: "ls" }, sid);
   assert.equal(delays.filter((d) => d === 140_000).length, 3, `open, status and exec wait 140 s (saw ${delays})`);
 });
+
+test("the switch going off while a workspace is open never leaves the agent with neither set of tools", async () => {
+  const sid = signedIn();
+  answer = happy;
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  setWorkspaceAvailability(sid, false);
+  answer = (m) => m === "available" ? { ok: true, available: false } : happy(m, {});
+  let names = await listedNames(sid);
+  assert.ok(withWorkspaceTools(names), "the open workspace keeps its tools");
+  assert.ok(!names.includes("ateam_github_patch"), "the old writers stay withheld while it is open");
+  await handleToolCall("ateam_workspace_close", {}, sid);
+  names = await listedNames(sid);
+  assert.ok(withoutWorkspaceTools(names) && names.includes("ateam_github_patch"), "after close: the single-file tools only");
+  // Core says the switch is off on the next call: the workspace is forgotten and the writers return.
+  answer = happy;
+  const sid2 = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid2);
+  answer = (m) => m === "available" ? { ok: true, available: false } : { ok: false, code: "WORKSPACES_SWITCHED_OFF", summary: "Workspaces are switched off.", fallback: FALLBACK };
+  await handleToolCall("ateam_workspace_status", {}, sid2);
+  names = await listedNames(sid2);
+  assert.ok(withoutWorkspaceTools(names) && names.includes("ateam_github_patch"));
+});

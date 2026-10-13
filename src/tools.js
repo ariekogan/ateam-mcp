@@ -8899,7 +8899,8 @@ export async function workspaceAvailable(sessionId) {
 export async function listedTools(sessionId) {
   const available = await workspaceAvailable(sessionId);
   noteWorkspaceListed(sessionId, available);
-  const offered = available ? coreTools : coreTools.filter((t) => !WORKSPACE_TOOL_NAMES.includes(t.name));
+  // A workspace that is open keeps its own tools listed whatever the switch now says: with the old writers withheld, the agent must always have one set to work with (it ends the workspace with close or save).
+  const offered = available || getWorkspaceId(sessionId) ? coreTools : coreTools.filter((t) => !WORKSPACE_TOOL_NAMES.includes(t.name));
   if (!getWorkspaceId(sessionId)) return offered;
   return offered.filter((t) => !WORKSPACE_WITHHELD.has(t.name));
 }
