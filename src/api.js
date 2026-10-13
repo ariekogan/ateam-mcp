@@ -762,6 +762,54 @@ export function touchSession(sessionId, { toolName, solutionId, skillId, actorId
   }
 }
 
+// ── The session's current workspace (Phase C, ateam_workspace_*) ──────────
+//
+// A chat agent loses ids between turns, so the MCP session remembers the
+// workspace_id its last open/exec/... answered with and uses it when a call
+// omits it. It lives on the session record like the rest of the per-session
+// state, so a new sign-in (a new record) forgets it; the server's own `open`
+// is idempotent, which is the safety net. While one is remembered, the tools
+// that write `dev` by the old route are withheld (tools.js WORKSPACE_WITHHELD).
+const workspaceWatchers = new Map(); // sessionId → Set<fn> called when "a workspace is open" flips
+
+export function getWorkspaceId(sessionId) {
+  return sessionRecord(sessionId)?.workspaceId || null;
+}
+
+export function hasOpenWorkspace(sessionId) {
+  return Boolean(getWorkspaceId(sessionId));
+}
+
+/** Remember (or, with null, forget) the session's workspace. Returns true when "a workspace is open" flipped. */
+export function setWorkspaceId(sessionId, workspaceId) {
+  const session = sessionRecord(sessionId);
+  if (!session) return false;
+  const before = Boolean(session.workspaceId);
+  if (workspaceId) session.workspaceId = String(workspaceId);
+  else delete session.workspaceId;
+  const flipped = before !== Boolean(session.workspaceId);
+  if (flipped) notifyWorkspaceWatchers(sessionId);
+  return flipped;
+}
+
+function notifyWorkspaceWatchers(sessionId) {
+  for (const fn of workspaceWatchers.get(sessionId) || []) {
+    try { fn(); } catch { /* a notification must never fail a tool call */ }
+  }
+}
+
+/** Call `fn` whenever this session's tool list changes because a workspace opened or closed. Returns the unsubscribe. */
+export function watchWorkspace(sessionId, fn) {
+  if (!workspaceWatchers.has(sessionId)) workspaceWatchers.set(sessionId, new Set());
+  workspaceWatchers.get(sessionId).add(fn);
+  return () => {
+    const set = workspaceWatchers.get(sessionId);
+    if (!set) return;
+    set.delete(fn);
+    if (!set.size) workspaceWatchers.delete(sessionId);
+  };
+}
+
 /**
  * Get session context — what the user has been working on.
  * Returns {} if no session or no context.

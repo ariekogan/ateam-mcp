@@ -49,14 +49,44 @@ export const BRANCH_WORKFLOW = Object.freeze({
   write_side: 'Every write lands on `dev`: ateam_github_patch, ateam_github_write and ateam_patch all default there. '
     + 'ateam_github_patch and ateam_github_write only change the repo; nothing is deployed until a deploy tool runs. '
     + 'ateam_patch also redeploys what it patched, from `dev`.',
+  // A chat agent with no shell (ChatGPT, Claude.ai) edits many files with real commands in a workspace instead of
+  // one file per call. Plain words by design: the user of such an agent is a business user, so this text
+  // names no branch, commit or other git term, and tells the agent to show the user none.
+  workspace: 'No shell of your own? ateam_workspace_open gives you one workspace for this conversation: your files are in /workspace and ateam_workspace_exec runs any command there. '
+    + 'The other ateam_* tools cannot see your edits until ateam_workspace_save; only saving makes them live. '
+    + 'While it is open the single-file write tools are switched off; ateam_workspace_close brings them back. '
+    + 'Show the user only each answer\'s `summary`, never branches, commits or git words. A refusal lists the single-file tools to use instead: use them.',
   // It said "ONLY ateam_github_promote writes it" and, in write_side, "Nothing
-  // reaches `main` without a promote". Two writes do: ateam_github_rollback
-  // (this same doc says it adds a commit on main), and any write that names
+  // reaches `main` without a promote". One write does: any write that names
   // ref:'main' (ateam_github_patch documents that as the emergency hotfix).
-  // Both are deliberate, which is the point: nothing lands on main BY DEFAULT.
+  // It is deliberate, which is the point: nothing lands on main BY DEFAULT.
+  // (ateam_github_rollback no longer writes main: going back is a Restore onto dev, then a promote.)
   deploy_side: '`main` is production, and nothing writes it by default. Work reaches it through ateam_github_promote; '
-    + 'the only other writes are deliberate ones: ateam_github_rollback, and a write that names ref:"main" (the emergency hotfix path). '
-    + 'ateam_build_and_run(solution_id) deploys `main` and has no ref parameter; a part you pass it inline (solution, skills, mcp_store) deploys as you sent it.',
+    + 'the only other write is a deliberate one: a write that names ref:"main" (the emergency hotfix path). Going back to an older version is a Restore onto `dev`, then a promote. '
+    + 'ateam_build_and_run(solution_id) deploys `main`; pass ref (a branch, tag or commit) to deploy exactly that commit of the bound repository instead. A part you pass it inline (solution, skills, mcp_store) deploys as you sent it, and cannot be combined with ref.',
+  // WITH GIT, OR WITHOUT (git plan A5). The Git path is the preferred one for an
+  // agent that can run Git; the ateam_github_* tools are the fallback, not a
+  // second flow: both write the same `dev` and both end in the same promote.
+  // Every tool named here exists (ateam_get_repository_binding, ateam_inspect_data,
+  // ref on ateam_build_and_run, `running` on ateam_get_solution status/health).
+  git_or_tools:
+    'If you can run Git, clone the repository and use it: ateam_get_repository_binding(solution_id) says which repository (clone_url, development and production branch); '
+    + 'commit and push to `dev`, then deploy that exact commit with ateam_build_and_run(solution_id, ref: "<sha>"). '
+    + 'ateam_get_solution(solution_id, view: "status" or "health") shows the commit that is running (`running`). '
+    + 'ateam_inspect_data reads what is stored (read-only, this workspace only; it may be switched off, DATA_INSPECT_DISABLED). '
+    + 'If you cannot run Git, or the clone is refused, use the ateam_github_* tools: they write the same `dev` branch. '
+    + 'Either way `main` changes only by an explicit ateam_github_promote, and no tool here hands out a GitHub token: never ask for one or put one in the chat.',
+  // What ref does to a commit that is NOT main's tip, stated once and rendered
+  // into the schema text, bootstrap and CLAUDE.md. Facts, from the Builder's
+  // refDeployVerdict / replaceFoldersWithCommit: it warns instead of refusing
+  // (you named the commit), writes nothing to the repository, and what Core runs
+  // is the commit's files.
+  ref_deploy_note:
+    'ref deploys exactly one commit: it is resolved once to a SHA of this workspace\'s own repository (another repository is refused) and `deployed_commit` names it. '
+    + 'Main\'s tip deploys as a call without ref does. Any other commit (a `dev` commit you pushed, an older prod-* tag) is deployed as you named it and the answer WARNS (deploy.warnings, REF_DEPLOY): '
+    + 'whether the commit is part of `main`, and which files `dev` changed that it lacks, which replaces what an earlier deploy from `dev` put in Core. '
+    + 'It never pushes to `dev` or `main` and writes no CLAUDE.md; the connector files Core runs are the commit\'s files and no others (connector_files_removed lists any it dropped). '
+    + 'Deployed is not shipped: a commit that is not part of `main` is still not production, and the next ateam_build_and_run without ref deploys `main` over it.',
   // It used to say "NOTHING you wrote is running". That is false the moment
   // ateam_patch has run: it deploys from `dev`. The real trap is the next step.
   // build_and_run then deploys `main` over what was just tested.
@@ -75,10 +105,10 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // put the misleading phrase back into the very response meant to retire it,
   // where a first-turn agent reads it before the correction lands.
   promote_is_a_ship_not_a_checkpoint:
-    'ateam_github_promote SHIPS: it merges dev → main, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
+    'ateam_github_promote SHIPS: it moves main forward to the exact version tried on dev, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
   // THE ITERATION LOOP, which is NOT the ship loop and kept being mistaken for it.
   //
-  // ateam_build_and_run deploys `main` and has no ref parameter, so reading the
+  // ateam_build_and_run deploys `main` unless it is given a ref, so reading the
   // ship loop alone leaves you believing NOTHING can be tested before it is in
   // production. That is false, and the doc that said it shipped into a tenant
   // repo. ateam_patch and ateam_upload_connector deploy to Core from `dev`
@@ -109,10 +139,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // `dev` has it too (its guard walks every file) — neither shipping dev's copy
   // over the rollback nor writing the rollback over dev. ateam_upload_connector reads `dev` directly and has no
   // such check.
-  rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history. '
-    + 'Then ateam_build_and_run(solution_id) deploys it, and ateam_github_sync_from_main(solution_id) brings `dev` along. Until then `dev` still holds the rolled-back change: '
-    + 'ateam_redeploy and ateam_patch refuse to deploy the solution and name the rolled-back files, an ateam_github_patch of one of them on `dev` is committed but not copied into the Builder, '
-    + 'and ateam_upload_connector deploys `dev`\'s connector code — the rolled-back change — again.',
+  rollback: 'Production is never rolled back directly. To go back: find a prod-* tag with ateam_github_list_versions, put that version back on `dev` with ateam_github_rollback(solution_id, target) (the Restore button in the A-Team app does the same), try it, then ateam_github_promote.',
   no_git_at_all:
     'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',
 });

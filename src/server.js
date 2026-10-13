@@ -10,8 +10,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { tools, coreTools, handleToolCall, MCP_VERSION, openingFor } from "./tools.js";
-import { runToolCall } from "./api.js";
+import { tools, listedTools, handleToolCall, MCP_VERSION, openingFor } from "./tools.js";
+import { runToolCall, watchWorkspace } from "./api.js";
 
 /**
  * The MCP `instructions` for a session, built when its server is created: on
@@ -50,14 +50,25 @@ export function createServer(sessionId = "stdio", { transport = null } = {}) {
     // could not be answered from the protocol at all.
     { name: "ateam-mcp", version: MCP_VERSION },
     {
-      capabilities: { tools: {} },
+      capabilities: { tools: { listChanged: true } },
       instructions: serverInstructions(sessionId, transport),
     }
   );
 
   // Only advertise core tools — advanced tools are still callable but not listed.
   // This reduces cognitive load from 23+ tools to ~11 in the tool surface.
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: coreTools }));
+  //
+  // While this session has a workspace open, the tools that write `dev` by the
+  // old route are left out (listedTools), and a client that honours
+  // notifications/tools/list_changed is told when that changes. One that does
+  // not is still refused in the call itself (handleToolCall).
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: await listedTools(sessionId) }));
+  const unwatch = watchWorkspace(sessionId, () => {
+    // Before a transport is connected there is nobody to tell.
+    Promise.resolve(server.sendToolListChanged()).catch(() => {});
+  });
+  const onclose = server.onclose;
+  server.onclose = () => { unwatch(); onclose?.(); };
 
   // Every call runs as its session was when the call ARRIVED: a sign-in by
   // another call on the same session (ateam-proxy-mcp shares one session among
