@@ -61,7 +61,6 @@ const signedIn = () => {
 };
 const OPEN_OK = { ok: true, workspace_id: "ws-0123456789ab", state: "open", summary: "Your workspace is ready.", details: { branch: "dev", head: "abc" } };
 const happy = (method, p) => {
-  if (method === "available") return { ok: true, available: true, summary: "Workspaces are available." };
   if (method === "open") return OPEN_OK;
   if (method === "close") return { ok: true, workspace_id: p.workspace_id, state: "closed", summary: "Closed. Nothing was left unsaved.", details: {} };
   return { ok: true, workspace_id: p.workspace_id, summary: "ok", details: {} };
@@ -332,12 +331,11 @@ test("open and close tell a client that honours list_changed; a first listing do
   await client.close();
 });
 
-test("the teaching text about workspaces is given to a signed-in session, and the agent doc header only when asked for", async () => {
+test("the teaching text about workspaces is given to a signed-in session, and the agent doc header", async () => {
   const on = signedIn(); answer = happy;
   assert.match(JSON.stringify(await handleToolCall("ateam_bootstrap", {}, on)), /ateam_workspace_open/);
   const base = { solution: { id: "s", name: "S" }, skills: [], connectors: [] };
-  assert.match(renderAgentDocHeader({ ...base, workspaces: true }), /ateam_workspace_open/);
-  assert.doesNotMatch(renderAgentDocHeader(base), /ateam_workspace/);
+  assert.match(renderAgentDocHeader(base), /ateam_workspace_open/);
 });
 
 // ── a call that fails before Core answers is plain data, never the generic hint text ──────────────────────

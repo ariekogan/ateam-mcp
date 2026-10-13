@@ -30,10 +30,9 @@ export const AGENT_DOC_SENTINEL = "<!-- SOLUTION-SPECIFIC NOTES BELOW — not au
  * @param {object} params.solution    - Full solution definition
  * @param {Array}  params.skills      - Array of skill definitions
  * @param {Array}  [params.connectors] - Solution-connector metadata
- * @param {boolean} [params.workspaces] - Session workspaces are available for this tenant (the platform said so): teach them. Default off.
  * @returns {string} markdown
  */
-export function renderAgentDocHeader({ solution, skills = [], connectors = [], workspaces = false }) {
+export function renderAgentDocHeader({ solution, skills = [], connectors = [] }) {
   const solId = solution?.id || "unknown";
   const solName = solution?.name || solId;
   const solDesc = solution?.description || "";
@@ -77,7 +76,7 @@ export function renderAgentDocHeader({ solution, skills = [], connectors = [], w
     return `- **${p.name || p.id}** (\`${p.id}\`, ${mode})`;
   }).join("\n") || "_(none)_";
 
-  const tools = buildToolTable({ workspaces });
+  const tools = buildToolTable();
   const pitfalls = buildUniversalPitfalls();
   const repoLayout = buildRepoLayout({ skills, connectors });
 
@@ -132,7 +131,7 @@ ${BRANCH_WORKFLOW.one_line}
 
 ${BRANCH_WORKFLOW.write_side}
 
-${workspaces ? `${BRANCH_WORKFLOW.workspace}\n\n` : ""}> \`${BRANCH_WORKFLOW.write_branch}\` may not exist yet in this repo. The platform creates it from
+${BRANCH_WORKFLOW.workspace}\n\n> \`${BRANCH_WORKFLOW.write_branch}\` may not exist yet in this repo. The platform creates it from
 > \`${BRANCH_WORKFLOW.deploy_branch}\` on the first write it makes (ensureDevBranch), so a repo that has
 > only ever been written to by hand will not have it until then — hence the
 > \`|| git checkout -b\` on the clone line under "Editing files by hand" below.
@@ -294,7 +293,7 @@ function buildConnectorTable({ platform, solution }) {
   return rows.join("\n");
 }
 
-function buildToolTable({ workspaces }) {
+function buildToolTable() {
   return [
     "| Task | Tool |",
     "|------|------|",
@@ -302,7 +301,7 @@ function buildToolTable({ workspaces }) {
     // deploys `main`, so that sequence is refused (MAIN_BEHIND_DEV) or ships
     // without the edit. Test from dev; ship with promote.
     "| Edit connector source code | `ateam_github_patch` / `ateam_github_write`, then `ateam_upload_connector(solution_id, connector_id, github:true)` to test it from `dev` |",
-    ...(workspaces ? ["| Many files or real commands, with no shell of your own | `ateam_workspace_open`, `ateam_workspace_exec`, then `ateam_workspace_save` to make it live; `ateam_workspace_close` when done |"] : []),
+    "| Many files or real commands, with no shell of your own | `ateam_workspace_open`, `ateam_workspace_exec`, then `ateam_workspace_save` to make it live; `ateam_workspace_close` when done |",
     "| Edit skill definition (persona, tools, intents, guardrails) | `ateam_patch(target:\"skill\", skill_id, updates)` |",
     "| Edit solution definition | `ateam_patch(target:\"solution\", updates)` |",
     "| First deploy (with `mcp_store`) / deploy `main` after a promote | `ateam_build_and_run(solution_id)` |",

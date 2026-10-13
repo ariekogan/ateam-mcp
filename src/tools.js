@@ -7851,7 +7851,7 @@ export const handlers = {
     } catch { /* no skills yet — render anyway */ }
     const connectors = Array.isArray(solution?.connectors) ? solution.connectors : [];
 
-    const freshHeader = renderAgentDocHeader({ solution, skills, connectors, workspaces: workspaceOffered(sid) });
+    const freshHeader = renderAgentDocHeader({ solution, skills, connectors });
     let existing = null;
     try {
       const r = await get(
@@ -9153,7 +9153,7 @@ function whyNotSignedIn(ctx) {
 
 /**
  * Are the workspace tools offered to this session? Whenever it is signed in. There is no availability probe: one that failed
- * once (Core restarting during a deploy, a tools/list arriving before the sign-in registered) hid the five tools for a whole
+ * once (Core restarting during a deploy, a 502) hid the five tools for a whole
  * chat, because a client lists once. A switch that is off, a trial workspace or a key tied to no person is answered by the
  * call itself, with a plain refusal that names the single-file tools to use instead (workspaceTools.js).
  */
