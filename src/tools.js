@@ -9243,7 +9243,7 @@ function whyNotSignedIn(ctx) {
 /**
  * Are the workspace tools offered to this session? Whenever it is signed in. There is no availability probe: one that failed
  * once (Core restarting during a deploy, a 502) hid the five tools for a whole
- * chat, because a client lists once. A switch that is off, a trial workspace or a key tied to no person is answered by the
+ * chat, because a client lists once. A trial workspace, local mode or a key tied to no person is answered by the
  * call itself, with a plain refusal that names the single-file tools to use instead (workspaceTools.js).
  */
 export function workspaceOffered(sessionId) {

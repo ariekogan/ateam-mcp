@@ -157,7 +157,7 @@ test("close forgets the id; a refused open forgets it; a transient refusal keeps
   assert.equal(getWorkspaceId(sid), null);
 
   await handleToolCall("ateam_workspace_open", {}, sid);
-  answer = () => ({ ok: false, code: "WORKSPACES_SWITCHED_OFF", summary: "Workspaces are switched off for this workspace.", fallback: FALLBACK });
+  answer = () => ({ ok: false, code: "DEV_WORKSPACE_NOT_AVAILABLE", summary: "Workspaces are not available on a trial.", fallback: FALLBACK });
   const refused = await handleToolCall("ateam_workspace_open", {}, sid);
   assert.equal(getWorkspaceId(sid), null);
   assert.equal(refused.isError, true);
@@ -286,9 +286,9 @@ const withWorkspaceTools = (names) => WORKSPACE_TOOL_NAMES.every((n) => names.in
 const withoutWorkspaceTools = (names) => WORKSPACE_TOOL_NAMES.every((n) => !names.includes(n));
 
 test("signed in: the five tools are listed whatever Core says or fails to say; not signed in: they are not (and Core is never asked)", async () => {
-  // A failing probe used to hide them for a whole chat (a client lists once): Core restarting during a deploy, a 502, a switch off.
+  // A failing probe used to hide them for a whole chat (a client lists once): Core restarting during a deploy, a 502.
   for (const a of [
-    () => ({ ok: true, available: false, summary: "Workspaces are switched off for this tenant." }),
+    () => ({ ok: true, available: false, summary: "Workspaces are not available on a trial." }),
     () => ({ __status: 502, ok: false, code: "CORE_TOOL_FAILED" }),
     () => ({ ok: false, code: "WORKSPACE_KEY_HAS_NO_PERSON", summary: "This key is not tied to a person." }),
   ]) {
@@ -305,9 +305,9 @@ test("signed in: the five tools are listed whatever Core says or fails to say; n
   assert.equal(calls.length, 0, "a session that is not signed in is not asked");
 });
 
-test("a refused call is answered plainly by the call itself (switch off): the single-file tools are named", async () => {
+test("a refused call is answered plainly by the call itself: the single-file tools are named", async () => {
   const sid = signedIn();
-  answer = () => ({ ok: false, code: "WORKSPACES_SWITCHED_OFF", summary: "Workspaces are switched off.", fallback: FALLBACK });
+  answer = () => ({ ok: false, code: "DEV_WORKSPACE_NOT_AVAILABLE", summary: "Workspaces are not available for this workspace.", fallback: FALLBACK });
   const r = json(await handleToolCall("ateam_workspace_open", {}, sid));
   assert.equal(r.ok, false);
   assert.deepEqual(r.use_instead.tools, FALLBACK);
@@ -399,10 +399,10 @@ test("a workspace that is open keeps its tools, the old writers stay withheld; a
   await handleToolCall("ateam_workspace_close", {}, sid);
   names = await listedNames(sid);
   assert.ok(withWorkspaceTools(names) && names.includes("ateam_github_patch"), "after close: both sets");
-  // Core says the switch is off on the next call: the workspace is forgotten and the writers return.
+  // Core says workspaces are not available on the next call: the workspace is forgotten and the writers return.
   const sid2 = signedIn();
   await handleToolCall("ateam_workspace_open", {}, sid2);
-  answer = () => ({ ok: false, code: "WORKSPACES_SWITCHED_OFF", summary: "Workspaces are switched off.", fallback: FALLBACK });
+  answer = () => ({ ok: false, code: "DEV_WORKSPACE_NOT_AVAILABLE", summary: "Workspaces are not available for this workspace.", fallback: FALLBACK });
   await handleToolCall("ateam_workspace_status", {}, sid2);
   names = await listedNames(sid2);
   assert.ok(names.includes("ateam_github_patch"));

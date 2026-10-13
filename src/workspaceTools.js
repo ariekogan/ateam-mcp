@@ -135,7 +135,7 @@ export function forbiddenArgIn(args) {
 // and the old writers come back. A transient refusal (a save running, bad arguments) does NOT forget it.
 const GONE_CODES = new Set([
   "WORKSPACE_CLOSED", "WORKSPACE_EXPIRED", "WORKSPACE_NOT_FOUND",
-  "DEV_WORKSPACE_NOT_AVAILABLE", "WORKSPACES_SWITCHED_OFF",
+  "DEV_WORKSPACE_NOT_AVAILABLE",
 ]);
 
 /**
