@@ -149,7 +149,7 @@ import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId } from "./api.js";
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
-  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, BACKGROUND_DEFAULT_MS, waitCommand, foregroundFromWait,
+  QUICK_WAIT_SECONDS, withheldCall, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, BACKGROUND_DEFAULT_MS, waitCommand, foregroundFromWait,
 } from "./workspaceTools.js";
 
 // A step that waits for a person: the Builder's human_step_testing words, verbatim.
@@ -378,7 +378,8 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   }
   return {
     ok: false,
-    error: `${label} polling timed out after ${Math.round(maxMs / 60_000)}min`,
+    timed_out: true,
+    error: `${label} polling timed out after ${maxMs >= 60_000 ? `${Math.round(maxMs / 60_000)}min` : `${Math.round(maxMs / 1000)}s`}`,
     last_status: lastStatus,
     job_id: jobId,
     hint: 'The job may still be running on the server. Call get(`/deploy/jobs/<job_id>`) directly to check.',
@@ -413,7 +414,10 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
 //
 // Runs live in this process's memory. A restart forgets them (the deploy is the
 // Builder's and goes on regardless), and resume then says there is no run.
-export const HOSTED_CALL_BUDGET_MS = 75_000;
+//
+// 45 s, not the 75 s it was: the chat client gives up on a tool call near 60 s (seen live, 2026-10-13: a deploy answered
+// "timed out after 60s" while it was still within its budget), and the edge near 100 s.
+export const HOSTED_CALL_BUDGET_MS = 45_000;
 
 // How long a finished run can still be resumed: as long as the Builder keeps a
 // finished deploy job (startAsyncDeployJob evicts after 30 minutes).
@@ -547,6 +551,20 @@ async function buildRunWithinBudget(args, sid) {
     ? inFlight
     : startBuildRun(owner, solutionId, deployArgs, argsKey, sid);
   return answerWithinBudget(run, callStartMs);
+}
+
+/** A redeploy not finished within the hosted call's budget: no verdict yet, and how to ask again. The job goes on. */
+function redeployStillRunning(solutionId, skillId, jobId) {
+  const again = `ateam_redeploy({ solution_id: "${solutionId}", ${skillId ? `skill_id: "${skillId}", ` : ""}job_id: "${jobId}", resume: true })`;
+  return {
+    ok: null,
+    status: "running",
+    solution_id: solutionId,
+    ...(skillId && { skill_id: skillId }),
+    job_id: jobId,
+    message: `The redeploy of "${solutionId}" is still running. This call answers now because the chat connection gives up after about 60 seconds. The redeploy was not stopped, and nothing of it is sent again.`,
+    _next: `${again} waits for THIS redeploy again (up to ${HOSTED_CALL_BUDGET_MS / 1000}s) and answers with its result; it deploys nothing new. Do not tell the user it is deployed until it says so.`,
+  };
 }
 
 // ─── The redeploy verdict ───────────────────────────────────────────
@@ -3695,7 +3713,7 @@ export const tools = [
     name: "ateam_redeploy",
     core: true,
     description:
-      "Re-deploy skills WITHOUT changing any definitions. ⚠️ HEAVY OPERATION: regenerates MCP servers (Python code) for every skill, pushes each to A-Team Core, restarts connectors, and verifies tool discovery. Takes 30-120s depending on skill count. Use after connector restarts, Core hiccups, or stale state. For incremental changes, prefer ateam_patch (which updates + redeploys in one step).",
+      "Re-deploy skills WITHOUT changing any definitions. ⚠️ HEAVY OPERATION: regenerates MCP servers (Python code) for every skill, pushes each to A-Team Core, restarts connectors, and verifies tool discovery. Takes 30-120s depending on skill count; over a hosted connection the call answers within " + HOSTED_CALL_BUDGET_MS / 1000 + "s, and a redeploy not done by then answers status:'running' with a job_id (ateam_redeploy({solution_id, job_id, resume:true}) waits for it again). Use after connector restarts, Core hiccups, or stale state. For incremental changes, prefer ateam_patch (which updates + redeploys in one step).",
     inputSchema: {
       type: "object",
       properties: {
@@ -3706,6 +3724,14 @@ export const tools = [
         skill_id: {
           type: "string",
           description: "Optional: redeploy a single skill only. Omit to redeploy ALL skills in the solution.",
+        },
+        resume: {
+          type: "boolean",
+          description: "true with job_id: wait again for a redeploy that answered status:\"running\" and answer with its result. Deploys nothing new.",
+        },
+        job_id: {
+          type: "string",
+          description: "With resume:true: the job_id a status:\"running\" answer gave.",
         },
       },
       required: ["solution_id"],
@@ -8186,10 +8212,12 @@ export const handlers = {
     return done ? shapeWorkspaceResult("exec", done, { keepWorkspace: true }) : started;
   },
   ateam_workspace_status: ({ workspace_id }, sid) => workspaceCall("status", { workspace_id }, sid, { timeoutMs: 140_000 }),
+  // A save deploys and takes 70-80 s; the chat client gives up near 60 s. Core is asked to answer "still saving" after the same
+  // QUICK_WAIT_SECONDS an exec waits; the save goes on, and ateam_workspace_status says how it ended.
   ateam_workspace_save: ({ workspace_id, message }, sid) =>
-    workspaceCall("save", { workspace_id, message }, sid, { timeoutMs: 140_000 }),
+    workspaceCall("save", { workspace_id, message, wait_ms: QUICK_WAIT_SECONDS * 1000 }, sid, { timeoutMs: 140_000 }),
   ateam_workspace_close: ({ workspace_id, save }, sid) =>
-    workspaceCall("close", { workspace_id, save: save === true ? true : undefined }, sid, { timeoutMs: 140_000 }),
+    workspaceCall("close", { workspace_id, save: save === true ? true : undefined, ...(save === true && { wait_ms: QUICK_WAIT_SECONDS * 1000 }) }, sid, { timeoutMs: 140_000 }),
 
   ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) => {
     const before = await _existingContentOrNull(solution_id, filePath, ref, sid);
@@ -8650,7 +8678,11 @@ export const handlers = {
     };
   },
 
-  ateam_redeploy: async ({ solution_id, skill_id }, sid) => {
+  ateam_redeploy: async ({ solution_id, skill_id, resume, job_id }, sid) => {
+    // Over a hosted connection the call answers within HOSTED_CALL_BUDGET_MS (the chat client gives up near 60 s): a redeploy that is
+    // not done by then keeps running on the Builder and answers status:"running" with its job_id; resume:true + job_id waits for it again.
+    const hosted = callTransport() !== "stdio";
+    const waitMs = hosted ? HOSTED_CALL_BUDGET_MS : 15 * 60_000;
     const endpoint = skill_id
       ? apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
       : apiPath`/deploy/solutions/${solution_id}/redeploy`;
@@ -8662,14 +8694,18 @@ export const handlers = {
     // useful error/hint to the agent.
     let result;
     let lastErr = null;
-    try {
+    const label = skill_id ? `redeploy-skill ${skill_id}` : 'redeploy-bulk';
+    if (resume === true || resume === "true") {
+      if (typeof job_id !== "string" || !job_id) {
+        return { ok: false, code: "NO_JOB_TO_RESUME", error: "resume:true needs the job_id a status:\"running\" answer gave.", _next: "Call ateam_redeploy({ solution_id, job_id, resume: true }) with that job_id; this call deployed nothing." };
+      }
+      result = await pollDeployJob(job_id, sid, { label, maxMs: waitMs, intervalMs: 2000 });
+      if (result?.timed_out && hosted) return redeployStillRunning(solution_id, skill_id, job_id);
+    } else try {
       const kicked = await post(endpoint, { async: true }, sid, { timeoutMs: 30_000 });
       if (kicked?.async && kicked.job_id) {
-        result = await pollDeployJob(kicked.job_id, sid, {
-          label: skill_id ? `redeploy-skill ${skill_id}` : 'redeploy-bulk',
-          maxMs: 15 * 60_000,
-          intervalMs: 2000,
-        });
+        result = await pollDeployJob(kicked.job_id, sid, { label, maxMs: waitMs, intervalMs: 2000 });
+        if (result?.timed_out && hosted) return redeployStillRunning(solution_id, skill_id, kicked.job_id);
       } else {
         result = kicked; // backend didn't honor async — already-finished sync result
       }
@@ -9288,9 +9324,10 @@ export async function handleToolCall(name, args, sessionId) {
 
   // While a workspace is open, the old writers of `dev` are refused (and not listed): see workspaceTools.js.
   // Only a tool the session was NOT offered is refused, so a client that cached the old list gets a plain sentence.
-  if (WORKSPACE_WITHHELD.has(name) && getWorkspaceId(sessionId)) {
+  const withheld = getWorkspaceId(sessionId) ? withheldCall(name, args) : null;
+  if (withheld) {
     return {
-      content: [{ type: "text", text: withheldSentence(name) }],
+      content: [{ type: "text", text: withheld }],
       isError: true,
       structuredContent: { ok: false, code: "WORKSPACE_OPEN" },
     };

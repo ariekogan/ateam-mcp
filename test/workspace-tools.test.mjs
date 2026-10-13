@@ -118,7 +118,7 @@ test("open sends no arguments, via the Builder route, and remembers the id; late
   await handleToolCall("ateam_workspace_status", {}, sid);
   assert.equal(calls[2].body.params.workspace_id, "ws-0123456789ab");
   await handleToolCall("ateam_workspace_save", { message: "Add a field" }, sid);
-  assert.deepEqual(calls[3].body.params, { workspace_id: "ws-0123456789ab", message: "Add a field" });
+  assert.deepEqual(calls[3].body.params, { workspace_id: "ws-0123456789ab", message: "Add a field", wait_ms: 40_000 });
   // An id the agent passes wins.
   await handleToolCall("ateam_workspace_status", { workspace_id: "ws-aaaaaaaaaaaa" }, sid);
   assert.equal(calls[4].body.params.workspace_id, "ws-aaaaaaaaaaaa");
@@ -542,4 +542,69 @@ test("open passes Core's environment text through, and exec points at it", async
   const r = json(await handleToolCall("ateam_workspace_open", {}, sid));
   assert.equal(r.environment, "a Linux container with git, node");
   assert.match(tools.find((t) => t.name === "ateam_workspace_exec").description, /`environment` in ateam_workspace_open/);
+});
+
+// ── a save deploys and takes over a minute; the chat client gives up near 60 s ───────────────────────────────
+test("save and close(save:true) ask Core to answer 'still saving' after 40 s; a close without save asks for nothing of the kind", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  calls = [];
+  await handleToolCall("ateam_workspace_save", {}, sid);
+  assert.equal(calls[0].body.params.wait_ms, 40_000);
+  await handleToolCall("ateam_workspace_close", { save: true }, sid);
+  assert.equal(calls[1].body.params.wait_ms, 40_000);
+  assert.equal(calls[1].body.params.save, true);
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  await handleToolCall("ateam_workspace_close", {}, sid);
+  assert.ok(!("wait_ms" in calls[3].body.params), JSON.stringify(calls[3].body.params));
+});
+
+test("a save Core says is still going comes back as a handle: not done, nothing lost, poll status in 20-30 s", async () => {
+  answer = (method, p) => method === "save"
+    ? { ok: true, workspace_id: p.workspace_id, state: "saving", summary: "The save is still going and nothing is lost; ask for the status in about half a minute to see how it ended.", save: { state: "running" } }
+    : happy(method, p);
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const r = json(await handleToolCall("ateam_workspace_save", {}, sid));
+  assert.equal(r.ok, true);
+  assert.equal(r.save.state, "running");
+  assert.match(r.next_step, /20-30 seconds.*ateam_workspace_status.*save field/s);
+  assert.match(r.next_step, /Do not tell the user it is live/);
+});
+
+// ── deploy and test while a session is open ─────────────────────────────────────────────────────────────────
+test("while a workspace is open: ateam_upload_connector with github:true and no files (a redeploy of what was saved) goes through; any form that writes files is refused with the way out", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  assert.ok((await listedTools(sid)).some((t) => t.name === "ateam_upload_connector"), "listed while a workspace is open");
+  for (const args of [
+    { solution_id: "s", connector_id: "c", files: [{ path: "a.js", content: "x" }] },
+    { solution_id: "s", connector_id: "c", github: true, files: [{ path: "a.js", content: "x" }] },
+    { solution_id: "s", connector_id: "c", github: true, replace: true },
+    { solution_id: "s", connector_id: "c" },
+  ]) {
+    const r = await handleToolCall("ateam_upload_connector", args, sid);
+    assert.equal(r.structuredContent?.code, "WORKSPACE_OPEN", JSON.stringify(args));
+    assert.match(text(r), /ateam_workspace_save/);
+    assert.match(text(r), /github:true and no files/);
+  }
+  const ok = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", github: true }, sid);
+  assert.notEqual(ok.structuredContent?.code, "WORKSPACE_OPEN", "a redeploy of the saved work was refused");
+  const empty = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", github: true, files: [] }, sid);
+  assert.notEqual(empty.structuredContent?.code, "WORKSPACE_OPEN", "an empty files list writes nothing");
+});
+
+test("while a workspace is open, the refusal of the shipped-version deploy says saving already deploys and that testing works; ateam_test_skill and ateam_conversation are not withheld", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const r = await handleToolCall("ateam_build_and_run", { solution_id: "s" }, sid);
+  assert.equal(r.structuredContent.code, "WORKSPACE_OPEN");
+  assert.match(text(r), /Saving already deploys.*ateam_workspace_save/s);
+  assert.match(text(r), /ateam_test_skill and ateam_conversation work while the workspace is open/);
+  const listed = (await listedTools(sid)).map((t) => t.name);
+  for (const t of ["ateam_test_skill", "ateam_conversation", "ateam_redeploy", "ateam_upload_connector"]) assert.ok(listed.includes(t), t);
+  assert.ok(!WORKSPACE_WITHHELD.has("ateam_test_skill") && !WORKSPACE_WITHHELD.has("ateam_conversation"));
 });
