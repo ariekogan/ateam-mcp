@@ -167,6 +167,7 @@ const READ_BY_POST = [
   [/^\/validate\/(skill|solution)$/, "validation of the definition in the body; stores nothing"],
   [/^\/spec\/advisor$/, "an LLM answer over the capability catalog"],
   [/^\/spec\/search$/, "a semantic search over the public spec docs"],
+  [/^\/deploy\/data\/inspect$/, "reads stored data through Core's read-only data tool (cp.data_api); changes nothing"],
 ];
 const isRead = ({ method, path, outside }) =>
   !outside && (method === "GET" || (method === "POST" && READ_BY_POST.some(([rx]) => rx.test(path))));
@@ -192,7 +193,7 @@ const ARGS = {
   // for the additive and destructive tools: enough to reach the call each
   // exists for, and no longer than one round trip.
   message: "m", messages: ["m"], actor_id: "a", content: "c", step: "st", status: "built",
-  tool: "c.list_items", error: "e", api_key: KEY, wait: false, wait_for: "never",
+  tool: "c.list_items", method: "collections", error: "e", api_key: KEY, wait: false, wait_for: "never",
   plugin_name: "p", files: [{ path: "server.js", content: "x" }], confirm: true, confirm_solution_id: "s",
 };
 

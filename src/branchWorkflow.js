@@ -56,7 +56,30 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // Both are deliberate, which is the point: nothing lands on main BY DEFAULT.
   deploy_side: '`main` is production, and nothing writes it by default. Work reaches it through ateam_github_promote; '
     + 'the only other writes are deliberate ones: ateam_github_rollback, and a write that names ref:"main" (the emergency hotfix path). '
-    + 'ateam_build_and_run(solution_id) deploys `main` and has no ref parameter; a part you pass it inline (solution, skills, mcp_store) deploys as you sent it.',
+    + 'ateam_build_and_run(solution_id) deploys `main`; pass ref (a branch, tag or commit) to deploy exactly that commit of the bound repository instead. A part you pass it inline (solution, skills, mcp_store) deploys as you sent it, and cannot be combined with ref.',
+  // WITH GIT, OR WITHOUT (git plan A5). The Git path is the preferred one for an
+  // agent that can run Git; the ateam_github_* tools are the fallback, not a
+  // second flow: both write the same `dev` and both end in the same promote.
+  // Every tool named here exists (ateam_get_repository_binding, ateam_inspect_data,
+  // ref on ateam_build_and_run, `running` on ateam_get_solution status/health).
+  git_or_tools:
+    'If you can run Git, clone the repository and use it: ateam_get_repository_binding(solution_id) says which repository (clone_url, development and production branch); '
+    + 'commit and push to `dev`, then deploy that exact commit with ateam_build_and_run(solution_id, ref: "<sha>"). '
+    + 'ateam_get_solution(solution_id, view: "status" or "health") shows the commit that is running (`running`). '
+    + 'ateam_inspect_data reads what is stored (read-only, this workspace only; it may be switched off, DATA_INSPECT_DISABLED). '
+    + 'If you cannot run Git, or the clone is refused, use the ateam_github_* tools: they write the same `dev` branch. '
+    + 'Either way `main` changes only by an explicit ateam_github_promote, and no tool here hands out a GitHub token: never ask for one or put one in the chat.',
+  // What ref does to a commit that is NOT main's tip, stated once and rendered
+  // into the schema text, bootstrap and CLAUDE.md. Facts, from the Builder's
+  // refDeployVerdict / replaceFoldersWithCommit: it warns instead of refusing
+  // (you named the commit), writes nothing to the repository, and what Core runs
+  // is the commit's files.
+  ref_deploy_note:
+    'ref deploys exactly one commit: it is resolved once to a SHA of this workspace\'s own repository (another repository is refused) and `deployed_commit` names it. '
+    + 'Main\'s tip deploys as a call without ref does. Any other commit (a `dev` commit you pushed, an older prod-* tag) is deployed as you named it and the answer WARNS (deploy.warnings, REF_DEPLOY): '
+    + 'whether the commit is part of `main`, and which files `dev` changed that it lacks, which replaces what an earlier deploy from `dev` put in Core. '
+    + 'It never pushes to `dev` or `main` and writes no CLAUDE.md; the connector files Core runs are the commit\'s files and no others (connector_files_removed lists any it dropped). '
+    + 'Deployed is not shipped: a commit that is not part of `main` is still not production, and the next ateam_build_and_run without ref deploys `main` over it.',
   // It used to say "NOTHING you wrote is running". That is false the moment
   // ateam_patch has run: it deploys from `dev`. The real trap is the next step.
   // build_and_run then deploys `main` over what was just tested.
@@ -78,7 +101,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
     'ateam_github_promote SHIPS: it merges dev → main, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
   // THE ITERATION LOOP, which is NOT the ship loop and kept being mistaken for it.
   //
-  // ateam_build_and_run deploys `main` and has no ref parameter, so reading the
+  // ateam_build_and_run deploys `main` unless it is given a ref, so reading the
   // ship loop alone leaves you believing NOTHING can be tested before it is in
   // production. That is false, and the doc that said it shipped into a tenant
   // repo. ateam_patch and ateam_upload_connector deploy to Core from `dev`
