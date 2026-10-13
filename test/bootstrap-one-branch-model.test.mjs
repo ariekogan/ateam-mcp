@@ -398,14 +398,17 @@ check("the CLAUDE.md no longer says every iterate deploy (upload_connector inclu
   check("  and says connector code has no such check",
         /Connector code has no such check: ateam_upload_connector deploys `dev`'s code/.test(gp));
 }
-check("rollback no longer claims ateam_redeploy undoes it (the Builder refuses the rolled-back files until dev has them)",
-      !/ateam_redeploy deploys the rolled-back change again/.test(BRANCH_WORKFLOW.rollback)
-      && /ateam_redeploy and ateam_patch refuse to deploy the solution and name the rolled-back files/.test(BRANCH_WORKFLOW.rollback));
-check("rollback says ateam_upload_connector deploys dev's code again until the sync",
-      /ateam_upload_connector deploys `dev`'s connector code — the rolled-back change — again/.test(BRANCH_WORKFLOW.rollback));
-check("rollback says to bring dev along (the iterate tools deploy dev)",
-      /ateam_github_sync_from_main/.test(BRANCH_WORKFLOW.rollback)
-      && tools.find((t) => t.name === "ateam_github_rollback").description.includes("ateam_github_sync_from_main"));
+// Production is never reset directly (stage 2): the Builder refuses a rollback of main, so no text may teach one.
+check("rollback text says production is never rolled back directly: Restore onto dev, then promote",
+      /never rolled back directly/.test(BRANCH_WORKFLOW.rollback)
+      && /ateam_github_rollback/.test(BRANCH_WORKFLOW.rollback) && /ateam_github_promote/.test(BRANCH_WORKFLOW.rollback)
+      && !/rolls `main` back/.test(BRANCH_WORKFLOW.rollback));
+check("the rollback tool restores dev (never main) and points at promote",
+      (d => /RESTORE `dev`/.test(d) && /never rolled back directly/.test(d) && /ateam_github_promote/.test(d))(tools.find((t) => t.name === "ateam_github_rollback").description));
+check("promote text says it moves main forward to the tested dev version, not a merge with a 409 recovery",
+      (d => /Moves `main` forward to the exact version tried on `dev`/.test(d) && !/ON 409 MERGE CONFLICT/.test(d))(tools.find((t) => t.name === "ateam_github_promote").description));
+check("sync_from_main is described as an old-repo repair, never as the recovery for a promote 409",
+      (d => /REPAIR TOOL FOR AN OLD REPO/.test(d) && !/USE THIS WHEN PROMOTE RETURNS 409/.test(d))(tools.find((t) => t.name === "ateam_github_sync_from_main").description));
 // Builder #50 (review round 5). The Builder's refusal after a hotfix or a
 // rollback is SOLUTION-WIDE — its guard walks every file, so a redeploy of an
 // unrelated skill is refused too. "refuse that file" understated it.

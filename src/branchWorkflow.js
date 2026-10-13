@@ -50,12 +50,12 @@ export const BRANCH_WORKFLOW = Object.freeze({
     + 'ateam_github_patch and ateam_github_write only change the repo; nothing is deployed until a deploy tool runs. '
     + 'ateam_patch also redeploys what it patched, from `dev`.',
   // It said "ONLY ateam_github_promote writes it" and, in write_side, "Nothing
-  // reaches `main` without a promote". Two writes do: ateam_github_rollback
-  // (this same doc says it adds a commit on main), and any write that names
+  // reaches `main` without a promote". One write does: any write that names
   // ref:'main' (ateam_github_patch documents that as the emergency hotfix).
-  // Both are deliberate, which is the point: nothing lands on main BY DEFAULT.
+  // It is deliberate, which is the point: nothing lands on main BY DEFAULT.
+  // (ateam_github_rollback no longer writes main: going back is a Restore onto dev, then a promote.)
   deploy_side: '`main` is production, and nothing writes it by default. Work reaches it through ateam_github_promote; '
-    + 'the only other writes are deliberate ones: ateam_github_rollback, and a write that names ref:"main" (the emergency hotfix path). '
+    + 'the only other write is a deliberate one: a write that names ref:"main" (the emergency hotfix path). Going back to an older version is a Restore onto `dev`, then a promote. '
     + 'ateam_build_and_run(solution_id) deploys `main`; pass ref (a branch, tag or commit) to deploy exactly that commit of the bound repository instead. A part you pass it inline (solution, skills, mcp_store) deploys as you sent it, and cannot be combined with ref.',
   // WITH GIT, OR WITHOUT (git plan A5). The Git path is the preferred one for an
   // agent that can run Git; the ateam_github_* tools are the fallback, not a
@@ -98,7 +98,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // put the misleading phrase back into the very response meant to retire it,
   // where a first-turn agent reads it before the correction lands.
   promote_is_a_ship_not_a_checkpoint:
-    'ateam_github_promote SHIPS: it merges dev → main, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
+    'ateam_github_promote SHIPS: it moves main forward to the exact version tried on dev, which is what makes your work deployable. The prod-YYYY-MM-DD-NNN tag it writes is a side effect for rollback, not the reason to call it.',
   // THE ITERATION LOOP, which is NOT the ship loop and kept being mistaken for it.
   //
   // ateam_build_and_run deploys `main` unless it is given a ref, so reading the
@@ -132,10 +132,7 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // `dev` has it too (its guard walks every file) — neither shipping dev's copy
   // over the rollback nor writing the rollback over dev. ateam_upload_connector reads `dev` directly and has no
   // such check.
-  rollback: 'ateam_github_rollback(solution_id, target) rolls `main` back to a previous prod-* tag or SHA. Additive: it creates a new commit and preserves history. '
-    + 'Then ateam_build_and_run(solution_id) deploys it, and ateam_github_sync_from_main(solution_id) brings `dev` along. Until then `dev` still holds the rolled-back change: '
-    + 'ateam_redeploy and ateam_patch refuse to deploy the solution and name the rolled-back files, an ateam_github_patch of one of them on `dev` is committed but not copied into the Builder, '
-    + 'and ateam_upload_connector deploys `dev`\'s connector code — the rolled-back change — again.',
+  rollback: 'Production is never rolled back directly. To go back: find a prod-* tag with ateam_github_list_versions, put that version back on `dev` with ateam_github_rollback(solution_id, target) (the Restore button in the A-Team app does the same), try it, then ateam_github_promote.',
   no_git_at_all:
     'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',
 });

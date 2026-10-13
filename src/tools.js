@@ -3408,10 +3408,10 @@ export const tools = [
     name: "ateam_github_promote",
     core: true,
     description:
-      "SHIP DEV TO PROD. Merges the `dev` branch into `main` and auto-tags the new main HEAD as prod-YYYY-MM-DD-NNN. " +
+      "SHIP DEV TO PROD. Moves `main` forward to the exact version tried on `dev` (no merge commit) and auto-tags the new main HEAD as prod-YYYY-MM-DD-NNN. " +
       "Use after testing your dev work, when you're ready to deploy changes to production.\n\n" +
-      "Workflow: 1) ateam_github_patch (writes to dev) → 2) ateam_github_promote (merges dev→main) → 3) ateam_build_and_run (deploys main).\n\n" +
-      "Pass dry_run:true to see what's about to ship without merging.\n\nON 409 MERGE CONFLICT: main holds commits dev never received. Call ateam_github_sync_from_main(solution_id) to merge main into dev, then promote again. Only if THAT also returns 409 did both sides edit the same lines — that one needs a human (open a PR on GitHub).",
+      "Workflow: 1) ateam_github_patch (writes to dev) → 2) ateam_github_promote (moves main to the tested dev version) → 3) ateam_build_and_run (deploys main).\n\n" +
+      "Pass dry_run:true to see what's about to ship without merging.\n\nmain only ever moves to a commit dev already has, so a promote does not conflict. An older repo where main holds a commit dev never received is brought level by the platform on the next build, not by you: do not open a PR.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3458,8 +3458,8 @@ export const tools = [
     core: true,
     description:
       "BRING `dev` UP TO DATE WITH `main` — merges main into dev. The mirror of ateam_github_promote.\n\n" +
-      "USE THIS WHEN PROMOTE RETURNS 409. promote only ships dev→main, so the moment anything lands on main directly — a hotfix, a manual edit, an ateam_github_rollback, or a write that mis-targeted the branch — dev falls behind and can never be promoted again. Without this tool that divergence is unfixable from A-Team: the only exits are the GitHub web UI or a raw API call.\n\n" +
-      "Workflow on a 409: 1) ateam_github_diff (confirm status:'diverged') → 2) ateam_github_sync_from_main → 3) ateam_github_promote.\n\n" +
+      "REPAIR TOOL FOR AN OLD REPO — not a step of building or shipping. main now only moves to a commit dev already has, so dev does not fall behind it and a promote does not return 409. Use this only when ateam_github_diff shows status:'diverged' on a repo that split before that rule.\n\n" +
+      "Workflow: 1) ateam_github_diff (confirm status:'diverged') → 2) ateam_github_sync_from_main → 3) ateam_github_promote.\n\n" +
       "Pass dry_run:true FIRST to see exactly which commits and files would come into dev without changing anything.\n\n" +
       "This is a real merge, not a force: if main and dev edited the SAME lines it returns 409 too, and that one genuinely needs a human (open a PR).",
     monitoring: { safe: true, cost: "low", latency_ms_p95: 2500, output: "bounded" },
@@ -3482,9 +3482,8 @@ export const tools = [
     name: "ateam_github_rollback",
     core: true,
     description:
-      "Roll prod (`main` branch) back to a previous state.\n\n" +
-      "ADDITIVE — does NOT destroy history. Creates a new commit on top of main whose tree matches the target's tree. The history of everything between target and current main is preserved (you can roll back the rollback).\n\n" +
-      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run(solution_id) (deploys the reverted state) → 4) ateam_github_sync_from_main(solution_id), so \`dev\` carries it too: the iterate tools deploy from \`dev\`. ${BRANCH_WORKFLOW.legacy_tag_note}`,
+      "RESTORE `dev` TO A PROMOTED VERSION. Puts the files of a previous promoted version (an exact promoted-version tag) back on `dev` as a new commit on top of it, history preserved, and deploys nothing by itself. Production is never rolled back directly (that would put it on a state dev never had): restore, try it on dev, then ateam_github_promote.\n\n" +
+      `Workflow: 1) ateam_github_list_versions (find a ${BRANCH_WORKFLOW.tag_format} tag) → 2) ateam_github_rollback(target: '<that tag>') → 3) ateam_build_and_run to try it → 4) ateam_github_promote. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3494,7 +3493,7 @@ export const tools = [
         },
         target: {
           type: "string",
-          description: `A ${BRANCH_WORKFLOW.tag_format} tag or a commit SHA to revert main to. Use ateam_github_list_versions to find the tags. ${BRANCH_WORKFLOW.legacy_tag_note}`,
+          description: `A ${BRANCH_WORKFLOW.tag_format} tag (an exact promoted version) to restore dev to. Use ateam_github_list_versions to find the tags. ${BRANCH_WORKFLOW.legacy_tag_note}`,
         },
       },
       required: ["solution_id", "target"],
@@ -3504,7 +3503,7 @@ export const tools = [
     name: "ateam_github_list_versions",
     core: true,
     description:
-      `List the ${BRANCH_WORKFLOW.tag_format} tags each ${BRANCH_WORKFLOW.promote_tool} wrote for a solution — the points ateam_github_rollback can return main to. Shows tag name, date, counter, and commit SHA. ${BRANCH_WORKFLOW.legacy_tag_note}`,
+      `List the ${BRANCH_WORKFLOW.tag_format} tags each ${BRANCH_WORKFLOW.promote_tool} wrote for a solution — the points ateam_github_rollback can restore dev to. Shows tag name, date, counter, and commit SHA. ${BRANCH_WORKFLOW.legacy_tag_note}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -8152,7 +8151,7 @@ export const handlers = {
 
   ateam_github_rollback: async ({ solution_id, target, tag }, sid) =>
     // Accept both `target` (new spec) and `tag` (legacy callers)
-    post(apiPath`/deploy/solutions/${solution_id}/rollback`, { target: target || tag }, sid),
+    post(apiPath`/deploy/solutions/${solution_id}/rollback`, { target: target || tag, branch: "dev" }, sid),
 
   ateam_github_list_versions: async ({ solution_id }, sid) =>
     get(apiPath`/deploy/solutions/${solution_id}/versions/dev`, sid),
