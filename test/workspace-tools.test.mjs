@@ -22,7 +22,7 @@ import { setSessionCredentials, getWorkspaceId } from "../src/api.js";
 import { handleToolCall, tools, coreTools, listedTools } from "../src/tools.js";
 import { waitCommand } from "../src/workspaceTools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
-import { workspaceFailure } from "../src/workspaceTools.js";
+import { workspaceFailure, shapeWorkspaceResult } from "../src/workspaceTools.js";
 import { PUBLIC_TOOLS } from "../src/publicTools.js";
 import { createServer } from "../src/server.js";
 import { WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD } from "../src/workspaceTools.js";
@@ -611,4 +611,20 @@ test("while a workspace is open, the refusal of the shipped-version deploy says 
   const listed = (await listedTools(sid)).map((t) => t.name);
   for (const t of ["ateam_test_skill", "ateam_conversation", "ateam_redeploy", "ateam_upload_connector"]) assert.ok(listed.includes(t), t);
   assert.ok(!WORKSPACE_WITHHELD.has("ateam_test_skill") && !WORKSPACE_WITHHELD.has("ateam_conversation"));
+});
+
+// Core sends `fallback` as a capability code (Core names no client's tools): this connector maps it to its own tools. An older
+// Core sends the tool names themselves, which are still used as they are; a code this connector does not know adds nothing.
+test("a refusal's fallback capability code becomes this connector's own tools in use_instead; an older Core's tool list still works", async () => {
+  const shaped = (fallback) => shapeWorkspaceResult("open", { ok: false, code: "X", summary: "No.", fallback });
+  assert.deepEqual(shaped("single_file_writes").use_instead.tools, ["ateam_github_patch", "ateam_github_write"]);
+  assert.deepEqual(shaped("store_writes").use_instead.tools, ["ateam_patch", "ateam_upload_connector"]);
+  assert.match(shaped("store_writes").use_instead.how, /ateam_patch \/ ateam_upload_connector/);
+  assert.deepEqual(shaped(["ateam_github_patch", "ateam_github_write"]).use_instead.tools, FALLBACK, "an older Core");
+  for (const none of ["some_future_code", null, undefined, []]) {
+    const r = shaped(none);
+    assert.equal(r.use_instead, undefined, String(none));
+    assert.equal(r.fallback, undefined, "the raw field is never passed through");
+  }
+  assert.equal(shapeWorkspaceResult("open", { ok: false, code: "X", summary: "No.", fallback: "single_file_writes" }, { keepWorkspace: true }).use_instead, undefined, "withheld while a workspace is remembered");
 });

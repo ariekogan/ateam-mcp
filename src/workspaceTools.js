@@ -174,12 +174,13 @@ export function shapeWorkspaceResult(method, result, { keepWorkspace = false } =
   const step = nextStep(method, result);
   if (step) out.next_step = step;
 
-  // A refusal carries the tools that work without a workspace. The agent uses them; it does not give up. Not while the
+  // A refusal carries what works without a workspace. The agent uses those tools; it does not give up. Not while the
   // workspace is still remembered: those tools are withheld then, and pointing at them would send the agent into a refusal.
-  if (!keepWorkspace && Array.isArray(fallback) && fallback.length) {
+  const insteadTools = fallbackTools(fallback);
+  if (!keepWorkspace && insteadTools.length) {
     out.use_instead = {
-      tools: fallback,
-      how: `That was not done in a workspace. Carry on with ${fallback.join(" / ")} instead (one file per call); do not stop and do not ask the user to do it.`,
+      tools: insteadTools,
+      how: `That was not done in a workspace. Carry on with ${insteadTools.join(" / ")} instead (one file per call); do not stop and do not ask the user to do it.`,
     };
   }
 
@@ -188,8 +189,24 @@ export function shapeWorkspaceResult(method, result, { keepWorkspace = false } =
   return out;
 }
 
-/** The tools that work without a workspace (Core's fallback list), for a failure Core never answered. */
+/** The tools that work without a workspace (Core's `single_file_writes`), also for a failure Core never answered. */
 export const SINGLE_FILE_TOOLS = Object.freeze(["ateam_github_patch", "ateam_github_write"]);
+
+/**
+ * Core's `fallback` is a capability code (Core names no client's tools); these are this connector's tools for each one.
+ * single_file_writes: one file of the solution's repository per call. store_writes: the solution store itself, for a tenant with
+ * no repository.
+ */
+const FALLBACK_TOOLS = Object.freeze({
+  single_file_writes: SINGLE_FILE_TOOLS,
+  store_writes: Object.freeze(["ateam_patch", "ateam_upload_connector"]),
+});
+
+/** This connector's tools for a refusal's `fallback`: the code mapped; an older Core's list of tool names as it is; else none. */
+function fallbackTools(fallback) {
+  if (Array.isArray(fallback)) return fallback.filter((t) => typeof t === "string" && t);
+  return typeof fallback === "string" && Object.hasOwn(FALLBACK_TOOLS, fallback) ? [...FALLBACK_TOOLS[fallback]] : [];
+}
 
 /**
  * A call that failed before Core answered (the Builder was down, a 4xx/5xx, a timeout) as plain data, the same shape as a
@@ -205,7 +222,7 @@ export function workspaceFailure(method, timedOut, keepWorkspace) {
       ? "That took longer than expected and may still be running; nothing is lost. Wait a minute, then call ateam_workspace_status to see how it ended."
       : "The workspace did not answer in time. Try again in a minute.")
     : "The workspace could not be reached just now, so nothing was changed. Try again in a minute.";
-  return shapeWorkspaceResult(method, { ok: false, summary, ...(!keepWorkspace && { fallback: [...SINGLE_FILE_TOOLS] }) }, { keepWorkspace });
+  return shapeWorkspaceResult(method, { ok: false, summary, ...(!keepWorkspace && { fallback: "single_file_writes" }) }, { keepWorkspace });
 }
 
 function nextStep(method, r) {
