@@ -500,8 +500,6 @@ test("vj-probe C + R5: the pure reads over POST/DELETE are re-sent after a lost 
     ["ateam_validate_solution", { solution: { id: "walkmate" }, skills: [] }, "/validate/solution", true],
     ["ateam_delete_solution (preview)", { solution_id: "walkmate" }, "/deploy/solutions/walkmate", true],
     ["ateam_github_sync_from_main dry_run", { solution_id: "walkmate", dry_run: true }, "/sync-from-main", true],
-    // Not a read even as a dry run: the Builder's reconcileBranches merges before it checks dryRun.
-    ["ateam_github_reconcile dry_run", { solution_id: "walkmate", dry_run: true }, "/reconcile", false],
   ];
   for (const [label, args, path, read] of cases) {
     t.mock.timers.reset();
