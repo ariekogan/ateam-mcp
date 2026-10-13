@@ -515,3 +515,21 @@ test("exec: the quick answer keeps the draft-recovery message and details of the
   assert.ok(!("stderr" in r));
   assert.equal(r.stdout, "fine\n");
 });
+
+test("exec: a timeout of 0, negative or not a number is treated as missing (100 s), and the follow text says a killed command leaves no exit file", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const seen = [];
+  answer = (m, p) => {
+    if (m !== "exec") return happy(m, p);
+    seen.push(p);
+    if (p.run_in_background === true) return { ok: true, workspace_id: p.workspace_id, summary: "bg", details: { task_id: "t1", output_file: "/tmp/devtasks/t1/out" } };
+    return { ok: true, workspace_id: p.workspace_id, summary: "ok", stdout: "__RUNNING__\n" };
+  };
+  let last;
+  for (const bad of [0, -5, "abc"]) last = json(await handleToolCall("ateam_workspace_exec", { command: "x", timeout: bad }, sid));
+  const starts = seen.filter((p) => p.run_in_background === true);
+  assert.deepEqual(starts.map((p) => p.timeout), [100000, 100000, 100000]);
+  assert.match(last.next_step, /never appears if the command was killed/);
+});

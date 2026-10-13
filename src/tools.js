@@ -8178,7 +8178,7 @@ export const handlers = {
       return workspaceCall("exec", { ...base, run_in_background }, sid, { timeoutMs: 140_000 });
     }
     // Started in the background and waited for here (workspaceTools.js QUICK_WAIT_SECONDS): the chat client gives up near 60 s.
-    const started = await workspaceCall("exec", { ...base, timeout: timeout ?? BACKGROUND_DEFAULT_MS, run_in_background: true }, sid, { timeoutMs: 140_000 });
+    const started = await workspaceCall("exec", { ...base, timeout: Number(timeout) > 0 ? timeout : BACKGROUND_DEFAULT_MS, run_in_background: true }, sid, { timeoutMs: 140_000 });
     const wait = started?.ok === true ? waitCommand(started?.details?.output_file) : null;
     if (!wait) return started;
     const waited = await workspaceCall("exec", { workspace_id, command: wait, timeout: 55_000, run_in_background: false }, sid, { timeoutMs: 140_000 });

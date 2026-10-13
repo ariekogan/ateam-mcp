@@ -190,7 +190,7 @@ function nextStep(method, r) {
       : "The save is still going and nothing is lost. Wait a minute, then call ateam_workspace_status (or ateam_workspace_save again) to see how it ended. Do not tell the user it is live until a call says so.";
   }
   if (method === "exec" && r.ok && r.details?.task_id) {
-    return "The command is running in the background. Follow it with ateam_workspace_exec: `tail -n 50 details.output_file` shows the output so far, and `cat \"$(dirname details.output_file)/exit\"` holds the exit code once the command has ended (the file does not exist while it is still running). Poll that every 20 to 30 seconds; to stop it early run `kill -- -$(cat \"$(dirname details.output_file)/pid\")`; ateam_workspace_status does not report background commands.";
+    return "The command is running in the background. Follow it with ateam_workspace_exec: `tail -n 50 details.output_file` shows the output so far, and `cat \"$(dirname details.output_file)/exit\"` holds the exit code once the command has ended (the file does not exist while it is still running, and never appears if the command was killed: if its time limit has passed and the output stopped growing, treat it as stopped). Poll that every 20 to 30 seconds; to stop it early run `kill -- -$(cat \"$(dirname details.output_file)/pid\")`; ateam_workspace_status does not report background commands.";
   }
   if (method === "exec" && r.code === "DEV_TIMEOUT") {
     return "The command ran past the 100 second limit and was stopped. Run it again with run_in_background: true and poll.";
