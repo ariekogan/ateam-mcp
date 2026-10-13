@@ -28,7 +28,7 @@ export const WORKSPACE_TOOL_NAMES = Object.freeze([
  */
 export const WORKSPACE_WITHHELD = Object.freeze(new Set([
   "ateam_github_patch", "ateam_github_write", "ateam_github_push", "ateam_github_pull",
-  "ateam_github_reconcile", "ateam_github_sync_from_main", "ateam_github_rollback",
+  "ateam_github_sync_from_main", "ateam_github_rollback",
   "ateam_build_and_run", "ateam_write_agent_doc", "ateam_patch",
   "ateam_upload_connector", "ateam_upload_connector_files", "ateam_create_connector", "ateam_create_plugin",
   "ateam_recover_connector_source", "ateam_sync_all",

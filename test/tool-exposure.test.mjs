@@ -15,6 +15,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { tools, AGENT_EXPOSURE } from "../src/tools.js";
 import { createServer } from "../src/server.js";
 
+// The session workspace is for an outside agent with no shell; the in-product Builder has its own (dev.*).
+const WORKSPACE = ["ateam_workspace_open", "ateam_workspace_exec", "ateam_workspace_status", "ateam_workspace_save", "ateam_workspace_close"];
 const SOURCE_WRITING = ["ateam_github_write", "ateam_github_patch", "ateam_patch", "ateam_upload_connector", "ateam_upload_connector_files"];
 
 test("every tool is labeled exactly once, and the table names only real tools", () => {
@@ -38,9 +40,9 @@ test("each tool carries its label in _meta.agent_exposure, and only the two know
 });
 
 test("the source-writing tools are outside_only; spec, validate, deploy, tests, status stay visible", () => {
-  assert.deepEqual([...AGENT_EXPOSURE.outside_only].sort(), [...SOURCE_WRITING].sort());
+  assert.deepEqual([...AGENT_EXPOSURE.outside_only].sort(), [...SOURCE_WRITING, ...WORKSPACE].sort());
   const label = (n) => tools.find((t) => t.name === n)._meta.agent_exposure;
-  for (const n of SOURCE_WRITING) assert.equal(label(n), "outside_only", n);
+  for (const n of [...SOURCE_WRITING, ...WORKSPACE]) assert.equal(label(n), "outside_only", n);
   for (const n of ["ateam_get_spec", "ateam_get_examples", "ateam_validate_skill", "ateam_build_and_run",
     "ateam_test_skill", "ateam_conversation", "ateam_github_status", "ateam_github_promote"]) {
     assert.equal(label(n), "all", n);

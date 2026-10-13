@@ -3878,6 +3878,8 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_github_write", "ateam_github_patch", "ateam_patch", "ateam_upload_connector",
     // Raw connector upload: a dev-workspace job changes connector code through git and deploys the exact commit.
     "ateam_upload_connector_files",
+    // The session workspace for an outside agent with no shell: its own clone, for the length of a chat.
+    "ateam_workspace_open", "ateam_workspace_exec", "ateam_workspace_status", "ateam_workspace_save", "ateam_workspace_close",
   ],
   all: [
     "ateam_bootstrap", "ateam_auth", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
@@ -3901,7 +3903,7 @@ export const AGENT_EXPOSURE = Object.freeze({
     // Repo state and the branch flow (read, push/pull/promote): not file edits.
     "ateam_github_status", "ateam_get_repository_binding", "ateam_github_read", "ateam_github_log",
     "ateam_github_diff", "ateam_github_list_versions",
-    "ateam_github_push", "ateam_github_pull", "ateam_github_promote", "ateam_github_reconcile",
+    "ateam_github_push", "ateam_github_pull", "ateam_github_promote",
     "ateam_github_sync_from_main", "ateam_github_rollback",
     "ateam_sync_all",
   ],
