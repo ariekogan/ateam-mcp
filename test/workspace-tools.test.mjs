@@ -537,3 +537,11 @@ test("exec: a timeout of 0, negative or not a number is treated as missing (100 
   assert.deepEqual(starts.map((p) => p.timeout), [100000, 100000, 100000]);
   assert.match(last.next_step, /never appears if the command was killed/);
 });
+
+test("open passes Core's environment text through, and exec points at it", async () => {
+  const sid = signedIn();
+  answer = (m, p) => m === "open" ? { ...OPEN_OK, environment: "a Linux container with git, node" } : happy(m, p);
+  const r = json(await handleToolCall("ateam_workspace_open", {}, sid));
+  assert.equal(r.environment, "a Linux container with git, node");
+  assert.match(tools.find((t) => t.name === "ateam_workspace_exec").description, /`environment` in ateam_workspace_open/);
+});

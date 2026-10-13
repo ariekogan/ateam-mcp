@@ -213,7 +213,7 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
     "Takes no arguments: never pass a workspace, tenant or person. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   exec:
     "Run ONE shell command in your workspace (you have no shell of your own; this is it). Files live in /workspace: read with cat/ls/grep, edit with sed, heredocs or git apply, run npm test, node, python. " +
-    "Network reaches only npm, PyPI and the A-Team gateway. workspace_id is optional once you have opened one. " +
+    "Tools installed and network limits: the `environment` in ateam_workspace_open's answer. workspace_id is optional once you have opened one. " +
     "A quick command answers at once (exit_code, stdout; errors are in stdout). One still running after about 40 seconds is left running; the answer gives an output_file: follow it with another exec every 20-30 s (`tail -n 50 <output_file>`; `cat \"$(dirname <output_file>)/exit\"` holds the exit code once it has ended, and is missing while it runs). status does not show it. For a long command pass a timeout in ms. A command that waits counts as two calls toward the hourly limit. " +
     "What you change is NOT live and the other ateam_* tools cannot see it until ateam_workspace_save. " +
     "The answer has `summary` first, then exit_code and stdout. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
