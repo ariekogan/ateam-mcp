@@ -146,7 +146,7 @@ import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
-import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId, getWorkspaceAvailability, setWorkspaceAvailability, noteWorkspaceListed } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId } from "./api.js";
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
   withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, BACKGROUND_DEFAULT_MS, waitCommand, foregroundFromWait,
@@ -5576,7 +5576,7 @@ export const handlers = {
   // to learn from deploy errors which environment it was actually on. The
   // dangerous direction is the mirror image — believing you are on dev.
   ateam_bootstrap: async (_args, sid) => {
-    const workspaces = await workspaceAvailable(sid);
+    const workspaces = workspaceOffered(sid);
     return ({
     // FIRST: where this session is and how to move (signInSteps.js). A session
     // was on one workspace while the user needed another, and nothing said which.
@@ -7851,7 +7851,7 @@ export const handlers = {
     } catch { /* no skills yet — render anyway */ }
     const connectors = Array.isArray(solution?.connectors) ? solution.connectors : [];
 
-    const freshHeader = renderAgentDocHeader({ solution, skills, connectors, workspaces: await workspaceAvailable(sid) });
+    const freshHeader = renderAgentDocHeader({ solution, skills, connectors, workspaces: workspaceOffered(sid) });
     let existing = null;
     try {
       const r = await get(
@@ -9151,32 +9151,19 @@ function whyNotSignedIn(ctx) {
 // from the session's key; these tools take no tenant, person or solution. A refusal is DATA (HTTP 200
 // with `summary` + `fallback`), never a thrown error, so the agent reads it and uses the fallback.
 
-const AVAILABILITY_TTL_MS = 60_000;
-
 /**
- * Are workspaces usable for this session's tenant right now? Asked of the platform (cp.workspace_api.available: the switch and
- * the trial rule, read at that moment), cached per session for a minute. Any failure to ask is "no": a tool that cannot work is
- * not offered. A session that is not signed in is not asked.
+ * Are the workspace tools offered to this session? Whenever it is signed in. There is no availability probe: one that failed
+ * once (Core restarting during a deploy, a tools/list arriving before the sign-in registered) hid the five tools for a whole
+ * chat, because a client lists once. A switch that is off, a trial workspace or a key tied to no person is answered by the
+ * call itself, with a plain refusal that names the single-file tools to use instead (workspaceTools.js).
  */
-export async function workspaceAvailable(sessionId) {
-  if (!isExplicitlyAuthenticated(sessionId)) return false;
-  const known = getWorkspaceAvailability(sessionId);
-  if (known && Date.now() - known.at < AVAILABILITY_TTL_MS) return known.value;
-  let value = false;
-  try {
-    const r = await post("/workspace/available", { params: {} }, sessionId, { timeoutMs: 15_000, retries: 0 });
-    value = r?.ok === true && r.available === true;
-  } catch { /* not askable = not offered */ }
-  setWorkspaceAvailability(sessionId, value);
-  return value;
+export function workspaceOffered(sessionId) {
+  return isExplicitlyAuthenticated(sessionId);
 }
 
-/** The tools a session lists: the core tools, minus the workspace tools while workspaces are unavailable, minus the old `dev` writers while a workspace is open. */
+/** The tools a session lists: the core tools, minus the workspace tools until it is signed in, minus the old `dev` writers while a workspace is open. */
 export async function listedTools(sessionId) {
-  const available = await workspaceAvailable(sessionId);
-  noteWorkspaceListed(sessionId, available);
-  // A workspace that is open keeps its own tools listed whatever the switch now says: with the old writers withheld, the agent must always have one set to work with (it ends the workspace with close or save).
-  const offered = available || getWorkspaceId(sessionId) ? coreTools : coreTools.filter((t) => !WORKSPACE_TOOL_NAMES.includes(t.name));
+  const offered = workspaceOffered(sessionId) ? coreTools : coreTools.filter((t) => !WORKSPACE_TOOL_NAMES.includes(t.name));
   if (!getWorkspaceId(sessionId)) return offered;
   return offered.filter((t) => !WORKSPACE_WITHHELD.has(t.name));
 }
@@ -9334,9 +9321,6 @@ export async function handleToolCall(name, args, sessionId) {
     if (result && typeof result === "object" && result.actor_id && ACTOR_MINTING_TOOLS.has(name)) {
       touchSession(sessionId, { actorId: result.actor_id });
     }
-
-    // A new sign-in may change whether workspaces are usable: ask now, so a client that honours list_changed is told.
-    if (name === "ateam_auth" && result?.ok !== false) await workspaceAvailable(sessionId);
 
     // Stamp WHERE this landed (tenant + app URL) on mutating-tool results, so
     // any client — desktop, mobile, cloud agent — can tell the user where to

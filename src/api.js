@@ -792,28 +792,6 @@ export function setWorkspaceId(sessionId, workspaceId) {
   return flipped;
 }
 
-/** What the platform last said about whether workspaces are usable for this session's tenant: { value, at, tenant } or null. */
-export function getWorkspaceAvailability(sessionId) {
-  const a = sessionRecord(sessionId)?.workspaceAvailability;
-  return a && a.tenant === sessionRecord(sessionId).tenant ? a : null;
-}
-
-/** Remember the answer. Tells the watchers when it differs from what the session was last shown (a first listing is not a change). Returns true when it did. */
-export function setWorkspaceAvailability(sessionId, value, now = Date.now()) {
-  const session = sessionRecord(sessionId);
-  if (!session) return false;
-  session.workspaceAvailability = { value: Boolean(value), at: now, tenant: session.tenant };
-  const flipped = session.workspaceListed !== undefined && session.workspaceListed !== Boolean(value);
-  if (flipped) { session.workspaceListed = Boolean(value); notifyWorkspaceWatchers(sessionId); }
-  return flipped;
-}
-
-/** Record whether the session was last shown the workspace tools, so a later change can be told. */
-export function noteWorkspaceListed(sessionId, listed) {
-  const session = sessionRecord(sessionId);
-  if (session) session.workspaceListed = Boolean(listed);
-}
-
 function notifyWorkspaceWatchers(sessionId) {
   for (const fn of workspaceWatchers.get(sessionId) || []) {
     try { fn(); } catch { /* a notification must never fail a tool call */ }

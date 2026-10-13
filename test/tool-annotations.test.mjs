@@ -168,7 +168,6 @@ const READ_BY_POST = [
   [/^\/spec\/advisor$/, "an LLM answer over the capability catalog"],
   [/^\/spec\/search$/, "a semantic search over the public spec docs"],
   [/^\/deploy\/data\/inspect$/, "reads stored data through Core's read-only data tool (cp.data_api); changes nothing"],
-  [/^\/workspace\/available$/, "asks whether workspaces are usable for the tenant; reads the switch, changes nothing"],
 ];
 const isRead = ({ method, path, outside }) =>
   !outside && (method === "GET" || (method === "POST" && READ_BY_POST.some(([rx]) => rx.test(path))));
