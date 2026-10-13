@@ -41,6 +41,7 @@ export const WORKSPACE_WITHHELD = Object.freeze(new Set([
  */
 export function uploadConnectorWrites(args) {
   const a = args && typeof args === "object" ? args : {};
+  if ((a.resume === true || a.resume === "true") && typeof a.job_id === "string" && a.job_id) return false; // waits for an upload already started; writes nothing
   const hasFiles = Array.isArray(a.files) ? a.files.length > 0 : a.files != null;
   return !(a.github === true && !hasFiles && a.replace !== true);
 }

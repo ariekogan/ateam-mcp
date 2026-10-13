@@ -20,13 +20,15 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 function stubBuilder(t) {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const sent = [];
-  const state = { done: false, kicks: 0 };
+  const state = { done: false, kicks: 0, gone: false, uploads: 0 };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts = {}) => {
     const { pathname } = new URL(String(url));
     const method = opts.method || "GET";
     sent.push({ method, path: pathname });
     if (method === "POST" && pathname.endsWith("/redeploy")) { state.kicks++; return json(200, { async: true, job_id: "job-1" }); }
+    if (method === "POST" && pathname.endsWith("/upload")) { state.uploads++; return json(200, { async: true, job_id: "job-1" }); }
+    if (pathname === "/deploy/jobs/job-1" && state.gone) return json(404, { error: "no such job" });
     if (pathname === "/deploy/jobs/job-1") {
       return json(200, state.done
         ? { job_id: "job-1", status: "done", ok: true, deployed: 2, failed: 0, total: 2, skills: [{ id: "a", ok: true }, { id: "b", ok: true }], deploy_status: "deployed" }
@@ -56,6 +58,12 @@ function stubBuilder(t) {
     },
   };
 }
+const upload = (b, transport, args) => {
+  const out = { settled: false, value: undefined };
+  const run = () => handleToolCall("ateam_upload_connector", { solution_id: "sol", connector_id: "c", github: true, ...args }, "sess-rd");
+  (transport ? runToolCall("sess-rd", run, { transport }) : run()).then((v) => { out.settled = true; out.value = v; });
+  return out;
+};
 const answer = (out) => JSON.parse(out.value.content[0].text);
 
 test("the budget is under the chat client's 60 s", () => {
@@ -110,4 +118,55 @@ test("stdio: unchanged - the call waits for the whole redeploy", async (t) => {
   b.state.done = true;
   await b.advance(10_000, () => r.settled);
   assert.equal(answer(r).ok, true);
+});
+
+test("a job id the Builder does not know answers JOB_NOT_FOUND at once, never 'running' (evicted after 30 min, a Builder restart, a typo)", async (t) => {
+  const b = stubBuilder(t);
+  b.state.gone = true;
+  const r = b.call("http", { resume: true, job_id: "job-1" });
+  await b.advance(HOSTED_CALL_BUDGET_MS + 3000, () => r.settled);
+  assert.equal(r.settled, true);
+  const a = answer(r);
+  assert.equal(a.ok, false);
+  assert.equal(a.code, "JOB_NOT_FOUND");
+  assert.equal(a.job_id, "job-1");
+  assert.notEqual(a.status, "running");
+  assert.equal(b.state.kicks, 0, "nothing was redeployed");
+});
+
+test("a job that vanishes while a fresh redeploy waits for it is JOB_NOT_FOUND too, not a hang", async (t) => {
+  const b = stubBuilder(t);
+  b.state.gone = true;
+  const r = b.call("http", {});
+  await b.advance(HOSTED_CALL_BUDGET_MS + 3000, () => r.settled);
+  assert.equal(r.settled, true);
+  assert.equal(answer(r).code, "JOB_NOT_FOUND");
+});
+
+test("ateam_upload_connector is on the same budget: a hosted upload still going answers status:running with a job_id; resume waits for the same job", async (t) => {
+  const b = stubBuilder(t);
+  const first = upload(b, "http", {});
+  await b.advance(HOSTED_CALL_BUDGET_MS + 3000, () => first.settled);
+  assert.equal(first.settled, true);
+  const a = answer(first);
+  assert.equal(a.status, "running");
+  assert.equal(a.job_id, "job-1");
+  assert.match(a._next, /ateam_upload_connector\(.*resume: true/);
+  b.state.done = true;
+  const second = upload(b, "http", { github: undefined, resume: true, job_id: "job-1" });
+  await b.advance(10_000, () => second.settled);
+  assert.equal(answer(second).status, "done");
+  assert.equal(b.state.uploads, 1, "resume uploaded nothing new");
+});
+
+test("ateam_upload_connector resume without a job_id uploads nothing; a gone job is JOB_NOT_FOUND", async (t) => {
+  const b = stubBuilder(t);
+  const none = upload(b, "http", { resume: true });
+  await b.advance(2000, () => none.settled);
+  assert.equal(answer(none).code, "NO_JOB_TO_RESUME");
+  b.state.gone = true;
+  const gone = upload(b, "http", { resume: true, job_id: "job-1" });
+  await b.advance(HOSTED_CALL_BUDGET_MS + 3000, () => gone.settled);
+  assert.equal(answer(gone).code, "JOB_NOT_FOUND");
+  assert.equal(b.state.uploads, 0);
 });

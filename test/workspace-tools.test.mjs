@@ -592,6 +592,10 @@ test("while a workspace is open: ateam_upload_connector with github:true and no 
   }
   const ok = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", github: true }, sid);
   assert.notEqual(ok.structuredContent?.code, "WORKSPACE_OPEN", "a redeploy of the saved work was refused");
+  const wait = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", resume: true, job_id: "j1" }, sid);
+  assert.notEqual(wait.structuredContent?.code, "WORKSPACE_OPEN", "waiting for an upload already started writes nothing");
+  const noJob = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", resume: true }, sid);
+  assert.equal(noJob.structuredContent?.code, "WORKSPACE_OPEN", "resume without a job_id is no resume");
   const empty = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", github: true, files: [] }, sid);
   assert.notEqual(empty.structuredContent?.code, "WORKSPACE_OPEN", "an empty files list writes nothing");
 });

@@ -356,6 +356,17 @@ export const MCP_VERSION = (() => {
 // Builder under the edge's limit. The caller's hop to a hosted ateam-mcp has
 // the same limit, and polling here does nothing for it: see "The hosted call's
 // budget" below.
+/** The Builder has no such job, or none could be reached: a final answer, never "still running". */
+function jobNotFound(jobId, label) {
+  return {
+    ok: false,
+    code: "JOB_NOT_FOUND",
+    job_id: jobId,
+    error: `The ${label} job "${jobId}" could not be found on the Builder (it is kept about 30 minutes after it ends, and is lost when the Builder restarts), or the Builder could not be reached.`,
+    hint: "Check what is deployed before you deploy again: ateam_get_solution(solution_id, view: \"status\"). Only deploy again if it is not there.",
+  };
+}
+
 async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000, intervalMs = 2000 } = {}) {
   const start = Date.now();
   let lastStatus = null;
@@ -363,19 +374,26 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   // caught as a "transient" poll error and retried for the whole budget, then
   // reported as "polling timed out". Refused now, at once, with nothing sent.
   const jobPath = apiPath`/deploy/jobs/${jobId}`;
+  let seen = false; // a poll was answered: the Builder knows this job
   while (Date.now() - start < maxMs) {
     await new Promise(r => setTimeout(r, intervalMs));
     try {
       const job = await get(jobPath, sid);
+      seen = true;
       lastStatus = job?.status;
       if (job?.status === 'done' || job?.status === 'failed') {
         return job; // job entry has the full result merged in
       }
     } catch (err) {
+      // A 404 is the Builder saying it has no such job (kept 30 minutes after it ends, gone after a restart, or never existed):
+      // waiting longer cannot change that, and "still running" would be a lie.
+      if (err?.status === 404) return jobNotFound(jobId, label);
       // Transient — keep polling. Log at debug level if requested.
       if (process.env.MCP_DEBUG_POLLS) console.warn(`[pollDeployJob:${label}] poll error (will retry): ${err.message}`);
     }
   }
+  // Not one poll was answered: the job cannot be shown to exist (the Builder was unreachable, or the id is wrong).
+  if (!seen) return jobNotFound(jobId, label);
   return {
     ok: false,
     timed_out: true,
@@ -551,6 +569,19 @@ async function buildRunWithinBudget(args, sid) {
     ? inFlight
     : startBuildRun(owner, solutionId, deployArgs, argsKey, sid);
   return answerWithinBudget(run, callStartMs);
+}
+
+/** A connector upload not finished within the hosted call's budget: no verdict yet, and how to ask again. The job goes on. */
+function uploadStillRunning(solutionId, connectorId, jobId) {
+  return {
+    ok: null,
+    status: "running",
+    solution_id: solutionId,
+    connector_id: connectorId,
+    job_id: jobId,
+    message: `The upload of connector "${connectorId}" is still running. This call answers now because the chat connection gives up after about 60 seconds. It was not stopped, and nothing of it is sent again.`,
+    _next: `ateam_upload_connector({ solution_id: "${solutionId}", connector_id: "${connectorId}", job_id: "${jobId}", resume: true }) waits for THIS upload again (up to ${HOSTED_CALL_BUDGET_MS / 1000}s) and answers with its result; it uploads nothing new. Do not tell the user it is deployed until it says so.`,
+  };
 }
 
 /** A redeploy not finished within the hosted call's budget: no verdict yet, and how to ask again. The job goes on. */
@@ -2477,6 +2508,14 @@ export const tools = [
         replace: {
           type: "boolean",
           description: "FULL REPLACE: the connector becomes exactly `files`. Every other file is deleted from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev) — every file under connectors/<connector-id>/ you leave out, deployed or not, files written with ateam_github_patch included (some files are kept — repo.kept names each with its reason). The reply names each: dropped (Core), authored.removed (the Builder's source), repo.deleted (the branch), repo.branch_only (the branch files that were never deployed), repo.kept (kept, with the reason). Main is never touched (a promote carries it). With github:true the repo is left as it is. Default: false (= merge). An incomplete file set with replace:true deletes the rest of the connector.",
+        },
+        resume: {
+          type: "boolean",
+          description: "true with job_id: wait again for an upload that answered status:\"running\" and answer with its result. Uploads nothing new.",
+        },
+        job_id: {
+          type: "string",
+          description: "With resume:true: the job_id a status:\"running\" answer gave.",
         },
         force: {
           type: "boolean",
@@ -8359,7 +8398,18 @@ export const handlers = {
     return del(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
   },
 
-  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace, force }, sid) => {
+  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace, force, resume, job_id }, sid) => {
+    // Over a hosted connection the call answers within HOSTED_CALL_BUDGET_MS (the chat client gives up near 60 s); an upload not done by
+    // then keeps running on the Builder and answers status:"running" with its job_id; resume:true + job_id waits for it again.
+    const hosted = callTransport() !== "stdio";
+    const waitMs = hosted ? HOSTED_CALL_BUDGET_MS : 15 * 60_000;
+    if (resume === true || resume === "true") {
+      if (typeof job_id !== "string" || !job_id) {
+        return { ok: false, code: "NO_JOB_TO_RESUME", error: "resume:true needs the job_id a status:\"running\" answer gave.", _next: "Call ateam_upload_connector({ solution_id, connector_id, job_id, resume: true }) with that job_id; this call uploaded nothing." };
+      }
+      const again = await pollDeployJob(job_id, sid, { label: 'connector-upload', maxMs: waitMs, intervalMs: 2000 });
+      return again?.timed_out && hosted ? uploadStillRunning(solution_id, connector_id, job_id) : again;
+    }
     // OPEN-32: accept content_base64 per file (single-line, escape-safe) and
     // decode it to plain content here, so an agent can upload a multi-file
     // connector without hand-escaping ~90KB of HTML/JS/JSON in one tool call —
@@ -8407,7 +8457,8 @@ export const handlers = {
       return await post(url, body, sid, { timeoutMs: 300_000 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async
-    return await pollDeployJob(kicked.job_id, sid, { label: 'connector-upload', maxMs: 15 * 60_000, intervalMs: 2000 });
+    const polled = await pollDeployJob(kicked.job_id, sid, { label: 'connector-upload', maxMs: waitMs, intervalMs: 2000 });
+    return polled?.timed_out && hosted ? uploadStillRunning(solution_id, connector_id, kicked.job_id) : polled;
   },
 
   // ── Phase 9 strip: focused minimal responses ────────────────────────
@@ -8700,6 +8751,7 @@ export const handlers = {
         return { ok: false, code: "NO_JOB_TO_RESUME", error: "resume:true needs the job_id a status:\"running\" answer gave.", _next: "Call ateam_redeploy({ solution_id, job_id, resume: true }) with that job_id; this call deployed nothing." };
       }
       result = await pollDeployJob(job_id, sid, { label, maxMs: waitMs, intervalMs: 2000 });
+      if (result?.code === "JOB_NOT_FOUND") return { ok: false, solution_id, ...(skill_id && { skill_id }), code: result.code, job_id, error: result.error, hint: result.hint, message: `Re-deploy status unknown: ${result.error}` };
       if (result?.timed_out && hosted) return redeployStillRunning(solution_id, skill_id, job_id);
     } else try {
       const kicked = await post(endpoint, { async: true }, sid, { timeoutMs: 30_000 });
@@ -8770,6 +8822,7 @@ export const handlers = {
       // Machine-readable, so a caller (the ateam-proxy connector) does not have
       // to parse the sentence below. Not isError: the Builder's ok:true stands.
       ...(verdict.degraded && { code: "DEPLOYED_WITH_ERRORS" }),
+      ...(result.code === "JOB_NOT_FOUND" && { code: result.code }),
       // What this redeploy could NOT write to `dev` (a file still held, or a
       // push that failed). It is the way out an UNPUSHED_BUILDER_CHANGE
       // refusal names, so the caller must see when it did not work.
