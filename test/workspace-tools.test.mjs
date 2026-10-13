@@ -256,8 +256,8 @@ test("save: 'still going' says to poll; a finished status says done; background 
 
   answer = (m, p) => ({ ok: true, workspace_id: p.workspace_id, summary: "The command is running in the background.", details: { task_id: "t1", output_file: "/tmp/t1.out" } });
   const bg = json(await handleToolCall("ateam_workspace_exec", { command: "npm test", run_in_background: true }, sid));
-  assert.match(bg.next_step, /output file/);
-  assert.match(bg.next_step, /ateam_workspace_status/);
+  assert.match(bg.next_step, /output_file/);
+  assert.match(bg.next_step, /ateam_workspace_exec/);
 
   answer = (m, p) => ({ ok: false, code: "DEV_TIMEOUT", workspace_id: p.workspace_id, error: "The command was stopped after 100s.", exit_code: null, fallback: FALLBACK });
   const slow = json(await handleToolCall("ateam_workspace_exec", { command: "npm ci" }, sid));
@@ -416,4 +416,20 @@ test("exec: a timeout above 90 s starts the command in the background; an explic
   assert.ok(!("run_in_background" in calls[n + 1].body.params));
   await handleToolCall("ateam_workspace_exec", { command: "npm ci", timeout: 200000, run_in_background: false }, sid);
   assert.equal(calls[n + 2].body.params.run_in_background, false);
+});
+
+test("background commands are followed with exec and the exit file, never with status", async () => {
+  answer = (m, p) => m === "exec" ? { ok: true, workspace_id: "ws-0123456789ab", summary: "x", details: { task_id: "t1", output_file: "/tmp/t1/out" } } : happy(m, p);
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const r = json(await handleToolCall("ateam_workspace_exec", { command: "npm ci", timeout: 200000 }, sid));
+  assert.match(r.next_step, /ateam_workspace_exec/);
+  assert.match(r.next_step, /dirname/);
+  assert.match(r.next_step, /exit/);
+  assert.doesNotMatch(r.next_step, /poll ateam_workspace_status/);
+  const tools = (await import("../src/tools.js")).tools;
+  const d = (n) => tools.find((t) => t.name === n).description;
+  assert.match(d("ateam_workspace_exec"), /dirname output_file\)\/exit/);
+  assert.match(d("ateam_workspace_exec"), /give a timeout/);
+  assert.doesNotMatch(d("ateam_workspace_status"), /background command is going|after run_in_background/);
 });

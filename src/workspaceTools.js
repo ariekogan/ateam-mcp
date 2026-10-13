@@ -148,7 +148,7 @@ function nextStep(method, r) {
       : "The save is still going and nothing is lost. Wait a minute, then call ateam_workspace_status (or ateam_workspace_save again) to see how it ended. Do not tell the user it is live until a call says so.";
   }
   if (method === "exec" && r.ok && r.details?.task_id) {
-    return "The command is running in the background. Follow it by reading its output file with ateam_workspace_exec (for example tail -n 50 on details.output_file), and poll ateam_workspace_status until it is done.";
+    return "The command is running in the background. Follow it with ateam_workspace_exec: `tail -n 50 details.output_file` shows the output so far, and `cat \"$(dirname details.output_file)/exit\"` holds the exit code once the command has ended (the file does not exist while it is still running). Poll that every 20 to 30 seconds; ateam_workspace_status does not report background commands.";
   }
   if (method === "exec" && r.code === "DEV_TIMEOUT") {
     return "The command ran past the 100 second limit and was stopped. Run it again with run_in_background: true and poll.";
@@ -172,12 +172,12 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
   exec:
     "Run ONE shell command in your workspace (you have no shell of your own; this is it). Files live in /workspace: read with cat/ls/grep, edit with sed, heredocs or git apply, run npm test, node, python. " +
     "Network reaches only npm, PyPI and the A-Team gateway. workspace_id is optional once you have opened one. " +
-    "A foreground command is stopped after 100 seconds: for a long build or test pass run_in_background:true (asking for a timeout above 90000 does it for you), then read its output file with another exec and poll ateam_workspace_status. " +
+    "A foreground command is stopped after 100 seconds: for a long build or test pass run_in_background:true (asking for a timeout above 90000 does it for you), then follow it with another exec: output_file holds the output, and `$(dirname output_file)/exit` holds the exit code once it has ended (ateam_workspace_status does not report background commands). With no timeout a command is stopped at 100 seconds, so give a timeout for anything long. " +
     "What you change is NOT live and the other ateam_* tools cannot see it until ateam_workspace_save. " +
     "The answer has `summary` first, then exit_code, stdout, stderr. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   status:
-    "Check your workspace: whether it is open, whether it holds changes that are not saved yet, and how a long save or background command is going. " +
-    "Call it after run_in_background, or when ateam_workspace_save said the save is still going, until it says it is done. " +
+    "Check your workspace: whether it is open, whether it holds changes that are not saved yet, and how a long save is going (not background commands: follow those with ateam_workspace_exec). " +
+    "Call it when ateam_workspace_save said the save is still going, until it says it is done. " +
     "workspace_id is optional once you have opened one. Changes nothing. " + USER_RULE,
   save:
     "Make the work in your workspace live. This is the only way the other ateam_* tools (ateam_status_all, ateam_test_skill, ateam_verify...) see your edits. " +
