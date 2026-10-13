@@ -20,6 +20,7 @@ import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/typ
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { setSessionCredentials, getWorkspaceId } from "../src/api.js";
 import { handleToolCall, tools, coreTools, listedTools } from "../src/tools.js";
+import { waitCommand } from "../src/workspaceTools.js";
 import { setWorkspaceAvailability } from "../src/api.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
 import { workspaceFailure } from "../src/workspaceTools.js";
@@ -86,9 +87,9 @@ test("the five tools are listed with teaching text, no tenant/person/solution ar
   assert.match(d("ateam_workspace_open"), /\/workspace/);
   assert.match(d("ateam_workspace_open"), /cannot see your edits until you call ateam_workspace_save/);
   assert.match(d("ateam_workspace_open"), /never any branch, commit|never pass a workspace/);
-  assert.match(d("ateam_workspace_exec"), /100 seconds/);
-  assert.match(d("ateam_workspace_exec"), /run_in_background/);
-  assert.match(d("ateam_workspace_exec"), /ateam_workspace_status/);
+  assert.match(d("ateam_workspace_exec"), /40 seconds/);
+  assert.match(d("ateam_workspace_exec"), /output_file/);
+  assert.match(d("ateam_workspace_exec"), /status does not show it/);
   assert.match(d("ateam_workspace_save"), /still going/);
   assert.match(d("ateam_workspace_save"), /ateam_workspace_status/);
   assert.match(d("ateam_workspace_open"), /use_instead/);
@@ -405,17 +406,60 @@ test("the switch going off while a workspace is open never leaves the agent with
   assert.ok(withoutWorkspaceTools(names) && names.includes("ateam_github_patch"));
 });
 
-test("exec: a timeout above 90 s starts the command in the background; an explicit flag always wins", async () => {
+test("exec: no foreground choice -> started in the background and waited for; a quick command answers like a foreground one", async () => {
   answer = happy;
   const sid = signedIn();
   await handleToolCall("ateam_workspace_open", {}, sid);
+  const seen = [];
+  answer = (m, p) => {
+    if (m !== "exec") return happy(m, p);
+    seen.push(p);
+    if (p.run_in_background === true) return { ok: true, workspace_id: p.workspace_id, summary: "bg", details: { task_id: "t1", output_file: "/tmp/devtasks/t1/out" } };
+    return { ok: true, workspace_id: p.workspace_id, summary: "ok", exit_code: 0, stdout: "__EXIT__ 3\nhello\n", stderr: "" };
+  };
+  const r = json(await handleToolCall("ateam_workspace_exec", { command: "ls" }, sid));
+  assert.equal(seen[0].run_in_background, true);
+  assert.equal(seen[0].command, "ls");
+  assert.match(seen[1].command, /devtasks\/t1/);
+  assert.equal(seen[1].run_in_background, false);
+  assert.equal(r.ok, true);
+  assert.equal(r.exit_code, 3);
+  assert.equal(r.stdout, "hello\n");
+  assert.match(r.summary, /exit code 3/);
+});
+
+test("exec: a command still running after the wait answers with the background handle and how to follow it", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  answer = (m, p) => {
+    if (m !== "exec") return happy(m, p);
+    if (p.run_in_background === true) return { ok: true, workspace_id: p.workspace_id, summary: "bg", details: { task_id: "t1", output_file: "/tmp/devtasks/t1/out" } };
+    return { ok: true, workspace_id: p.workspace_id, summary: "ok", exit_code: 0, stdout: "__RUNNING__\n", stderr: "" };
+  };
+  const r = json(await handleToolCall("ateam_workspace_exec", { command: "npm ci", timeout: 250000 }, sid));
+  assert.equal(r.details.output_file, "/tmp/devtasks/t1/out");
+  assert.match(r.next_step, /dirname/);
+});
+
+test("exec: an explicit run_in_background, or a timeout of 40 s or less, is passed through untouched (one call)", async () => {
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  answer = happy;
   const n = calls.length;
-  await handleToolCall("ateam_workspace_exec", { command: "npm ci", timeout: 200000 }, sid);
-  assert.equal(calls[n].body.params.run_in_background, true);
-  await handleToolCall("ateam_workspace_exec", { command: "ls", timeout: 5000 }, sid);
-  assert.ok(!("run_in_background" in calls[n + 1].body.params));
-  await handleToolCall("ateam_workspace_exec", { command: "npm ci", timeout: 200000, run_in_background: false }, sid);
-  assert.equal(calls[n + 2].body.params.run_in_background, false);
+  await handleToolCall("ateam_workspace_exec", { command: "a", run_in_background: false }, sid);
+  await handleToolCall("ateam_workspace_exec", { command: "b", run_in_background: true }, sid);
+  await handleToolCall("ateam_workspace_exec", { command: "c", timeout: 30000 }, sid);
+  assert.equal(calls.length, n + 3);
+  assert.equal(calls[n].body.params.run_in_background, false);
+  assert.equal(calls[n + 1].body.params.run_in_background, true);
+  assert.ok(!("run_in_background" in calls[n + 2].body.params));
+});
+
+test("exec: the waiting command refuses an output path it cannot quote", () => {
+  assert.equal(waitCommand("/tmp/devtasks/t1/out; rm -rf /"), null);
+  assert.equal(waitCommand(undefined), null);
+  assert.match(waitCommand("/tmp/devtasks/t1/out"), /sleep 0\.25/);
 });
 
 test("background commands are followed with exec and the exit file, never with status", async () => {
@@ -429,7 +473,7 @@ test("background commands are followed with exec and the exit file, never with s
   assert.doesNotMatch(r.next_step, /poll ateam_workspace_status/);
   const tools = (await import("../src/tools.js")).tools;
   const d = (n) => tools.find((t) => t.name === n).description;
-  assert.match(d("ateam_workspace_exec"), /dirname output_file\)\/exit/);
-  assert.match(d("ateam_workspace_exec"), /give a timeout/);
+  assert.match(d("ateam_workspace_exec"), /dirname <output_file>\)\/exit/);
+  assert.match(d("ateam_workspace_exec"), /pass a timeout/);
   assert.doesNotMatch(d("ateam_workspace_status"), /background command is going|after run_in_background/);
 });

@@ -149,7 +149,7 @@ import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId, getWorkspaceAvailability, setWorkspaceAvailability, noteWorkspaceListed } from "./api.js";
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
-  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execBackgroundFlag,
+  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, waitCommand, foregroundFromWait,
 } from "./workspaceTools.js";
 
 // A step that waits for a person: the Builder's human_step_testing words, verbatim.
@@ -3298,7 +3298,7 @@ export const tools = [
         workspace_id: WORKSPACE_ID_PROP,
         command: { type: "string", description: "The shell command to run (bash -c)." },
         workingDir: { type: "string", description: "Directory inside /workspace to run in. Default /workspace." },
-        timeout: { type: "number", description: "Time limit in milliseconds. Foreground: at most 100000; a value above 90000 runs it in the background for you. Background: up to an hour." },
+        timeout: { type: "number", description: "Time limit in milliseconds. A value of 40000 or less keeps it in the foreground; otherwise it runs in the background (up to an hour) and you are given its output file if it is still running after about 40 seconds." },
         run_in_background: { type: "boolean", description: "Start it and return at once with an output file; use for builds and tests that take more than a minute." },
       },
       required: ["command"],
@@ -8172,8 +8172,19 @@ export const handlers = {
 
   // ─── Session workspace (Phase C): the Builder's POST /workspace/:method ──────
   ateam_workspace_open: (args, sid) => workspaceCall("open", {}, sid, { timeoutMs: 140_000 }),
-  ateam_workspace_exec: ({ workspace_id, command, workingDir, timeout, run_in_background }, sid) =>
-    workspaceCall("exec", { workspace_id, command, workingDir, timeout, run_in_background: execBackgroundFlag(timeout, run_in_background) }, sid, { timeoutMs: 140_000 }),
+  ateam_workspace_exec: async ({ workspace_id, command, workingDir, timeout, run_in_background }, sid) => {
+    const base = { workspace_id, command, workingDir, timeout };
+    if (!execWaitsInBackground(timeout, run_in_background)) {
+      return workspaceCall("exec", { ...base, run_in_background }, sid, { timeoutMs: 140_000 });
+    }
+    // Started in the background and waited for here (workspaceTools.js QUICK_WAIT_SECONDS): the chat client gives up near 60 s.
+    const started = await workspaceCall("exec", { ...base, run_in_background: true }, sid, { timeoutMs: 140_000 });
+    const wait = started?.ok === true ? waitCommand(started?.details?.output_file) : null;
+    if (!wait) return started;
+    const waited = await workspaceCall("exec", { workspace_id, command: wait, timeout: 55_000, run_in_background: false }, sid, { timeoutMs: 140_000 });
+    const done = foregroundFromWait(waited, started);
+    return done ? shapeWorkspaceResult("exec", done, { keepWorkspace: true }) : started;
+  },
   ateam_workspace_status: ({ workspace_id }, sid) => workspaceCall("status", { workspace_id }, sid, { timeoutMs: 140_000 }),
   ateam_workspace_save: ({ workspace_id, message }, sid) =>
     workspaceCall("save", { workspace_id, message }, sid, { timeoutMs: 140_000 }),

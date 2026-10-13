@@ -43,16 +43,48 @@ export function withheldSentence(toolName) {
 }
 
 /**
- * A foreground command is stopped by Core at 100 s, and the request to Core crosses a proxy that gives up near the same
- * time, so a call that runs past it comes back as an error with the command killed. When the agent itself asks for more
- * than this (it expects a long command), the command is started in the background instead and the answer carries the
- * output file to poll: a long build just works. An explicit run_in_background (true or false) is never overridden.
+ * HOW LONG A CALL MAY BLOCK. A foreground command is stopped by Core at 100 s, but the chat client gives up on a tool call
+ * after about 60 s (seen live, 2026-10-13: "timed out after 60s" before Core's DEV_TIMEOUT could answer), and the proxy
+ * between them near 100 s. So a call that leaves the foreground choice open (no run_in_background) and does not ask for a
+ * short time limit starts the command in the BACKGROUND and waits for it here, at most QUICK_WAIT_SECONDS: a quick command
+ * answers at once, in the shape of a foreground one; a long one answers at that point with the output file to follow.
+ * An explicit run_in_background (true or false) is never overridden, and a timeout of QUICK_WAIT_SECONDS or less stays foreground.
  */
-export const FOREGROUND_SAFE_MS = 90_000;
+export const QUICK_WAIT_SECONDS = 40;
 
-export function execBackgroundFlag(timeout, runInBackground) {
-  if (typeof runInBackground === "boolean") return runInBackground;
-  return Number(timeout) > FOREGROUND_SAFE_MS ? true : undefined;
+/** Should this exec start in the background and be waited for? */
+export function execWaitsInBackground(timeout, runInBackground) {
+  if (typeof runInBackground === "boolean") return false;
+  return !(Number(timeout) > 0 && Number(timeout) <= QUICK_WAIT_SECONDS * 1000);
+}
+
+/** The command that waits (at most `seconds`) for a background task and prints its end, or that it still runs. Null for a path it will not quote. */
+export function waitCommand(outputFile, seconds = QUICK_WAIT_SECONDS) {
+  if (typeof outputFile !== "string" || !/^\/[A-Za-z0-9_./-]+\/out$/.test(outputFile)) return null;
+  const d = outputFile.slice(0, -4);
+  return `d='${d}'; i=0; while [ ! -e "$d/exit" ] && [ $i -lt ${seconds * 4} ]; do sleep 0.25; i=$((i+1)); done; ` +
+    `if [ -e "$d/exit" ]; then echo "__EXIT__ $(cat "$d/exit")"; cat "$d/out"; else echo __RUNNING__; fi`;
+}
+
+/**
+ * The answer of the waiting command as a foreground answer, or null when the task is still running (or the answer is not
+ * understood): the caller then returns the background handle it already has.
+ */
+export function foregroundFromWait(waited, started) {
+  const out = waited?.stdout;
+  if (!waited || waited.ok !== true || typeof out !== "string") return null;
+  const m = /^__EXIT__ (\d+)\n?/.exec(out);
+  if (!m) return null;
+  const code = Number(m[1]);
+  return {
+    ok: true,
+    workspace_id: started.workspace_id,
+    summary: code === 0 ? "The command finished." : `The command finished with exit code ${code}.`,
+    exit_code: code,
+    stdout: out.slice(m[0].length),
+    stderr: "",
+    ...(waited.truncated ? { truncated: true } : {}),
+  };
 }
 
 /** Tool arguments that would name WHO or WHERE. Never accepted: the key says it. */
@@ -172,7 +204,7 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
   exec:
     "Run ONE shell command in your workspace (you have no shell of your own; this is it). Files live in /workspace: read with cat/ls/grep, edit with sed, heredocs or git apply, run npm test, node, python. " +
     "Network reaches only npm, PyPI and the A-Team gateway. workspace_id is optional once you have opened one. " +
-    "A foreground command is stopped after 100 seconds: for a long build or test pass run_in_background:true (asking for a timeout above 90000 does it for you), then follow it with another exec: output_file holds the output, and `$(dirname output_file)/exit` holds the exit code once it has ended (ateam_workspace_status does not report background commands). With no timeout a command is stopped at 100 seconds, so give a timeout for anything long. " +
+    "A quick command answers at once (exit_code, stdout, stderr). One still running after about 40 seconds is left running; the answer gives an output_file: follow it with another exec every 20-30 s (`tail -n 50 <output_file>`; `cat \"$(dirname <output_file>)/exit\"` holds the exit code once it has ended, and is missing while it runs). status does not show it. For a long command pass a timeout in ms. " +
     "What you change is NOT live and the other ateam_* tools cannot see it until ateam_workspace_save. " +
     "The answer has `summary` first, then exit_code, stdout, stderr. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   status:
