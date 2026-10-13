@@ -404,3 +404,16 @@ test("the switch going off while a workspace is open never leaves the agent with
   names = await listedNames(sid2);
   assert.ok(withoutWorkspaceTools(names) && names.includes("ateam_github_patch"));
 });
+
+test("exec: a timeout above 90 s starts the command in the background; an explicit flag always wins", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const n = calls.length;
+  await handleToolCall("ateam_workspace_exec", { command: "npm ci", timeout: 200000 }, sid);
+  assert.equal(calls[n].body.params.run_in_background, true);
+  await handleToolCall("ateam_workspace_exec", { command: "ls", timeout: 5000 }, sid);
+  assert.ok(!("run_in_background" in calls[n + 1].body.params));
+  await handleToolCall("ateam_workspace_exec", { command: "npm ci", timeout: 200000, run_in_background: false }, sid);
+  assert.equal(calls[n + 2].body.params.run_in_background, false);
+});

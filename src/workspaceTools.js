@@ -42,6 +42,19 @@ export function withheldSentence(toolName) {
     + "or call ateam_workspace_close first to use this tool again.";
 }
 
+/**
+ * A foreground command is stopped by Core at 100 s, and the request to Core crosses a proxy that gives up near the same
+ * time, so a call that runs past it comes back as an error with the command killed. When the agent itself asks for more
+ * than this (it expects a long command), the command is started in the background instead and the answer carries the
+ * output file to poll: a long build just works. An explicit run_in_background (true or false) is never overridden.
+ */
+export const FOREGROUND_SAFE_MS = 90_000;
+
+export function execBackgroundFlag(timeout, runInBackground) {
+  if (typeof runInBackground === "boolean") return runInBackground;
+  return Number(timeout) > FOREGROUND_SAFE_MS ? true : undefined;
+}
+
 /** Tool arguments that would name WHO or WHERE. Never accepted: the key says it. */
 export const WORKSPACE_FORBIDDEN_ARGS = Object.freeze(["tenant", "tenant_id", "actor_id", "actorId", "actor", "chain_id", "chainId", "user", "user_id"]);
 
@@ -159,7 +172,7 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
   exec:
     "Run ONE shell command in your workspace (you have no shell of your own; this is it). Files live in /workspace: read with cat/ls/grep, edit with sed, heredocs or git apply, run npm test, node, python. " +
     "Network reaches only npm, PyPI and the A-Team gateway. workspace_id is optional once you have opened one. " +
-    "A foreground command is stopped after 100 seconds: for a long build or test pass run_in_background:true, then read its output file with another exec and poll ateam_workspace_status. " +
+    "A foreground command is stopped after 100 seconds: for a long build or test pass run_in_background:true (asking for a timeout above 90000 does it for you), then read its output file with another exec and poll ateam_workspace_status. " +
     "What you change is NOT live and the other ateam_* tools cannot see it until ateam_workspace_save. " +
     "The answer has `summary` first, then exit_code, stdout, stderr. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   status:

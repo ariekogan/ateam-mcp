@@ -149,7 +149,7 @@ import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId, getWorkspaceAvailability, setWorkspaceAvailability, noteWorkspaceListed } from "./api.js";
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
-  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure,
+  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execBackgroundFlag,
 } from "./workspaceTools.js";
 
 // A step that waits for a person: the Builder's human_step_testing words, verbatim.
@@ -3298,7 +3298,7 @@ export const tools = [
         workspace_id: WORKSPACE_ID_PROP,
         command: { type: "string", description: "The shell command to run (bash -c)." },
         workingDir: { type: "string", description: "Directory inside /workspace to run in. Default /workspace." },
-        timeout: { type: "number", description: "Time limit in milliseconds. Foreground: at most 100000. Background: up to an hour." },
+        timeout: { type: "number", description: "Time limit in milliseconds. Foreground: at most 100000; a value above 90000 runs it in the background for you. Background: up to an hour." },
         run_in_background: { type: "boolean", description: "Start it and return at once with an output file; use for builds and tests that take more than a minute." },
       },
       required: ["command"],
@@ -8173,7 +8173,7 @@ export const handlers = {
   // ─── Session workspace (Phase C): the Builder's POST /workspace/:method ──────
   ateam_workspace_open: (args, sid) => workspaceCall("open", {}, sid, { timeoutMs: 140_000 }),
   ateam_workspace_exec: ({ workspace_id, command, workingDir, timeout, run_in_background }, sid) =>
-    workspaceCall("exec", { workspace_id, command, workingDir, timeout, run_in_background }, sid, { timeoutMs: 140_000 }),
+    workspaceCall("exec", { workspace_id, command, workingDir, timeout, run_in_background: execBackgroundFlag(timeout, run_in_background) }, sid, { timeoutMs: 140_000 }),
   ateam_workspace_status: ({ workspace_id }, sid) => workspaceCall("status", { workspace_id }, sid, { timeoutMs: 140_000 }),
   ateam_workspace_save: ({ workspace_id, message }, sid) =>
     workspaceCall("save", { workspace_id, message }, sid, { timeoutMs: 140_000 }),
