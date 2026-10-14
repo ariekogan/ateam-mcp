@@ -3968,6 +3968,8 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_upload_connector_files",
     // The session workspace for an outside agent with no shell: its own clone, for the length of a chat.
     "ateam_workspace_open", "ateam_workspace_exec", "ateam_workspace_status", "ateam_workspace_save", "ateam_workspace_close",
+    // A tester picks the model profile for a workspace; a Builder job must not change the model it runs on.
+    "ateam_set_engine_profile",
   ],
   all: [
     "ateam_bootstrap", "ateam_auth", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
@@ -3976,7 +3978,7 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_list_solutions", "ateam_get_solution", "ateam_show_skill_minimal", "ateam_show_solution_minimal",
     "ateam_get_progress", "ateam_get_lessons", "ateam_log_progress", "ateam_log_lesson",
     "ateam_get_execution_logs", "ateam_test_status", "ateam_get_chain", "ateam_chain_status",
-    "ateam_get_metrics", "ateam_connector_logs", "ateam_inspect_data", "ateam_status_all",
+    "ateam_get_metrics", "ateam_connector_logs", "ateam_inspect_data", "ateam_status_all", "ateam_list_engine_profiles",
     "ateam_get_widget_catalog",
     "ateam_get_connector_source", "ateam_get_deployed_connector_source", "ateam_recover_connector_source",
     "ateam_diff", "ateam_verify_consistency", "ateam_verify", "ateam_verify_surface",
