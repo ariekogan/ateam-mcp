@@ -208,7 +208,7 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
     "Use it for anything bigger than a one-line change (ateam_github_patch/write do one file per call). " +
     "Your files are in /workspace (the solution is already there). Run commands with ateam_workspace_exec. " +
     "The other ateam_* tools cannot see your edits until you call ateam_workspace_save; only saving makes them live. " +
-    "Safe to call again: you get the workspace you already have, with any earlier unsaved work brought back. " +
+    "Safe to call again: you get the workspace you already have, with any earlier unsaved work brought back. An idle workspace is parked; unsaved work is kept as a draft and the next open resumes it (times: the answer's `environment`). " +
     "While it is open the single-file write tools (ateam_github_patch, ateam_github_write, ateam_build_and_run and the like) are switched off; ateam_workspace_close brings them back. " +
     "Takes no arguments: never pass a workspace, tenant or person. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   exec:

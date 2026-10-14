@@ -2879,7 +2879,7 @@ export const tools = [
     // /api/job/:id/chain, a per-actor read) carries. Kept and described for that,
     // since an undeclared actor_id would be latched all the same.
     description:
-      "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Stops at the next iteration boundary. " +
+      "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Once the abort lands no new step, planning round or sub-agent turn starts; a model or tool call already in flight finishes first. " +
       "The abort uses the actor the test's start ran as, whatever actor_id says: Core stops a job that actor may access and refuses any other with 403 JOB_ACCESS_DENIED, so an anonymous abort stops only anonymous runs. " + TEST_RUNS_AS_AT + " (Advanced.)",
     inputSchema: {
       type: "object",

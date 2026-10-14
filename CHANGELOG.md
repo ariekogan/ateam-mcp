@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `ateam_workspace_open` says an idle workspace is parked and the next open
+  resumes its unsaved work.
+- `ateam_test_abort` says what an abort stops: no new step, planning round or
+  sub-agent turn starts; a call already in flight finishes.
+
 ## 0.4.115 — 2026-10-04
 
 Released together with Builder builder-prod-20261004-001, whose served texts these tools point at.
