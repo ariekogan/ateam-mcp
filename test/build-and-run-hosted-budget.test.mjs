@@ -14,7 +14,7 @@
 // which is what src/server.js runs every tools/call in, with the transport
 // stated as src/index.js ("stdio") and src/http.js ("http") state it. The
 // Builder is a stubbed fetch whose deploy answers only when the test says so,
-// and the clock is node:test's mock timers, so a 75s budget costs no wall time.
+// and the clock is node:test's mock timers, so the budget costs no wall time.
 //
 // Run: node --test test/build-and-run-hosted-budget.test.mjs
 import { test } from "node:test";
@@ -23,9 +23,7 @@ import { setSessionCredentials, runToolCall } from "../src/api.js";
 import * as TOOLS from "../src/tools.js";
 // Namespace import: a missing export fails ITS test below, not the whole file.
 const { handleToolCall } = TOOLS;
-// The design's number when the export is missing, so every other test still
-// says what it would do on a server that has none.
-const HOSTED_CALL_BUDGET_MS = TOOLS.HOSTED_CALL_BUDGET_MS ?? 75_000;
+const HOSTED_CALL_BUDGET_MS = TOOLS.HOSTED_CALL_BUDGET_MS;
 
 const KEY_A = "adas_tenanta_00000000000000000000000000000000";
 const KEY_B = "adas_tenantb_00000000000000000000000000000000";
