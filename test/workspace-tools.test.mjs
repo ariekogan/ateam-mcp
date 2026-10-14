@@ -22,7 +22,7 @@ import { setSessionCredentials, getWorkspaceId } from "../src/api.js";
 import { handleToolCall, tools, coreTools, listedTools } from "../src/tools.js";
 import { waitCommand } from "../src/workspaceTools.js";
 import { renderAgentDocHeader } from "../src/agentDoc.js";
-import { workspaceFailure } from "../src/workspaceTools.js";
+import { workspaceFailure, shapeWorkspaceResult } from "../src/workspaceTools.js";
 import { PUBLIC_TOOLS } from "../src/publicTools.js";
 import { createServer } from "../src/server.js";
 import { WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD } from "../src/workspaceTools.js";
@@ -118,7 +118,7 @@ test("open sends no arguments, via the Builder route, and remembers the id; late
   await handleToolCall("ateam_workspace_status", {}, sid);
   assert.equal(calls[2].body.params.workspace_id, "ws-0123456789ab");
   await handleToolCall("ateam_workspace_save", { message: "Add a field" }, sid);
-  assert.deepEqual(calls[3].body.params, { workspace_id: "ws-0123456789ab", message: "Add a field" });
+  assert.deepEqual(calls[3].body.params, { workspace_id: "ws-0123456789ab", message: "Add a field", wait_ms: 40_000 });
   // An id the agent passes wins.
   await handleToolCall("ateam_workspace_status", { workspace_id: "ws-aaaaaaaaaaaa" }, sid);
   assert.equal(calls[4].body.params.workspace_id, "ws-aaaaaaaaaaaa");
@@ -157,7 +157,7 @@ test("close forgets the id; a refused open forgets it; a transient refusal keeps
   assert.equal(getWorkspaceId(sid), null);
 
   await handleToolCall("ateam_workspace_open", {}, sid);
-  answer = () => ({ ok: false, code: "WORKSPACES_SWITCHED_OFF", summary: "Workspaces are switched off for this workspace.", fallback: FALLBACK });
+  answer = () => ({ ok: false, code: "DEV_WORKSPACE_NOT_AVAILABLE", summary: "Workspaces are not available on a trial.", fallback: FALLBACK });
   const refused = await handleToolCall("ateam_workspace_open", {}, sid);
   assert.equal(getWorkspaceId(sid), null);
   assert.equal(refused.isError, true);
@@ -286,9 +286,9 @@ const withWorkspaceTools = (names) => WORKSPACE_TOOL_NAMES.every((n) => names.in
 const withoutWorkspaceTools = (names) => WORKSPACE_TOOL_NAMES.every((n) => !names.includes(n));
 
 test("signed in: the five tools are listed whatever Core says or fails to say; not signed in: they are not (and Core is never asked)", async () => {
-  // A failing probe used to hide them for a whole chat (a client lists once): Core restarting during a deploy, a 502, a switch off.
+  // A failing probe used to hide them for a whole chat (a client lists once): Core restarting during a deploy, a 502.
   for (const a of [
-    () => ({ ok: true, available: false, summary: "Workspaces are switched off for this tenant." }),
+    () => ({ ok: true, available: false, summary: "Workspaces are not available on a trial." }),
     () => ({ __status: 502, ok: false, code: "CORE_TOOL_FAILED" }),
     () => ({ ok: false, code: "WORKSPACE_KEY_HAS_NO_PERSON", summary: "This key is not tied to a person." }),
   ]) {
@@ -305,9 +305,9 @@ test("signed in: the five tools are listed whatever Core says or fails to say; n
   assert.equal(calls.length, 0, "a session that is not signed in is not asked");
 });
 
-test("a refused call is answered plainly by the call itself (switch off): the single-file tools are named", async () => {
+test("a refused call is answered plainly by the call itself: the single-file tools are named", async () => {
   const sid = signedIn();
-  answer = () => ({ ok: false, code: "WORKSPACES_SWITCHED_OFF", summary: "Workspaces are switched off.", fallback: FALLBACK });
+  answer = () => ({ ok: false, code: "DEV_WORKSPACE_NOT_AVAILABLE", summary: "Workspaces are not available for this workspace.", fallback: FALLBACK });
   const r = json(await handleToolCall("ateam_workspace_open", {}, sid));
   assert.equal(r.ok, false);
   assert.deepEqual(r.use_instead.tools, FALLBACK);
@@ -399,10 +399,10 @@ test("a workspace that is open keeps its tools, the old writers stay withheld; a
   await handleToolCall("ateam_workspace_close", {}, sid);
   names = await listedNames(sid);
   assert.ok(withWorkspaceTools(names) && names.includes("ateam_github_patch"), "after close: both sets");
-  // Core says the switch is off on the next call: the workspace is forgotten and the writers return.
+  // Core says workspaces are not available on the next call: the workspace is forgotten and the writers return.
   const sid2 = signedIn();
   await handleToolCall("ateam_workspace_open", {}, sid2);
-  answer = () => ({ ok: false, code: "WORKSPACES_SWITCHED_OFF", summary: "Workspaces are switched off.", fallback: FALLBACK });
+  answer = () => ({ ok: false, code: "DEV_WORKSPACE_NOT_AVAILABLE", summary: "Workspaces are not available for this workspace.", fallback: FALLBACK });
   await handleToolCall("ateam_workspace_status", {}, sid2);
   names = await listedNames(sid2);
   assert.ok(names.includes("ateam_github_patch"));
@@ -542,4 +542,89 @@ test("open passes Core's environment text through, and exec points at it", async
   const r = json(await handleToolCall("ateam_workspace_open", {}, sid));
   assert.equal(r.environment, "a Linux container with git, node");
   assert.match(tools.find((t) => t.name === "ateam_workspace_exec").description, /`environment` in ateam_workspace_open/);
+});
+
+// ── a save deploys and takes over a minute; the chat client gives up near 60 s ───────────────────────────────
+test("save and close(save:true) ask Core to answer 'still saving' after 40 s; a close without save asks for nothing of the kind", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  calls = [];
+  await handleToolCall("ateam_workspace_save", {}, sid);
+  assert.equal(calls[0].body.params.wait_ms, 40_000);
+  await handleToolCall("ateam_workspace_close", { save: true }, sid);
+  assert.equal(calls[1].body.params.wait_ms, 40_000);
+  assert.equal(calls[1].body.params.save, true);
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  await handleToolCall("ateam_workspace_close", {}, sid);
+  assert.ok(!("wait_ms" in calls[3].body.params), JSON.stringify(calls[3].body.params));
+});
+
+test("a save Core says is still going comes back as a handle: not done, nothing lost, poll status in 20-30 s", async () => {
+  answer = (method, p) => method === "save"
+    ? { ok: true, workspace_id: p.workspace_id, state: "saving", summary: "The save is still going and nothing is lost; ask for the status in about half a minute to see how it ended.", save: { state: "running" } }
+    : happy(method, p);
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const r = json(await handleToolCall("ateam_workspace_save", {}, sid));
+  assert.equal(r.ok, true);
+  assert.equal(r.save.state, "running");
+  assert.match(r.next_step, /20-30 seconds.*ateam_workspace_status.*save field/s);
+  assert.match(r.next_step, /Do not tell the user it is live/);
+});
+
+// ── deploy and test while a session is open ─────────────────────────────────────────────────────────────────
+test("while a workspace is open: ateam_upload_connector with github:true and no files (a redeploy of what was saved) goes through; any form that writes files is refused with the way out", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  assert.ok((await listedTools(sid)).some((t) => t.name === "ateam_upload_connector"), "listed while a workspace is open");
+  for (const args of [
+    { solution_id: "s", connector_id: "c", files: [{ path: "a.js", content: "x" }] },
+    { solution_id: "s", connector_id: "c", github: true, files: [{ path: "a.js", content: "x" }] },
+    { solution_id: "s", connector_id: "c", github: true, replace: true },
+    { solution_id: "s", connector_id: "c" },
+  ]) {
+    const r = await handleToolCall("ateam_upload_connector", args, sid);
+    assert.equal(r.structuredContent?.code, "WORKSPACE_OPEN", JSON.stringify(args));
+    assert.match(text(r), /ateam_workspace_save/);
+    assert.match(text(r), /github:true and no files/);
+  }
+  const ok = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", github: true }, sid);
+  assert.notEqual(ok.structuredContent?.code, "WORKSPACE_OPEN", "a redeploy of the saved work was refused");
+  const wait = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", resume: true, job_id: "j1" }, sid);
+  assert.notEqual(wait.structuredContent?.code, "WORKSPACE_OPEN", "waiting for an upload already started writes nothing");
+  const noJob = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", resume: true }, sid);
+  assert.equal(noJob.structuredContent?.code, "WORKSPACE_OPEN", "resume without a job_id is no resume");
+  const empty = await handleToolCall("ateam_upload_connector", { solution_id: "s", connector_id: "c", github: true, files: [] }, sid);
+  assert.notEqual(empty.structuredContent?.code, "WORKSPACE_OPEN", "an empty files list writes nothing");
+});
+
+test("while a workspace is open, the refusal of the shipped-version deploy says saving already deploys and that testing works; ateam_test_skill and ateam_conversation are not withheld", async () => {
+  answer = happy;
+  const sid = signedIn();
+  await handleToolCall("ateam_workspace_open", {}, sid);
+  const r = await handleToolCall("ateam_build_and_run", { solution_id: "s" }, sid);
+  assert.equal(r.structuredContent.code, "WORKSPACE_OPEN");
+  assert.match(text(r), /Saving already deploys.*ateam_workspace_save/s);
+  assert.match(text(r), /ateam_test_skill and ateam_conversation work while the workspace is open/);
+  const listed = (await listedTools(sid)).map((t) => t.name);
+  for (const t of ["ateam_test_skill", "ateam_conversation", "ateam_redeploy", "ateam_upload_connector"]) assert.ok(listed.includes(t), t);
+  assert.ok(!WORKSPACE_WITHHELD.has("ateam_test_skill") && !WORKSPACE_WITHHELD.has("ateam_conversation"));
+});
+
+// Core sends `fallback` as a capability code (Core names no client's tools): this connector maps it to its own tools. An older
+// Core sends the tool names themselves, which are still used as they are; a code this connector does not know adds nothing.
+test("a refusal's fallback capability code becomes this connector's own tools in use_instead; an older Core's tool list still works", async () => {
+  const shaped = (fallback) => shapeWorkspaceResult("open", { ok: false, code: "X", summary: "No.", fallback });
+  assert.deepEqual(shaped("single_file_writes").use_instead.tools, ["ateam_github_patch", "ateam_github_write"]);
+  assert.deepEqual(shaped("store_writes").use_instead.tools, ["ateam_patch", "ateam_upload_connector"]);
+  assert.match(shaped("store_writes").use_instead.how, /ateam_patch \/ ateam_upload_connector/);
+  assert.deepEqual(shaped(["ateam_github_patch", "ateam_github_write"]).use_instead.tools, FALLBACK, "an older Core");
+  for (const none of ["some_future_code", null, undefined, []]) {
+    const r = shaped(none);
+    assert.equal(r.use_instead, undefined, String(none));
+    assert.equal(r.fallback, undefined, "the raw field is never passed through");
+  }
+  assert.equal(shapeWorkspaceResult("open", { ok: false, code: "X", summary: "No.", fallback: "single_file_writes" }, { keepWorkspace: true }).use_instead, undefined, "withheld while a workspace is remembered");
 });
