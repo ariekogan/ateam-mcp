@@ -302,6 +302,7 @@ function buildToolTable() {
     // without the edit. Test from dev; ship with promote.
     "| Edit connector source code | `ateam_github_patch` / `ateam_github_write`, then `ateam_upload_connector(solution_id, connector_id, github:true)` to test it from `dev` |",
     "| Many files or real commands, with no shell of your own | `ateam_workspace_open`, `ateam_workspace_exec`, then `ateam_workspace_save` to make it live; `ateam_workspace_close` when done |",
+    "| Which model profile (live / shadow / builder) this workspace runs on | `ateam_list_engine_profiles`, then `ateam_set_engine_profile` (replaces the whole choice; a role left out is the platform default; next run) |",
     "| Edit skill definition (persona, tools, intents, guardrails) | `ateam_patch(target:\"skill\", skill_id, updates)` |",
     "| Edit solution definition | `ateam_patch(target:\"solution\", updates)` |",
     "| First deploy (with `mcp_store`) / deploy `main` after a promote | `ateam_build_and_run(solution_id)` |",
