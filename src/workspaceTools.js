@@ -30,42 +30,16 @@ export const WORKSPACE_WITHHELD = Object.freeze(new Set([
   "ateam_github_patch", "ateam_github_write", "ateam_github_push", "ateam_github_pull",
   "ateam_github_sync_from_main", "ateam_github_rollback",
   "ateam_build_and_run", "ateam_write_agent_doc", "ateam_patch",
-  "ateam_upload_connector_files", "ateam_create_connector", "ateam_create_plugin",
+  "ateam_upload_connector", "ateam_upload_connector_files", "ateam_create_connector", "ateam_create_plugin",
   "ateam_recover_connector_source", "ateam_sync_all",
   "ateam_delete_solution", "ateam_delete_skill", "ateam_delete_connector",
 ]));
 
-/**
- * ateam_upload_connector is withheld only in the forms that WRITE (files, replace): those would land edits beside the workspace's.
- * `github:true` with no files only deploys what was saved, so it stays available: it is the way to redeploy a connector from the workspace.
- */
-export function uploadConnectorWrites(args) {
-  const a = args && typeof args === "object" ? args : {};
-  if ((a.resume === true || a.resume === "true") && typeof a.job_id === "string" && a.job_id) return false; // waits for an upload already started; writes nothing
-  const hasFiles = Array.isArray(a.files) ? a.files.length > 0 : a.files != null;
-  return !(a.github === true && !hasFiles && a.replace !== true);
-}
-
 /** The one plain sentence a refused old writer returns. No git word: this reaches a chat agent that may repeat it. */
 export function withheldSentence(toolName) {
-  const why = `${toolName} is switched off while your workspace is open, so two sets of edits cannot collide. `;
-  if (toolName === "ateam_upload_connector") {
-    return why + "Edit the connector in the workspace and call ateam_workspace_save (it deploys what you saved); "
-      + "to redeploy a connector from what is saved, call ateam_upload_connector again with github:true and no files.";
-  }
-  if (toolName === "ateam_build_and_run") {
-    return why + "Saving already deploys your work: call ateam_workspace_save. To test what is deployed, ateam_test_skill and ateam_conversation work while the workspace is open. "
-      + "This tool deploys the shipped version instead; call ateam_workspace_close first if that is what you want.";
-  }
-  return why + "Make the change in the workspace (ateam_workspace_exec), then call ateam_workspace_save to make it live; "
+  return `${toolName} is switched off while your workspace is open, so two sets of edits cannot collide. `
+    + "Make the change in the workspace (ateam_workspace_exec), then call ateam_workspace_save to make it live; "
     + "or call ateam_workspace_close first to use this tool again.";
-}
-
-/** The sentence that refuses this call while a workspace is open, or null when the call is allowed. */
-export function withheldCall(toolName, args) {
-  if (WORKSPACE_WITHHELD.has(toolName)) return withheldSentence(toolName);
-  if (toolName === "ateam_upload_connector" && uploadConnectorWrites(args)) return withheldSentence(toolName);
-  return null;
 }
 
 /**
@@ -135,7 +109,7 @@ export function forbiddenArgIn(args) {
 // and the old writers come back. A transient refusal (a save running, bad arguments) does NOT forget it.
 const GONE_CODES = new Set([
   "WORKSPACE_CLOSED", "WORKSPACE_EXPIRED", "WORKSPACE_NOT_FOUND",
-  "DEV_WORKSPACE_NOT_AVAILABLE",
+  "DEV_WORKSPACE_NOT_AVAILABLE", "WORKSPACES_SWITCHED_OFF",
 ]);
 
 /**
@@ -174,13 +148,12 @@ export function shapeWorkspaceResult(method, result, { keepWorkspace = false } =
   const step = nextStep(method, result);
   if (step) out.next_step = step;
 
-  // A refusal carries what works without a workspace. The agent uses those tools; it does not give up. Not while the
+  // A refusal carries the tools that work without a workspace. The agent uses them; it does not give up. Not while the
   // workspace is still remembered: those tools are withheld then, and pointing at them would send the agent into a refusal.
-  const insteadTools = fallbackTools(fallback);
-  if (!keepWorkspace && insteadTools.length) {
+  if (!keepWorkspace && Array.isArray(fallback) && fallback.length) {
     out.use_instead = {
-      tools: insteadTools,
-      how: `That was not done in a workspace. Carry on with ${insteadTools.join(" / ")} instead (one file per call); do not stop and do not ask the user to do it.`,
+      tools: fallback,
+      how: `That was not done in a workspace. Carry on with ${fallback.join(" / ")} instead (one file per call); do not stop and do not ask the user to do it.`,
     };
   }
 
@@ -189,24 +162,8 @@ export function shapeWorkspaceResult(method, result, { keepWorkspace = false } =
   return out;
 }
 
-/** The tools that work without a workspace (Core's `single_file_writes`), also for a failure Core never answered. */
+/** The tools that work without a workspace (Core's fallback list), for a failure Core never answered. */
 export const SINGLE_FILE_TOOLS = Object.freeze(["ateam_github_patch", "ateam_github_write"]);
-
-/**
- * Core's `fallback` is a capability code (Core names no client's tools); these are this connector's tools for each one.
- * single_file_writes: one file of the solution's repository per call. store_writes: the solution store itself, for a tenant with
- * no repository.
- */
-const FALLBACK_TOOLS = Object.freeze({
-  single_file_writes: SINGLE_FILE_TOOLS,
-  store_writes: Object.freeze(["ateam_patch", "ateam_upload_connector"]),
-});
-
-/** This connector's tools for a refusal's `fallback`: the code mapped; an older Core's list of tool names as it is; else none. */
-function fallbackTools(fallback) {
-  if (Array.isArray(fallback)) return fallback.filter((t) => typeof t === "string" && t);
-  return typeof fallback === "string" && Object.hasOwn(FALLBACK_TOOLS, fallback) ? [...FALLBACK_TOOLS[fallback]] : [];
-}
 
 /**
  * A call that failed before Core answered (the Builder was down, a 4xx/5xx, a timeout) as plain data, the same shape as a
@@ -222,15 +179,15 @@ export function workspaceFailure(method, timedOut, keepWorkspace) {
       ? "That took longer than expected and may still be running; nothing is lost. Wait a minute, then call ateam_workspace_status to see how it ended."
       : "The workspace did not answer in time. Try again in a minute.")
     : "The workspace could not be reached just now, so nothing was changed. Try again in a minute.";
-  return shapeWorkspaceResult(method, { ok: false, summary, ...(!keepWorkspace && { fallback: "single_file_writes" }) }, { keepWorkspace });
+  return shapeWorkspaceResult(method, { ok: false, summary, ...(!keepWorkspace && { fallback: [...SINGLE_FILE_TOOLS] }) }, { keepWorkspace });
 }
 
 function nextStep(method, r) {
   // A save that outlived Core's wait is still running: it is not an error and not done.
   if (r.state === "saving" || r.save?.state === "running") {
     return method === "close"
-      ? "The save is still going. Wait 20-30 seconds, then call ateam_workspace_close again (or ateam_workspace_status to see how the save ended)."
-      : "The save is still going and nothing is lost. Wait 20-30 seconds, then call ateam_workspace_status: its save field says how it ended. Do not tell the user it is live until it does.";
+      ? "The save is still going. Wait a minute, then call ateam_workspace_close again (or ateam_workspace_status to see how the save ended)."
+      : "The save is still going and nothing is lost. Wait a minute, then call ateam_workspace_status (or ateam_workspace_save again) to see how it ended. Do not tell the user it is live until a call says so.";
   }
   if (method === "exec" && r.ok && r.details?.task_id) {
     return "The command is running in the background. Follow it with ateam_workspace_exec: `tail -n 50 details.output_file` shows the output so far, and `cat \"$(dirname details.output_file)/exit\"` holds the exit code once the command has ended (the file does not exist while it is still running, and never appears if the command was killed: if its time limit has passed and the output stopped growing, treat it as stopped). Poll that every 20 to 30 seconds; to stop it early run `kill -- -$(cat \"$(dirname details.output_file)/pid\")`; ateam_workspace_status does not report background commands.";
@@ -252,7 +209,7 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
     "Your files are in /workspace (the solution is already there). Run commands with ateam_workspace_exec. " +
     "The other ateam_* tools cannot see your edits until you call ateam_workspace_save; only saving makes them live. " +
     "Safe to call again: you get the workspace you already have, with any earlier unsaved work brought back. " +
-    "While it is open the single-file write tools (ateam_github_patch, ateam_github_write, ateam_build_and_run and the like) are switched off; ateam_workspace_close brings them back. Saving deploys; ateam_test_skill and ateam_conversation work meanwhile. " +
+    "While it is open the single-file write tools (ateam_github_patch, ateam_github_write, ateam_build_and_run and the like) are switched off; ateam_workspace_close brings them back. " +
     "Takes no arguments: never pass a workspace, tenant or person. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   exec:
     "Run ONE shell command in your workspace (you have no shell of your own; this is it). Files live in /workspace: read with cat/ls/grep, edit with sed, heredocs or git apply, run npm test, node, python. " +
@@ -261,17 +218,17 @@ export const WORKSPACE_DESCRIPTIONS = Object.freeze({
     "What you change is NOT live and the other ateam_* tools cannot see it until ateam_workspace_save. " +
     "The answer has `summary` first, then exit_code and stdout. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   status:
-    "Check your workspace: whether it is open, whether it holds changes that are not saved yet, and how a long save is going or how the last one ended (not background commands: follow those with ateam_workspace_exec). " +
+    "Check your workspace: whether it is open, whether it holds changes that are not saved yet, and how a long save is going (not background commands: follow those with ateam_workspace_exec). " +
     "Call it when ateam_workspace_save said the save is still going, until it says it is done. " +
     "workspace_id is optional once you have opened one. Changes nothing. " + USER_RULE,
   save:
     "Make the work in your workspace live. This is the only way the other ateam_* tools (ateam_status_all, ateam_test_skill, ateam_verify...) see your edits. " +
     "Optional `message`: a short sentence about what changed, in plain words. " +
-    "It also deploys, and can take over a minute: after about 40 s the answer may say the save is still going; then call ateam_workspace_status in 20-30 s until its save field says how it ended. Do not tell the user it is live until it does. Then test with ateam_test_skill or ateam_conversation (they work while the workspace is open). " +
+    "It can take minutes: if the answer says the save is still going, wait a minute and call ateam_workspace_status (or this tool again); do not tell the user it is live until it says so. " +
     "If someone else changed the same files you get the file names: combine the two versions in the workspace and save again. " +
     "workspace_id is optional once you have opened one. " + USER_RULE + " A refusal lists `use_instead` tools: use them.",
   close:
-    "Finish with your workspace. save:true saves it first (like ateam_workspace_save), then closes; without it, work that is not saved is kept as a draft that comes back the next time you open a workspace (nothing is kept when everything was saved). " +
+    "Finish with your workspace. save:true saves it first (like ateam_workspace_save), then closes; without it, unsaved work is kept as a draft that comes back the next time you open a workspace. " +
     "Closing brings back the single-file write tools (ateam_github_patch, ateam_build_and_run...). " +
     "If the answer says the save is still going, the workspace stays open: wait a minute and close again. " +
     "workspace_id is optional once you have opened one. " + USER_RULE,

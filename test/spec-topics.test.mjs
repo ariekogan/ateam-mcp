@@ -66,7 +66,7 @@ check(
 // the advisor starts handing out an address that 404s.
 const ADVISOR_POINTER_TOPICS = [
   "skill", "solution", "actor-storage", "voice", "voice-native", "widgets",
-  "python_helpers", "triggers", "sub-agent", "consumer-roles",
+  "python_helpers", "triggers", "sub-agent", "consumer-roles", "customer-verification",
   "mobile-connector", "device-capabilities",
 ];
 const brokenPointers = ADVISOR_POINTER_TOPICS.filter((t) => !enumValues.includes(t));
