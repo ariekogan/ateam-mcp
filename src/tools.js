@@ -5791,6 +5791,7 @@ export const handlers = {
       debugging: ["ateam_get_execution_logs", "ateam_connector_logs", "ateam_get_metrics", "ateam_diff", "ateam_get_connector_source", "ateam_get_deployed_connector_source"],
       manual_lifecycle: ["ateam_validate_skill", "ateam_validate_solution", "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector", "ateam_update", "ateam_redeploy"],
       async_testing: ["ateam_test_status", "ateam_test_abort"],
+      workspace_settings: ["ateam_list_engine_profiles", "ateam_set_engine_profile"],
       other: ["ateam_upload_connector_files", "ateam_solution_chat"],
     },
     static_pages: {
