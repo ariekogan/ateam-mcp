@@ -3090,7 +3090,7 @@ export const tools = [
     name: "ateam_set_engine_profile",
     core: false,
     description:
-      "Choose the model profiles this workspace runs on, for this workspace only (other workspaces are untouched). There are three roles: live (ordinary traffic), shadow (shadow comparison replays) and builder (skills that declare engine.profile \"builder\"). Pass a profile name from ateam_list_engine_profiles for each role you want; a role you leave out (or pass as null) uses the platform's default. This REPLACES the whole choice every time, so state all the roles you want. Takes effect on the next run. Does not create or edit profiles. (Advanced.)",
+      "Choose the model profiles this workspace runs on, for this workspace only (other workspaces are untouched). There are three roles: live (ordinary traffic), shadow (shadow comparison replays) and builder (skills that declare engine.profile \"builder\"). Pass a profile name from ateam_list_engine_profiles for each role you want; a role you leave out (or pass as null) uses the platform's default. This REPLACES the whole choice every time, so state all the roles you want. Takes effect on the next run. Does not create or edit profiles. CAUTION: changing live changes the model, and its cost, for every real user of this workspace; shadow only does anything while the platform's shadow comparison is switched on, and then replays every stage on that profile. Use builder for a model test. (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -3904,7 +3904,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_sync_all", "ateam_test_abort",
     // exec runs any command in the workspace; save makes the work live; close may save.
     "ateam_workspace_exec", "ateam_workspace_save", "ateam_workspace_close",
-    // Overwrites this workspace's builder-profile setting (undone by passing null).
+    // Overwrites this workspace's live, shadow and builder profile choices (undone by passing null).
     "ateam_set_engine_profile",
     // RUNS CODE THIS SERVER CANNOT SEE.
     //   a connector tool, by name:            ateam_test_connector
@@ -7991,9 +7991,10 @@ export const handlers = {
 
   ateam_set_engine_profile: async ({ live_profile, shadow_profile, builder_profile } = {}, sid) => {
     const roles = { activeProfile: live_profile, shadowProfile: shadow_profile, builderProfile: builder_profile };
+    const param = { activeProfile: "live_profile", shadowProfile: "shadow_profile", builderProfile: "builder_profile" };
     for (const [k, v] of Object.entries(roles)) {
       if (v !== undefined && v !== null && typeof v !== "string") {
-        return { ok: false, error: `${k} must be a profile name (see ateam_list_engine_profiles) or null.` };
+        return { ok: false, error: `${param[k]} must be a profile name (see ateam_list_engine_profiles) or null.` };
       }
     }
     // A role left out is sent as null: the platform default, never "whatever was set last time".

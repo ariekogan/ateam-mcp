@@ -1,5 +1,5 @@
 // The two engine-profile tools reach the Builder's /deploy/engine-profiles door:
-// list = GET, set = PUT { builderProfile }, null clears, and nothing else is sent.
+// list = GET, set = PUT { activeProfile, shadowProfile, builderProfile }, null clears, and nothing else is sent.
 // Run: node --test test/engine-profile-tools.test.mjs
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -45,7 +45,7 @@ test("a non-string profile is refused before anything is sent", async () => {
   seen.length = 0;
   const r = await handleToolCall("ateam_set_engine_profile", { shadow_profile: 5 }, SID);
   assert.equal(seen.length, 0);
-  assert.match(r.content[0].text, /shadowProfile must be a profile name/);
+  assert.match(r.content[0].text, /shadow_profile must be a profile name/);
 });
 
 test("both tools are registered and safety-classed", () => {
