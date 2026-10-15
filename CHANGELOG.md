@@ -6,6 +6,8 @@
   resumes its unsaved work.
 - `ateam_test_abort` says what an abort stops: no new step, planning round or
   sub-agent turn starts; a call already in flight finishes.
+- Advisor pointer names the per-skill loop settings (speed and length of a turn);
+  the facts are in the Builder's skill spec, engine section, `loop_settings`.
 
 ## 0.4.115 — 2026-10-04
 
