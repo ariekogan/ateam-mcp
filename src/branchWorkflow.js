@@ -139,6 +139,15 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // `dev` has it too (its guard walks every file) — neither shipping dev's copy
   // over the rollback nor writing the rollback over dev. ateam_upload_connector reads `dev` directly and has no
   // such check.
+  // CHANGES CAN ALSO BE CARDS. Facts from Core: the platform connector
+  // dev-studio-mcp (the board) and the platform skills dev-desk and
+  // solution-builder (card mode). ateam-mcp has no card tool, so this only says
+  // what a card is when the user names one, and that a card run moves `dev`.
+  // Rendered into bootstrap `branching`, not into CLAUDE.md.
+  board_cards:
+    'A change to the solution can also live as a card on the Dev Studio board in the A-Team app (columns To do, Doing, Needs you, Review, Stuck, Done; at most 2 cards in Doing). Each card has a short tag, such as #7. '
+    + 'A card of kind "solution" is run by the in-app Builder: it builds on `dev`, deploys that exact commit, and never ships to production (shipping stays the Builder chat\'s step, approved by an admin). It needs the solution kept in a linked GitHub repository. A card of kind "repos" changes the owner\'s own GitHub repositories instead. '
+    + 'Only an owner or admin starts a card; approving one is the owner\'s own click on the board. ateam-mcp has no card tools: if the user names a card, ask what it says. A solution card\'s run also commits to `dev`, so `dev` can move between your calls.',
   rollback: 'Production is never rolled back directly. To go back: find a prod-* tag with ateam_github_list_versions, put that version back on `dev` with ateam_github_rollback(solution_id, target) (the Restore button in the A-Team app does the same), try it, then ateam_github_promote.',
   no_git_at_all:
     'A tenant with no repo connected works entirely on the Builder\'s own store — no branches, no promote. ateam_patch(source:\'local\') is the explicit form. Connect a repo later and writes start landing on `dev` from that point on.',

@@ -5744,6 +5744,7 @@ export const handlers = {
       no_git_at_all: BRANCH_WORKFLOW.no_git_at_all,
       with_git_or_without: BRANCH_WORKFLOW.git_or_tools,
       deploy_an_exact_commit: BRANCH_WORKFLOW.ref_deploy_note,
+      changes_as_cards: BRANCH_WORKFLOW.board_cards,
     },
     first_questions: [
       { id: "goal", question: "What do you want your Team to accomplish?", type: "text" },
