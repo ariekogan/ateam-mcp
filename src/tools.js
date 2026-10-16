@@ -2747,12 +2747,11 @@ export const tools = [
     // degrades. Use once at the end; poll ateam_chain_status instead.
     monitoring: { safe: false, cost: "heavy", output: "grows_with_run", use_instead: "ateam_chain_status" },
     description:
-      "Inspect the full chain tree — the whole run rooted at chain_id, walking down through every handoff and askAnySkill subcall.\n\n" +
-      "Use when a chain has already run and you want to analyze the structure: which skill called which, how deep the call tree went, which tool inside which job invoked which sub-tool. The two main shapes:\n" +
-      "  • response.data.chainJobs[] — one entry per job in the chain. Fields: jobId, skill, status, iteration, depth (0 = root, +1 per askAnySkill subcall hop), relation ('root' | 'subcall' | 'handoff'), parentJobId, parentSkill, goal.\n" +
-      "  • response.data.executionSteps[] — every tool call across all chain jobs, tagged with _skill, _jobId, _depth (= job depth), _relation, _parentSkill, _parentJobId, _toolDepth (tool-in-tool nesting via opId/parentOpId).\n\n" +
-      "Differs from ateam_test_status by purpose: status is for live polling of a job you just kicked off; get_chain is for post-hoc tree analysis (debugging multi-skill flows, regression testing, comparing two runs).\n\n" +
-      "Auth: forwards your authed api_key. Tenant scoped by the key itself. Actor scoping: you can only inspect chains rooted at jobs your actor has access to.",
+      "Inspect the full chain tree — the whole run rooted at chain_id, through every handoff and askAnySkill subcall. Use after a chain has run, to analyze its structure; to watch a run use ateam_chain_status (this answer grows with the run). Two shapes:\n" +
+      "  • response.data.chainJobs[] — one per job: jobId, skill, status, iteration, depth, relation ('root' | 'subcall' | 'handoff'), parentJobId, parentSkill, goal.\n" +
+      "  • response.data.executionSteps[] — every tool call of every job, tagged _skill, _jobId, _depth, _relation, _parentSkill, _parentJobId, _toolDepth.\n\n" +
+      "ONE JOB IN FULL: the answer holds EVERY job, oldest first, and ~50KB is the limit. A Dev Studio card keeps all its turns on one chain, so a long chain comes back as an outline (every job; per step tool, status, reason; no arguments or results) and says so. To read one job in full: ateam_get_chain({ job_id: \"<jobId>\", only_this_job: true }).\n\n" +
+      "Auth: your api_key; tenant scoped by the key; only chains your actor can access.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2768,7 +2767,11 @@ export const tools = [
         },
         job_id: {
           type: "string",
-          description: "Alias for chain_id. Any job inside the chain works — Core walks up to the root — but you rarely hold one; prefer chain_id.",
+          description: "Alias for chain_id. Any job of the chain returns the SAME whole chain (every job's steps), not just that job; add only_this_job:true to read that one job on its own.",
+        },
+        only_this_job: {
+          type: "boolean",
+          description: "Optional. true = return only the steps of the job whose id is in job_id (arguments and results included), not every job of the chain. The chain's jobs are still listed. Use it for one turn of a long chain, such as one turn of a Dev Studio card. job_id must be a job id of the chain; a chain id that is not a job id is refused with the list of the chain's jobs.",
         },
         skill_slug: {
           type: "string",
@@ -7550,13 +7553,16 @@ export const handlers = {
     return { ...single, chain };
   },
 
-  ateam_get_chain: async ({ chain_id, job_id, skill_slug }, sid) => {
-    // CHAIN IS THE UNIT. Core resolves either id to the same chain (it walks up
-    // to the root), so the tool takes the id the caller actually holds — the
-    // chain id from ateam_conversation — and treats job_id as an alias for the
-    // rarer case of holding an inner id. Same `chain_id || job_id` shape as
-    // ateam_chain_status, so the two poll/inspect tools take the same argument.
-    const id = chain_id || job_id;
+  ateam_get_chain: async ({ chain_id, job_id, only_this_job, skill_slug }, sid) => {
+    // CHAIN IS THE UNIT. Core answers any id of a chain with the SAME whole
+    // chain: it loads the job named, then gathers every job that shares its
+    // chainId (getCurrentJob.js), so the tool takes the id the caller actually
+    // holds — the chain id from ateam_conversation — and treats job_id as an
+    // alias for the rarer case of holding an inner id. Same `chain_id || job_id`
+    // shape as ateam_chain_status, so the two poll/inspect tools take the same
+    // argument. The one exception is only_this_job, which is about ONE job: it
+    // asks for the job_id, and the job's own plan and state come back with it.
+    const id = only_this_job === true && job_id ? job_id : (chain_id || job_id);
     if (!id) throw new Error("chain_id required (job_id accepted as an alias)");
     const creds = getCredentials(sid);
     const apiKey = creds?.apiKey;
@@ -7566,7 +7572,8 @@ export const handlers = {
     const qs = new URLSearchParams();
     if (skill_slug) qs.set("skillSlug", skill_slug);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return await get(apiPath`/deploy/jobs/${id}/chain${rawQuery(suffix)}`, sid);
+    const body = await get(apiPath`/deploy/jobs/${id}/chain${rawQuery(suffix)}`, sid);
+    return only_this_job === true ? scopeChainToJob(body, id) : body;
   },
 
   // SLIM chain status — the chip-quick poll. Hits Core /api/job/:id/status
@@ -8924,6 +8931,96 @@ export const handlers = {
 const MAX_RESPONSE_CHARS = 50_000;
 
 /**
+ * ONE JOB OF A CHAIN, in full. Core's chain answer holds the steps of EVERY job of the chain in one array, oldest job first, and the
+ * output cap cuts the end off: a Dev Studio card keeps every turn on one chain (the card's id), so the first turn fills the answer
+ * and each later turn, the newer ones, were never readable (2026-10-16: a turn reported "full stop added, live on dev" and nothing
+ * could show what it did). The chain's jobs stay listed; only the steps are narrowed. An id that is not a job of this chain is
+ * refused WITH the jobs it does have, because a chain id (a card id) is what people hold.
+ */
+export function scopeChainToJob(body, jobId) {
+  const data = body?.data;
+  if (!data || !Array.isArray(data.executionSteps)) return body; // an error answer, not a chain: nothing to narrow
+  const jobs = Array.isArray(data.chainJobs) ? data.chainJobs : [];
+  if (!jobs.some((j) => j?.jobId === jobId)) {
+    const have = jobs.map((j) => `${j.jobId} (${j.skill || "?"}, ${j.status || "?"})`).join(", ") || "none listed";
+    throw new Error(`only_this_job needs the id of ONE job of the chain, and "${jobId}" is not one. The chain's jobs: ${have}.`);
+  }
+  const steps = data.executionSteps.filter((s) => s?._jobId === jobId);
+  return {
+    ...body,
+    data: {
+      ...data,
+      executionSteps: steps,
+      _scoped: { only_this_job: jobId, steps_in_this_job: steps.length, steps_in_other_jobs: data.executionSteps.length - steps.length },
+    },
+  };
+}
+
+/**
+ * A chain too big for one answer, as VALID JSON that hides nothing: every job of the chain, and for every job an outline of its steps
+ * (tool, status, the reason up to 100 chars; no arguments, no results). What was left out is counted, and the way to the full detail
+ * of one job is named. It used to be the generic tail-slice: cut mid-token, and every job after the first silently gone.
+ */
+function summarizeChainResult(result) {
+  const data = result.data;
+  const steps = data.executionSteps;
+  const jobs = Array.isArray(data.chainJobs) ? data.chainJobs : [];
+  const thinking = new Map();
+  const outlines = new Map(); // jobId -> rows
+  steps.forEach((s, i) => {
+    const job = s?._jobId || "?";
+    if (s?.tool === "sdk.thinking") { thinking.set(job, (thinking.get(job) || 0) + 1); return; }
+    const row = { i, tool: s?.tool, status: s?.status };
+    if (s?.reason && s.reason !== "via sys.callAiWithTools[agent_sdk]") row.reason = String(s.reason).slice(0, 100);
+    if (!outlines.has(job)) outlines.set(job, []);
+    outlines.get(job).push(row);
+  });
+  const head = {
+    _truncation: "",
+    ok: result.ok,
+    data: {
+      id: data.id,
+      goal: data.goal,
+      status: data.status,
+      chainJobs: jobs,
+      steps_total: steps.length,
+      steps_outline: {},
+    },
+  };
+  const fullSize = JSON.stringify(result, null, 2).length;
+  const sentence = (kept) =>
+    `This chain is ${fullSize.toLocaleString()} chars, over the ${MAX_RESPONSE_CHARS.toLocaleString()}-char answer limit, so it is shown as an outline: every job of the chain, and for each job one line per step (arguments and results left out; "sdk.thinking" steps are only counted). ` +
+    `${kept} ` +
+    `To read ONE job in full, arguments and results included: ateam_get_chain({ job_id: "<jobId from chainJobs>", only_this_job: true }).`;
+  // Fewest rows first: shrink how many rows of each job are kept until the document fits. Rows are kept from both ends of a job
+  // (how it began, how it ended), never silently: the count of the ones left out is in the job's entry.
+  for (const keep of [Infinity, 60, 30, 15, 8, 4, 2, 0]) {
+    const outline = {};
+    let omitted = 0;
+    for (const [job, rows] of outlines) {
+      const hide = Number.isFinite(keep) && rows.length > keep ? rows.length - keep : 0;
+      const front = hide ? rows.slice(0, Math.ceil(keep / 2)) : rows;
+      const back = hide ? rows.slice(rows.length - Math.floor(keep / 2)) : [];
+      omitted += hide;
+      outline[job] = { steps: rows.length + (thinking.get(job) || 0), thinking_steps_not_listed: thinking.get(job) || 0, rows_left_out: hide, rows: [...front, ...(hide ? [{ gap: `${hide} rows left out` }] : []), ...back] };
+    }
+    head.data.steps_outline = outline;
+    head._truncation = sentence(omitted ? `${omitted} outline row(s) are also left out (counted per job as rows_left_out).` : "Every step has its outline row.");
+    const out = JSON.stringify(head, null, 2);
+    if (out.length <= MAX_RESPONSE_CHARS) return out;
+  }
+  // Thousands of jobs: the job list itself is the size. Keep the first and last of them, and say so; always valid JSON.
+  for (const edge of [20, 10, 4, 1, 0]) {
+    const left = Math.max(0, jobs.length - 2 * edge);
+    const trimmed = { ...head, data: { ...head.data, chainJobs: left ? [...jobs.slice(0, edge), { gap: `${left} jobs left out` }, ...jobs.slice(jobs.length - edge)] : jobs, steps_outline: {} } };
+    trimmed._truncation = sentence(`The job list is cut too (first ${edge} and last ${edge} of ${jobs.length} jobs), and no step outline is shown.`);
+    const out = JSON.stringify(trimmed, null, 2);
+    if (out.length <= MAX_RESPONSE_CHARS) return out;
+  }
+  return JSON.stringify({ _truncation: sentence("Nothing else fits."), ok: result.ok, data: { id: data.id, status: data.status, jobs: jobs.length, steps_total: steps.length } }, null, 2);
+}
+
+/**
  * Format tool results — summarize oversized payloads.
  */
 // Exported for test/spec-topics.test.mjs: the truncation is asserted against
@@ -8968,6 +9065,11 @@ function summarizeLargeResult(result, toolName) {
   // nothing vanishes silently — see summarizeSpecResult.
   if (toolName === "ateam_get_spec" && result && typeof result === "object" && !Array.isArray(result)) {
     return summarizeSpecResult(result);
+  }
+
+  // A chain tree: a valid outline of every job, never a tail-slice (see summarizeChainResult).
+  if (toolName === "ateam_get_chain" && result?.data && Array.isArray(result.data.executionSteps)) {
+    return summarizeChainResult(result);
   }
 
   // Validation results — keep errors/warnings, trim echoed input

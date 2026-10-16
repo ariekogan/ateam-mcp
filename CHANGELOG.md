@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `ateam_get_chain`: a chain over the 50KB answer limit (a Dev Studio card keeps
+  every turn on one chain) comes back as valid JSON that lists every job and
+  outlines every step, instead of being cut mid-token with the newer turns gone.
+  New `only_this_job: true` with a `job_id` returns that one job's steps in full;
+  an id that is not a job of the chain is refused with the jobs it has. The
+  `job_id` text no longer claims it narrows the tree (Core answers any id of a
+  chain with the whole chain).
 - `ateam_workspace_open` says an idle workspace is parked and the next open
   resumes its unsaved work.
 - `ateam_test_abort` says what an abort stops: no new step, planning round or
