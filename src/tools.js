@@ -5774,6 +5774,7 @@ export const handlers = {
       _important: `TWO BRANCHES, and the step between them is EXPLICIT: ${BRANCH_WORKFLOW.one_line}.`,
       dev: BRANCH_WORKFLOW.write_side,
       main: BRANCH_WORKFLOW.deploy_side,
+      changes_as_cards: BRANCH_WORKFLOW.changes_as_cards,
       the_loop: BRANCH_WORKFLOW.loop,
       the_mistake_this_causes: BRANCH_WORKFLOW.the_silent_mistake,
       promote_is_a_ship: BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint,
@@ -5802,7 +5803,6 @@ export const handlers = {
       // with no promote. Rendered from the owner now, like `branching`.
       ...(workspaces && { chat_workspace: BRANCH_WORKFLOW.workspace }),
       branch: `${BRANCH_WORKFLOW.write_side} ${BRANCH_WORKFLOW.deploy_side}`,
-      changes_as_cards: BRANCH_WORKFLOW.changes_as_cards,
       checkpoints: `${BRANCH_WORKFLOW.tag_format} tags are created automatically by each promote. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint}`,
       iteration_workflow: {
         the_loop: BRANCH_WORKFLOW.loop,

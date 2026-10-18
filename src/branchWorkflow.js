@@ -136,8 +136,8 @@ export const BRANCH_WORKFLOW = Object.freeze({
   // /spec/solution -> change_cards; this is the outside agent's short version and
   // a pointer, not a copy of the rules. The outside agent has no card tools.
   changes_as_cards:
-    'An owner or admin can ask the Builder chat to put a change on the board as a card; the Builder files it and hands it to Dev Desk, which runs it as its own chain on a branch named ateam/<card id>, deploys to dev only, and tells the card\'s owner when a run needs them or finishes. '
-    + 'You have no card tools here: do not file, start or approve a card, and do not push to an ateam/ branch (the platform accepts nothing else from a card run). Keep working on `dev` with the ateam_* tools. '
+    'An owner or admin can ask the Builder chat to put a change on the board as a card; the Builder files it and hands it to Dev Desk, which runs it on `dev` and tells the card\'s owner when a run reports or is treated as stopped. '
+    + 'ateam-mcp has no card tools: you cannot file, start or approve a card; keep working on `dev` with the ateam_* tools. '
     + 'The whole text: ateam_get_spec({ topic: "solution", search: "change_cards" }).',
 
   // Rollback writes `main` only. A deploy used to paper over that by writing
