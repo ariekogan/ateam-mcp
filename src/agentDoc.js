@@ -138,6 +138,10 @@ ${BRANCH_WORKFLOW.workspace}\n\n> \`${BRANCH_WORKFLOW.write_branch}\` may not ex
 
 ${BRANCH_WORKFLOW.deploy_side}
 
+### Changes as cards
+
+${BRANCH_WORKFLOW.changes_as_cards}
+
 ### With Git, or without
 
 ${BRANCH_WORKFLOW.git_or_tools}

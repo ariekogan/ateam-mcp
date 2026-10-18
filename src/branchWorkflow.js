@@ -132,6 +132,14 @@ export const BRANCH_WORKFLOW = Object.freeze({
     + 'ateam_build_and_run is the HEAVY full path (the first deploy, or deploying `main` after a promote) and it deploys `main`. '
     + 'On a solution with 5+ skills it can hit the 100s edge timeout, which is the other reason not to reach for it every iteration.',
 
+  // CHANGES AS CARDS (Dev Studio). The whole text has ONE home, the Builder's
+  // /spec/solution -> change_cards; this is the outside agent's short version and
+  // a pointer, not a copy of the rules. The outside agent has no card tools.
+  changes_as_cards:
+    'An owner or admin can ask the Builder chat to put a change on the board as a card; the Builder files it and hands it to Dev Desk, which runs it as its own chain on a branch named ateam/<card id>, deploys to dev only, and tells the card\'s owner when a run needs them or finishes. '
+    + 'You have no card tools here: do not file, start or approve a card, and do not push to an ateam/ branch (the platform accepts nothing else from a card run). Keep working on `dev` with the ateam_* tools. '
+    + 'The whole text: ateam_get_spec({ topic: "solution", search: "change_cards" }).',
+
   // Rollback writes `main` only. A deploy used to paper over that by writing
   // what it deployed back to `dev`; since Builder #50 it does not. The Builder
   // records the rolled-back copy as `main` content `dev` does not have (its

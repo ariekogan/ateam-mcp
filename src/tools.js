@@ -5802,6 +5802,7 @@ export const handlers = {
       // with no promote. Rendered from the owner now, like `branching`.
       ...(workspaces && { chat_workspace: BRANCH_WORKFLOW.workspace }),
       branch: `${BRANCH_WORKFLOW.write_side} ${BRANCH_WORKFLOW.deploy_side}`,
+      changes_as_cards: BRANCH_WORKFLOW.changes_as_cards,
       checkpoints: `${BRANCH_WORKFLOW.tag_format} tags are created automatically by each promote. ${BRANCH_WORKFLOW.promote_is_a_ship_not_a_checkpoint}`,
       iteration_workflow: {
         the_loop: BRANCH_WORKFLOW.loop,
