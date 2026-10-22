@@ -1978,7 +1978,11 @@ export const tools = [
       // the skill call for a key with no person (an anonymous run) and for a
       // phone caller (phone::<number>, an actor Core does not know) — C6. Who
       // the test runs as is the Builder's to say: the pointer.
-      "Simulate a voice call with text, not audio. A person's key reaches the skill (skill job included); with no person on the key, or a phone caller, Core refuses the skill call today (C6): test it with ateam_conversation. Each turn returns response, verification, entities; ran_as repeats its actor_id.\n\n" +
+      // Phone slice VOICE-4 (Core batch): voice keeps no caller check of its own, so a turn carries no
+      // `verification` field; a phone_number only labels the simulated call (no actor, no credential, its skill
+      // jobs are refused before they reach Core, routes/voiceSimulate.js); a REAL phone call is named to Core by
+      // Core itself (cp.verification_api callStart) and checked by Customer verification.
+      "Simulate a voice call with text, not audio. A person's key reaches the skill (skill job included); with no person on the key, or with a phone_number (it only labels the call: no actor, no credential), the skill call is refused before it reaches Core: test what a phone caller can do with ateam_conversation. A real phone call is checked by Customer verification (spec topic customer-verification), which this tool does not exercise. Each turn returns the reply (bot), tool_calls and entities; ran_as repeats its actor_id.\n\n" +
       TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",

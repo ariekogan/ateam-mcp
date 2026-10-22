@@ -6,9 +6,12 @@
 //     said the voice layer was ALL a test shows ("cannot show a skill result
 //     today"), which is false for a person's key: Core c93563976 (D7, in prod
 //     since prod-20260929-001) runs a voice test forwarded with a person's API
-//     key AS that person, skill job included. Core still refuses the skill call
-//     (C6) for a key with no person (an anonymous run) and for a phone caller
-//     (phone::<number>, an actor Core does not know). Verified from the code,
+//     key AS that person, skill job included. A turn with no person on the key,
+//     or with a phone_number, is refused before it reaches Core. Since the phone
+//     slice (VOICE-4) voice keeps no caller check of its own: a turn carries no
+//     `verification` field, a phone_number only labels the simulated call
+//     (routes/voiceSimulate.js), and a REAL phone call is checked by Customer
+//     verification, which this tool does not exercise. Verified from the code,
 //     not from a live run.
 //
 //   AM28-R4   ateam_bootstrap's minimal_authoring.read_first told an MCP client
@@ -32,17 +35,20 @@ test("ateam_test_voice: no blanket 'no skill result' claim, and no 'full pipelin
   assert.doesNotMatch(d, /VOICE LAYER only|cannot show a skill result/i, `still denies a skill result to every caller, a person's key included: ${d}`);
 });
 
-test("ateam_test_voice: says what a person's key gets, and who is still refused (Core C6)", () => {
+test("ateam_test_voice: says what a person's key gets, and who is refused before Core (phone slice VOICE-4)", () => {
   const d = voice();
   assert.match(d, /A person's key reaches the skill \(skill job included\)/);
-  assert.match(d, /with no person on the key, or a phone caller, Core refuses the skill call today \(C6\)/);
-  assert.match(d, /test it with ateam_conversation/, "does not say where to test the skill when it is refused");
+  assert.match(d, /with no person on the key, or with a phone_number \(it only labels the call: no actor, no credential\), the skill call is refused before it reaches Core/);
+  assert.match(d, /test what a phone caller can do with ateam_conversation/, "does not say where to test the skill when it is refused");
+  assert.match(d, /A real phone call is checked by Customer verification \(spec topic customer-verification\), which this tool does not exercise/);
+  assert.doesNotMatch(d, /returns response, verification, entities/, "still promises a verification field on a voice turn: voice keeps no caller check of its own");
 });
 
 test("ateam_test_voice: the scoped claim is in the first 1200 characters an in-app agent reads", () => {
   const seen = voice().slice(0, 1200);
   assert.match(seen, /A person's key reaches the skill \(skill job included\)/, "an in-app agent is cut off before it reads what a person's key gets");
-  assert.match(seen, /Core refuses the skill call today \(C6\)/, "an in-app agent is cut off before it reads who is refused");
+  assert.match(seen, /the skill call is refused before it reaches Core/, "an in-app agent is cut off before it reads who is refused");
+  assert.match(seen, /which this tool does not exercise/, "an in-app agent is cut off before it reads that a real phone call is not exercised here");
 });
 
 test("ateam_bootstrap: read_first sends an MCP client to ateam_get_spec with search, not to 'GET /spec/…'", async () => {
