@@ -766,6 +766,10 @@ for (const path of ["/mcp", "/"]) {
 // keys go to the validator this process is configured with (ADAS_API_URL, here
 // the fake), whatever environment the key names. Nothing goes anywhere else.
 console.log("integration: a platform session signs env keys in at the local validator, never a hosted host");
+// What an agent is shown must never name the validator the keys were checked
+// at: here 127.0.0.1, on a box a compose name like skill-builder-backend.
+const LOCAL_URL = process.env.ADAS_API_URL;
+const showsNoInternalUrl = (text) => !text.includes(LOCAL_URL) && !text.includes("127.0.0.1");
 {
   const SEALED_PROD = `adas_prod_${"Q".repeat(46)}`;
   const PROD_KEY = "adas_prod_tenantz_77777777777777777777777777777777";
@@ -810,9 +814,30 @@ console.log("integration: a platform session signs env keys in at the local vali
       const r = await call(S, "ateam_auth", { api_key: key });
       const text = JSON.stringify(resultOf(r) || {});
       check(`platform ${label}: refused, and checked at the local validator`, /"ok":false/.test(text) && seen.some((c) => c.key === key));
-      check(`platform ${label}: the reply does not show the internal url`, !text.includes("127.0.0.1"));
+      check(`platform ${label}: the reply does not show the internal url`, showsNoInternalUrl(text));
     } finally { answers.delete(path); }
   }
+
+  // The master key is checked at the same local validator, and refused the same way.
+  answers.set("/deploy/solutions", { status: 401, body: { ok: false, error: "Invalid master key" } });
+  try {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    const text = JSON.stringify(resultOf(await call(S, "ateam_auth", { master_key: "made-up-master-key", tenant: "tenantz" })) || {});
+    check("platform master key refused: the reply does not show the internal url", /"ok":false/.test(text) && showsNoInternalUrl(text));
+  } finally { answers.delete("/deploy/solutions"); }
+
+  // After a good sign-in, a later call the API refuses: its error hints name
+  // the public address too (request() → formatError).
+  answers.set("/auth/whoami", { status: 200, body: { ok: true, tenant: "tenantz", env: "prod" } });
+  try {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    check("platform prod key signs in (control)", succeeded(await call(S, "ateam_auth", { api_key: PROD_KEY })));
+    answers.set("/deploy/solutions", { status: 403, body: { ok: false, error: "Forbidden" } });
+    const r = await call(S, "ateam_list_solutions");
+    const text = JSON.stringify(resultOf(r) || r.text);
+    check("platform call refused by the API: refused (control)", /403|Forbidden/i.test(text));
+    check("platform call refused by the API: the error does not show the internal url", showsNoInternalUrl(text));
+  } finally { answers.delete("/deploy/solutions"); answers.delete("/auth/whoami"); }
 }
 
 // The control: only the PLATFORM session keeps keys local. A bearer session's

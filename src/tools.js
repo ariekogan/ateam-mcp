@@ -6032,9 +6032,12 @@ export const handlers = {
         return { ok: false, message: "Master key requires a tenant parameter. Specify which tenant to operate on." };
       }
       const apiUrl = url ? url.replace(/\/+$/, "") : undefined;
+      // A platform session's master key is checked at this deployment's own
+      // validator (the process default); it is shown by its public address.
+      const shownUrl = platformSession && LOCAL_API_URL ? (hostEnvironments()["self-hosted"] || "this deployment's own API") : null;
       // A refused key leaves the session exactly as it was (api.js beginSignIn).
       const refused = beginSignIn(sessionId);
-      setSessionCredentials(sessionId, { tenant, apiKey: null, apiUrl, explicit: true, masterKey: master_key });
+      setSessionCredentials(sessionId, { tenant, apiKey: null, apiUrl, shownUrl, explicit: true, masterKey: master_key });
       // Verify by listing solutions
       try {
         const result = await get("/deploy/solutions", sessionId);
@@ -6046,7 +6049,7 @@ export const handlers = {
           message: `Master key authenticated to tenant "${tenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found. Use tenant parameter on any tool to switch tenants without re-auth.`,
         };
       } catch (err) {
-        const base = getBaseUrl(sessionId);
+        const base = sessionShownBase(sessionId);
         refused();
         return { ok: false, tenant, message: `Master key auth failed: ${signInRefusal(err, base, sessionId)}` };
       }

@@ -1738,7 +1738,9 @@ async function request(method, path, body, sessionId, opts = {}) {
         // Attach the HTTP status so callers can distinguish a genuine 404
         // (resource absent) from a transient/5xx failure. ateam_patch relies
         // on this to NOT scaffold-clobber an existing skill on a read error.
-        const e = new Error(formatError(method, path, res.status, text, baseUrl, { read: isRead(method, opts.idempotent), signIn: signInContext(sessionId) }));
+        // The display base, not baseUrl: formatError's hints print it, and a
+        // platform session's baseUrl is the compose-internal validator.
+        const e = new Error(formatError(method, path, res.status, text, sessionShownBase(sessionId), { read: isRead(method, opts.idempotent), signIn: signInContext(sessionId) }));
         e.status = res.status;
         // Keep the RAW body on the error. formatError truncates for humans, and
         // an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe's 422
