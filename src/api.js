@@ -284,7 +284,7 @@ export function parseApiKey(key) {
  * dev-api.ateam-ai.com are BOTH the validator, not Core), which relays the
  * tenant Core gave it when it verified the key. Same answer, one hop.
  */
-export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
+export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000, shownAs = null } = {}) {
   if (!apiKey) throw new Error("whoami: no api key");
   if (!baseUrl) throw new Error("whoami: no base url");
   const res = await fetch(`${String(baseUrl).replace(/\/+$/, "")}/auth/whoami`, {
@@ -292,8 +292,11 @@ export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
     signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text().catch(() => "");
+  // `shownAs`: what the reader is told the key was checked at, when the url
+  // asked is an internal one (a platform session's local validator).
+  const at = shownBase(shownAs || baseUrl);
   if (!res.ok) {
-    const e = new Error(`whoami failed at ${shownBase(baseUrl)} (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    const e = new Error(`whoami failed at ${at} (HTTP ${res.status}): ${text.slice(0, 300)}`);
     // The status and the WHOLE body ride on the error, as request()'s do: a
     // refusal by name (personRefused: the key's person is gone) is an answer
     // about the key, and its own hint lies past the 300 characters above.
@@ -302,9 +305,9 @@ export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
     throw e;
   }
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${shownBase(baseUrl)}: ${text.slice(0, 200)}`); }
+  try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${at}: ${text.slice(0, 200)}`); }
   if (!json?.ok || !json?.tenant) {
-    throw new Error(`whoami did not name a tenant at ${shownBase(baseUrl)}: ${text.slice(0, 300)}`);
+    throw new Error(`whoami did not name a tenant at ${at}: ${text.slice(0, 300)}`);
   }
   return { tenant: json.tenant, env: json.env ?? null };
 }

@@ -6018,6 +6018,13 @@ export const handlers = {
     // actor, context — reaches this one. First, before anything below reads the
     // record. See resetPlatformSession.
     const platformSession = resetPlatformSession(sessionId);
+    // A platform session signs in this deployment's own keys, and they go to
+    // this deployment's own validator only (below). A url would send them to
+    // any host the caller names, so it is refused before anything is sent.
+    // ateam-proxy-mcp never passes one, and refuses its callers' ateam_auth.
+    if (platformSession && url) {
+      return { ok: false, message: "Refusing to authenticate: a platform session signs in at this deployment's own API, so it takes no url. Nothing was sent." };
+    }
 
     // Master key mode: cross-tenant auth using shared secret
     if (master_key) {
@@ -6099,7 +6106,7 @@ export const handlers = {
       console.warn("[Auth] Platform sign-in with no ADAS_API_URL: this server does not know its own deployment's validator, so the key goes where its environment points (a self-host box's key then reaches our hosted API and is refused). Set ADAS_API_URL in compose.");
     }
     const apiUrl = explicitUrl || localValidator || baseUrlForKeyEnv(api_key) || undefined;
-    const shownUrl = localValidator ? (hostEnvironments()["self-hosted"] || baseUrlForKeyEnv(api_key) || null) : null;
+    const shownUrl = localValidator ? (hostEnvironments()["self-hosted"] || baseUrlForKeyEnv(api_key) || "this deployment's own API") : null;
 
     // ── WHO IS THIS KEY? ───────────────────────────────────────────────────
     //
@@ -6120,7 +6127,7 @@ export const handlers = {
     if (!resolvedTenant) {
       const base = apiUrl || getBaseUrl(sessionId);
       try {
-        const me = await whoami(api_key, base);
+        const me = await whoami(api_key, base, { shownAs: shownUrl });
         resolvedTenant = me.tenant;
       } catch (err) {
         // The API recognised the key and refused its PERSON (deleted, or no
@@ -6128,14 +6135,15 @@ export const handlers = {
         // the key is — "upgrade it or pass tenant" would send the reader the
         // wrong way. formatError reads the whole body (whoami carries it).
         const person = personRefused(err?.status, err?.body);
+        const shown = shownUrl || base;
         if (person) {
-          return { ok: false, code: person.code, message: `Authentication failed: ${signInRefusal(err, base, sessionId, "/auth/whoami")}` };
+          return { ok: false, code: person.code, message: `Authentication failed: ${signInRefusal(err, shown, sessionId, "/auth/whoami")}` };
         }
         return {
           ok: false,
           message:
             `This key does not name its tenant — the tenant is sealed inside it and only the server can read it — ` +
-            `and ${shownBase(base)} could not tell me who you are: ${err.message} ` +
+            `and ${shownBase(shown)} could not tell me who you are: ${err.message} ` +
             `Nothing was authenticated: acting on a guessed tenant is the one failure this must never have. ` +
             `If that host is an older deployment without /auth/whoami, upgrade it or pass tenant: "<name>" explicitly.`,
         };
@@ -6193,7 +6201,7 @@ export const handlers = {
       // versa). Surface the base we tried and, if it looks like that mismatch,
       // say to retry with that API's base as url — instead of a generic
       // "invalid/unconfigured key". The text names no host but prod's.
-      const base = getBaseUrl(sessionId) || "";
+      const base = shownUrl || getBaseUrl(sessionId) || "";
       // Read the base the key was tried at, THEN put the session back, THEN
       // say why: built before, the refusal described the unverified key as
       // the session's own ("may have been rotated").

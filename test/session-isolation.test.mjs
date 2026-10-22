@@ -448,10 +448,12 @@ check("P1 ateam_auth again → ok", succeeded(await call(P1, "ateam_auth", { api
 // calls. P1/P2 above are two sessions, a setup the proxy never has.
 //
 // ateam_auth used to MERGE into the record it found, so the next tenant got the
-// last one's url, master key, actor and context. Tenant A below leaves every one
-// of them behind: a url of its own choosing, a solution worked on as a named
-// actor, a (made-up) master key. Each "reached A" check is the positive control
-// that makes the "did not reach B" check after it mean something.
+// last one's url, master key, actor and context. Tenant A below leaves what it
+// can behind: a solution worked on as a named actor, a (made-up) master key.
+// A url of its own choosing is refused outright on a platform session (it would
+// send this deployment's key to any host), so nothing reaches that host at all.
+// Each "reached A" check is the positive control that makes the "did not reach
+// B" check after it mean something.
 console.log("ONE platform session, tenants in turn: nothing of one tenant reaches the next");
 const SHARED = (await mcp("POST", { headers: platform(), body: INIT })).sid;
 const bootstrapText = async (s) => JSON.stringify(resultOf(await call(s, "ateam_bootstrap")) || {});
@@ -460,11 +462,18 @@ const reset = () => { seen.length = 0; elsewhere.length = 0; };
 const noActor = (calls) => calls.length > 0 && calls.every((c) => c.actor === null);
 
 reset();
-check("A signs in with a url of its own → ok",
-  succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A, url: ELSEWHERE_URL })));
+{
+  const r = await call(SHARED, "ateam_auth", { api_key: KEY_A, url: ELSEWHERE_URL });
+  const m = await call(SHARED, "ateam_auth", { master_key: "made-up-master-key", tenant: "tenanta", url: ELSEWHERE_URL });
+  const text = (x) => resultOf(x)?.content?.[0]?.text || "";
+  check("A's sign-in with a url of its own is refused, api key and master key alike",
+    !succeeded(r) && /takes no url/.test(text(r)) && !succeeded(m) && /takes no url/.test(text(m)));
+  check("nothing was sent anywhere for the refused url", elsewhere.length === 0 && seen.length === 0);
+}
+check("A signs in (no url) → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A })));
 check("A works on a solution as a named actor → ok",
   succeeded(await call(SHARED, "ateam_get_solution", { solution_id: "tenant-a-secret-solution", view: "definition", actor_id: "actor-of-tenant-a" })));
-check("(control) A's calls went to A's url, with A's actor", elsewhere.some((c) => c.key === KEY_A && c.actor === "actor-of-tenant-a"));
+check("(control) A's calls carried A's key and A's actor", seen.some((c) => c.key === KEY_A && c.actor === "actor-of-tenant-a"));
 check("(control) A's bootstrap shows A's active solution", (await bootstrapText(SHARED)).includes("tenant-a-secret-solution"));
 
 reset();
@@ -474,7 +483,7 @@ check("B signs in (the proxy's own sign-in: B's key, no url) → ok", succeeded(
   check("B lists with B's key alone", b.ok && onlyKey(b.calls, KEY_B, "tenantb"));
   check("B's calls carry no actor of A's", noActor([...b.calls, ...elsewhere]));
 }
-check("B's key never went to the url A chose", elsewhere.length === 0);
+check("nothing went to the url A asked for", elsewhere.length === 0);
 {
   const boot = await bootstrapText(SHARED);
   check("B's bootstrap shows nothing of A's (no active solution, no actor)",
@@ -487,7 +496,7 @@ reset();
 check("A signs in again, no url → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A })));
 {
   const a = await listAs(SHARED);
-  check("A lists with A's key alone, at the default host (A's earlier url is gone too)",
+  check("A lists with A's key alone, at the default host",
     a.ok && onlyKey(a.calls, KEY_A, "tenanta") && elsewhere.length === 0);
   check("A's calls carry no actor of B's", noActor([...a.calls, ...elsewhere]));
   check("A's bootstrap shows nothing of B's", !(await bootstrapText(SHARED)).includes("tenant-b-secret-solution"));
@@ -775,10 +784,35 @@ console.log("integration: a platform session signs env keys in at the local vali
     check(`platform ${label}: later calls go to the local validator with that key`, l.ok && onlyKey(l.calls, key, "tenantz"));
     // What the agent is shown names a public address, never the compose-internal
     // validator url the key was checked at.
-    check(`platform ${label}: base_url does not show the local validator (${body?.base_url})`,
-      typeof body?.base_url === "string" && !body.base_url.includes("127.0.0.1"));
+    check(`platform ${label}: base_url names the key's public API (${body?.base_url})`,
+      body?.base_url === (key === DEV_KEY ? "the dev API" : "https://api.ateam-ai.com"));
   }
+  // On a self-host box (DOMAIN set) the shown address is the box's own API.
+  process.env.DOMAIN = "box.example.com";
+  try {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    const x = resultOf(await call(S, "ateam_auth", { api_key: PROD_KEY }));
+    let body = null; try { body = JSON.parse(x?.content?.[0]?.text || "null"); } catch {}
+    check(`platform key on a self-host box: base_url is the box's own API (${body?.base_url})`, body?.base_url === "https://api.box.example.com");
+  } finally { delete process.env.DOMAIN; }
   answers.delete("/auth/whoami");
+
+  // A refused key: what the agent is told names a public address, never the
+  // compose-internal validator the key was checked at.
+  for (const [label, path, key] of [
+    ["sealed key refused by whoami", "/auth/whoami", SEALED_PROD],
+    ["prod key refused by the API", "/deploy/solutions", PROD_KEY],
+  ]) {
+    answers.set(path, { status: 401, body: { ok: false, error: "Invalid or unconfigured API key" } });
+    try {
+      const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+      seen.length = 0;
+      const r = await call(S, "ateam_auth", { api_key: key });
+      const text = JSON.stringify(resultOf(r) || {});
+      check(`platform ${label}: refused, and checked at the local validator`, /"ok":false/.test(text) && seen.some((c) => c.key === key));
+      check(`platform ${label}: the reply does not show the internal url`, !text.includes("127.0.0.1"));
+    } finally { answers.delete(path); }
+  }
 }
 
 // The control: only the PLATFORM session keeps keys local. A bearer session's
