@@ -747,6 +747,36 @@ for (const path of ["/mcp", "/"]) {
     offenders.length === 0);
 }
 
+// ─── 9. A platform session's keys stay on this deployment ────────────────────
+// A self-host box mints adas_prod_* keys (its URL is not dev-*). ateam-proxy-mcp
+// signs a tenant in with ateam_auth({api_key}) and no url, so ateam_auth routed
+// the key by its environment to https://api.ateam-ai.com, which could not say
+// who the key is: the in-product builder never signed in on a box (2026-10-22,
+// box ops-e2e: "https://api.ateam-ai.com could not tell me who you are"). The
+// platform session is the co-located Core (it holds CORE_MCP_SECRET), so its
+// keys go to the validator this process is configured with (ADAS_API_URL, here
+// the fake), whatever environment the key names. Nothing goes anywhere else.
+console.log("integration: a platform session signs env keys in at the local validator, never a hosted host");
+{
+  const SEALED_PROD = `adas_prod_${"Q".repeat(46)}`;
+  const PROD_KEY = "adas_prod_tenantz_77777777777777777777777777777777";
+  const DEV_KEY = "adas_dev_tenantz_88888888888888888888888888888888";
+  answers.set("/auth/whoami", { status: 200, body: { ok: true, tenant: "tenantz", env: "prod" } });
+  for (const [label, key] of [["sealed prod key", SEALED_PROD], ["prod key", PROD_KEY], ["dev key", DEV_KEY]]) {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    seen.length = 0; elsewhere.length = 0;
+    const r = await call(S, "ateam_auth", { api_key: key });
+    const x = resultOf(r);
+    let body = null; try { body = JSON.parse(x?.content?.[0]?.text || "null"); } catch {}
+    check(`platform ${label}, no url → signed in as tenantz (${body?.message || x?.content?.[0]?.text?.slice(0, 160)})`,
+      succeeded(r) && body?.ok === true && body?.tenant === "tenantz");
+    check(`platform ${label}: its sign-in reached the local validator`, seen.some((c) => c.key === key));
+    const l = await listAs(S);
+    check(`platform ${label}: later calls go to the local validator with that key`, l.ok && onlyKey(l.calls, key, "tenantz"));
+  }
+  answers.delete("/auth/whoami");
+}
+
 // ─── done ────────────────────────────────────────────────────────────────────
 if (failures) { console.error(`\n${failures} check(s) FAILED`); process.exit(1); }
 console.log("\nALL CHECKS PASSED");

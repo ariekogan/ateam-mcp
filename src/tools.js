@@ -6016,7 +6016,7 @@ export const handlers = {
     // signed in AFRESH: nothing the previous tenant left — url, master key,
     // actor, context — reaches this one. First, before anything below reads the
     // record. See resetPlatformSession.
-    resetPlatformSession(sessionId);
+    const platformSession = resetPlatformSession(sessionId);
 
     // Master key mode: cross-tenant auth using shared secret
     if (master_key) {
@@ -6077,7 +6077,20 @@ export const handlers = {
       }
     }
 
-    const apiUrl = explicitUrl || baseUrlForKeyEnv(api_key) || undefined;
+    // ── A PLATFORM SESSION'S KEYS ARE THIS DEPLOYMENT'S OWN ──────────────
+    //
+    // Only the deployment this server runs inside holds CORE_MCP_SECRET, so a
+    // platform session is that deployment's ateam-proxy-mcp, and every key it
+    // signs in with was read from that same deployment's database. Its home is
+    // the validator this process is configured with (ADAS_API_URL, set by
+    // compose on prod, mac1 and every self-host box), never a hosted host the
+    // key's environment names: a self-host box mints adas_prod_* keys (its
+    // URL is not dev-*), and sending them to api.ateam-ai.com answered "could
+    // not tell me who you are", so the in-product builder could not sign in on
+    // any box. On prod and mac1 the local validator is the same system the
+    // hosted name reached. Bearer, OAuth and stdio sessions are unchanged.
+    const localValidator = platformSession ? (process.env.ADAS_API_URL || "").replace(/\/+$/, "") : "";
+    const apiUrl = explicitUrl || localValidator || baseUrlForKeyEnv(api_key) || undefined;
 
     // ── WHO IS THIS KEY? ───────────────────────────────────────────────────
     //
