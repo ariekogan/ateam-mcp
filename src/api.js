@@ -18,6 +18,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { connectSteps, switchSteps, notInThisWorkspace, KEY_PAGE_PATH } from "./signInSteps.js";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
+/**
+ * THIS DEPLOYMENT'S OWN VALIDATOR, or null on a laptop / npx / stdio process
+ * that was given none. Read once, here, like BASE_URL. A platform session
+ * (ateam_auth) signs its keys in here: see ateam_auth in tools.js.
+ */
+export const LOCAL_API_URL = process.env.ADAS_API_URL ? process.env.ADAS_API_URL.replace(/\/+$/, "") : null;
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
 
 // Request timeout (120 seconds — deploys can take 60-90s)
@@ -278,7 +284,7 @@ export function parseApiKey(key) {
  * dev-api.ateam-ai.com are BOTH the validator, not Core), which relays the
  * tenant Core gave it when it verified the key. Same answer, one hop.
  */
-export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
+export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000, shownAs = null } = {}) {
   if (!apiKey) throw new Error("whoami: no api key");
   if (!baseUrl) throw new Error("whoami: no base url");
   const res = await fetch(`${String(baseUrl).replace(/\/+$/, "")}/auth/whoami`, {
@@ -286,8 +292,11 @@ export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
     signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text().catch(() => "");
+  // `shownAs`: what the reader is told the key was checked at, when the url
+  // asked is an internal one (a platform session's local validator).
+  const at = shownBase(shownAs || baseUrl);
   if (!res.ok) {
-    const e = new Error(`whoami failed at ${shownBase(baseUrl)} (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    const e = new Error(`whoami failed at ${at} (HTTP ${res.status}): ${text.slice(0, 300)}`);
     // The status and the WHOLE body ride on the error, as request()'s do: a
     // refusal by name (personRefused: the key's person is gone) is an answer
     // about the key, and its own hint lies past the 300 characters above.
@@ -296,9 +305,9 @@ export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
     throw e;
   }
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${shownBase(baseUrl)}: ${text.slice(0, 200)}`); }
+  try { json = JSON.parse(text); } catch { throw new Error(`whoami returned non-JSON from ${at}: ${text.slice(0, 200)}`); }
   if (!json?.ok || !json?.tenant) {
-    throw new Error(`whoami did not name a tenant at ${shownBase(baseUrl)}: ${text.slice(0, 300)}`);
+    throw new Error(`whoami did not name a tenant at ${at}: ${text.slice(0, 300)}`);
   }
   return { tenant: json.tenant, env: json.env ?? null };
 }
@@ -447,7 +456,7 @@ export function shownBase(base) {
  * @returns {string} "prod" | "dev" | the base URL itself
  */
 export function servedBy(sessionId) {
-  const base = getBaseUrl(sessionId);
+  const base = sessionShownBase(sessionId);
   return envForBaseUrl(base) || base;
 }
 
@@ -457,7 +466,7 @@ export function servedBy(sessionId) {
  * Set explicit=true when called from ateam_auth (not from seedCredentials).
  * Set masterKey for cross-tenant master mode (uses shared secret auth).
  */
-export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, explicit = false, masterKey = null }) {
+export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, shownUrl = null, explicit = false, masterKey = null }) {
   let resolvedTenant = tenant;
   if (!resolvedTenant && apiKey) {
     const parsed = parseApiKey(apiKey);
@@ -504,6 +513,11 @@ export function setSessionCredentials(sessionId, { tenant, apiKey, apiUrl, expli
     tenant: resolvedTenant || null,
     apiKey,
     apiUrl: apiUrl || existing?.apiUrl || null,
+    // The base this session is SHOWN as being on, when it is not the base its
+    // requests go to: a platform session's requests go to the deployment's
+    // internal validator, and that compose name never reaches a served text
+    // (getWhere). Display only; routing is apiUrl (getBaseUrl).
+    shownUrl: shownUrl || (apiUrl ? null : existing?.shownUrl) || null,
     authExplicit: explicit || existing?.authExplicit || false,
     masterKey: masterKey || existing?.masterKey || null,
     lastActivity: Date.now(),
@@ -1019,6 +1033,16 @@ export function getBaseUrl(sessionId) {
 }
 
 /**
+ * THE BASE THIS SESSION IS SHOWN AS BEING ON: the one its sign-in recorded for
+ * display (a platform session: the environment its key names, or this
+ * self-hosted box's own API), else the base its requests go to (getBaseUrl).
+ * Every served text and field that names the session's API reads this.
+ */
+export function sessionShownBase(sessionId) {
+  return sessionRecord(sessionId)?.shownUrl || getBaseUrl(sessionId);
+}
+
+/**
  * Map an API base URL → the user-facing app URL where a deployed change is
  * visible. ateam-mcp is a PUBLIC MCP: a given user talks to exactly ONE
  * platform (their tenant is on one live deployment), so the useful thing to
@@ -1076,7 +1100,7 @@ export function getWhere(sessionId) {
   // tenant, which is the part that is solution-scoped and that the agent
   // genuinely needs. (Arie, 2026-08-21, reading a raw error panel.)
   // A non-production A-Team environment's app is not named (shownAppUrl).
-  const appUrl = shownAppUrl(getBaseUrl(sessionId));
+  const appUrl = shownAppUrl(sessionShownBase(sessionId));
   if (!appUrl) return tenant ? { tenant } : {};
   return {
     tenant,
@@ -1663,9 +1687,11 @@ async function request(method, path, body, sessionId, opts = {}) {
     await new Promise(r => setTimeout(r, wait));
   };
   const baseUrl = getBaseUrl(sessionId);
-  // What the messages below may show of it (shownBase): no non-production host.
-  const shown = shownBase(baseUrl);
-  const health = shown === baseUrl ? `${baseUrl}/health` : `/health on ${shown}`;
+  // What the messages below may show of it (shownBase): no non-production host,
+  // and never a platform session's internal validator (sessionShownBase).
+  const shownUrl = sessionShownBase(sessionId);
+  const shown = shownBase(shownUrl);
+  const health = shown === shownUrl ? `${shownUrl}/health` : `/health on ${shown}`;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
@@ -1712,7 +1738,9 @@ async function request(method, path, body, sessionId, opts = {}) {
         // Attach the HTTP status so callers can distinguish a genuine 404
         // (resource absent) from a transient/5xx failure. ateam_patch relies
         // on this to NOT scaffold-clobber an existing skill on a read error.
-        const e = new Error(formatError(method, path, res.status, text, baseUrl, { read: isRead(method, opts.idempotent), signIn: signInContext(sessionId) }));
+        // The display base, not baseUrl: formatError's hints print it, and a
+        // platform session's baseUrl is the compose-internal validator.
+        const e = new Error(formatError(method, path, res.status, text, sessionShownBase(sessionId), { read: isRead(method, opts.idempotent), signIn: signInContext(sessionId) }));
         e.status = res.status;
         // Keep the RAW body on the error. formatError truncates for humans, and
         // an endpoint that answers 4xx WITH the diagnosis (ui.surfaceProbe's 422

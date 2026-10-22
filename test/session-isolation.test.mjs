@@ -448,10 +448,12 @@ check("P1 ateam_auth again → ok", succeeded(await call(P1, "ateam_auth", { api
 // calls. P1/P2 above are two sessions, a setup the proxy never has.
 //
 // ateam_auth used to MERGE into the record it found, so the next tenant got the
-// last one's url, master key, actor and context. Tenant A below leaves every one
-// of them behind: a url of its own choosing, a solution worked on as a named
-// actor, a (made-up) master key. Each "reached A" check is the positive control
-// that makes the "did not reach B" check after it mean something.
+// last one's url, master key, actor and context. Tenant A below leaves what it
+// can behind: a solution worked on as a named actor, a (made-up) master key.
+// A url of its own choosing is refused outright on a platform session (it would
+// send this deployment's key to any host), so nothing reaches that host at all.
+// Each "reached A" check is the positive control that makes the "did not reach
+// B" check after it mean something.
 console.log("ONE platform session, tenants in turn: nothing of one tenant reaches the next");
 const SHARED = (await mcp("POST", { headers: platform(), body: INIT })).sid;
 const bootstrapText = async (s) => JSON.stringify(resultOf(await call(s, "ateam_bootstrap")) || {});
@@ -460,11 +462,18 @@ const reset = () => { seen.length = 0; elsewhere.length = 0; };
 const noActor = (calls) => calls.length > 0 && calls.every((c) => c.actor === null);
 
 reset();
-check("A signs in with a url of its own → ok",
-  succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A, url: ELSEWHERE_URL })));
+{
+  const r = await call(SHARED, "ateam_auth", { api_key: KEY_A, url: ELSEWHERE_URL });
+  const m = await call(SHARED, "ateam_auth", { master_key: "made-up-master-key", tenant: "tenanta", url: ELSEWHERE_URL });
+  const text = (x) => resultOf(x)?.content?.[0]?.text || "";
+  check("A's sign-in with a url of its own is refused, api key and master key alike",
+    !succeeded(r) && /takes no url/.test(text(r)) && !succeeded(m) && /takes no url/.test(text(m)));
+  check("nothing was sent anywhere for the refused url", elsewhere.length === 0 && seen.length === 0);
+}
+check("A signs in (no url) → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A })));
 check("A works on a solution as a named actor → ok",
   succeeded(await call(SHARED, "ateam_get_solution", { solution_id: "tenant-a-secret-solution", view: "definition", actor_id: "actor-of-tenant-a" })));
-check("(control) A's calls went to A's url, with A's actor", elsewhere.some((c) => c.key === KEY_A && c.actor === "actor-of-tenant-a"));
+check("(control) A's calls carried A's key and A's actor", seen.some((c) => c.key === KEY_A && c.actor === "actor-of-tenant-a"));
 check("(control) A's bootstrap shows A's active solution", (await bootstrapText(SHARED)).includes("tenant-a-secret-solution"));
 
 reset();
@@ -474,7 +483,7 @@ check("B signs in (the proxy's own sign-in: B's key, no url) → ok", succeeded(
   check("B lists with B's key alone", b.ok && onlyKey(b.calls, KEY_B, "tenantb"));
   check("B's calls carry no actor of A's", noActor([...b.calls, ...elsewhere]));
 }
-check("B's key never went to the url A chose", elsewhere.length === 0);
+check("nothing went to the url A asked for", elsewhere.length === 0);
 {
   const boot = await bootstrapText(SHARED);
   check("B's bootstrap shows nothing of A's (no active solution, no actor)",
@@ -487,7 +496,7 @@ reset();
 check("A signs in again, no url → ok", succeeded(await call(SHARED, "ateam_auth", { api_key: KEY_A })));
 {
   const a = await listAs(SHARED);
-  check("A lists with A's key alone, at the default host (A's earlier url is gone too)",
+  check("A lists with A's key alone, at the default host",
     a.ok && onlyKey(a.calls, KEY_A, "tenanta") && elsewhere.length === 0);
   check("A's calls carry no actor of B's", noActor([...a.calls, ...elsewhere]));
   check("A's bootstrap shows nothing of B's", !(await bootstrapText(SHARED)).includes("tenant-b-secret-solution"));
@@ -745,6 +754,121 @@ for (const path of ["/mcp", "/"]) {
   const offenders = packed.filter((f) => TOKEN_CACHE.test(code(f)));
   check(`no packaged file keeps a token cache or injects a token (found in: ${offenders.join(", ") || "none"})`,
     offenders.length === 0);
+}
+
+// ─── 9. A platform session's keys stay on this deployment ────────────────────
+// A self-host box mints adas_prod_* keys (its URL is not dev-*). ateam-proxy-mcp
+// signs a tenant in with ateam_auth({api_key}) and no url, so ateam_auth routed
+// the key by its environment to https://api.ateam-ai.com, which could not say
+// who the key is: the in-product builder never signed in on a box (2026-10-22,
+// box ops-e2e: "https://api.ateam-ai.com could not tell me who you are"). The
+// platform session is the co-located Core (it holds CORE_MCP_SECRET), so its
+// keys go to the validator this process is configured with (ADAS_API_URL, here
+// the fake), whatever environment the key names. Nothing goes anywhere else.
+console.log("integration: a platform session signs env keys in at the local validator, never a hosted host");
+// What an agent is shown must never name the validator the keys were checked
+// at: here 127.0.0.1, on a box a compose name like skill-builder-backend.
+const LOCAL_URL = process.env.ADAS_API_URL;
+const showsNoInternalUrl = (text) => !text.includes(LOCAL_URL) && !text.includes("127.0.0.1");
+{
+  const SEALED_PROD = `adas_prod_${"Q".repeat(46)}`;
+  const PROD_KEY = "adas_prod_tenantz_77777777777777777777777777777777";
+  const DEV_KEY = "adas_dev_tenantz_88888888888888888888888888888888";
+  answers.set("/auth/whoami", { status: 200, body: { ok: true, tenant: "tenantz", env: "prod" } });
+  for (const [label, key] of [["sealed prod key", SEALED_PROD], ["prod key", PROD_KEY], ["dev key", DEV_KEY]]) {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    seen.length = 0; elsewhere.length = 0;
+    const r = await call(S, "ateam_auth", { api_key: key });
+    const x = resultOf(r);
+    let body = null; try { body = JSON.parse(x?.content?.[0]?.text || "null"); } catch {}
+    check(`platform ${label}, no url → signed in as tenantz (${body?.message || x?.content?.[0]?.text?.slice(0, 160)})`,
+      succeeded(r) && body?.ok === true && body?.tenant === "tenantz");
+    check(`platform ${label}: its sign-in reached the local validator`, seen.some((c) => c.key === key));
+    const l = await listAs(S);
+    check(`platform ${label}: later calls go to the local validator with that key`, l.ok && onlyKey(l.calls, key, "tenantz"));
+    // What the agent is shown names a public address, never the compose-internal
+    // validator url the key was checked at.
+    check(`platform ${label}: base_url names the key's public API (${body?.base_url})`,
+      body?.base_url === (key === DEV_KEY ? "the dev API" : "https://api.ateam-ai.com"));
+  }
+  // On a self-host box (DOMAIN set) the shown address is the box's own API.
+  process.env.DOMAIN = "box.example.com";
+  try {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    const x = resultOf(await call(S, "ateam_auth", { api_key: PROD_KEY }));
+    let body = null; try { body = JSON.parse(x?.content?.[0]?.text || "null"); } catch {}
+    check(`platform key on a self-host box: base_url is the box's own API (${body?.base_url})`, body?.base_url === "https://api.box.example.com");
+  } finally { delete process.env.DOMAIN; }
+  answers.delete("/auth/whoami");
+
+  // A refused key: what the agent is told names a public address, never the
+  // compose-internal validator the key was checked at.
+  for (const [label, path, key] of [
+    ["sealed key refused by whoami", "/auth/whoami", SEALED_PROD],
+    ["prod key refused by the API", "/deploy/solutions", PROD_KEY],
+  ]) {
+    answers.set(path, { status: 401, body: { ok: false, error: "Invalid or unconfigured API key" } });
+    try {
+      const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+      seen.length = 0;
+      const r = await call(S, "ateam_auth", { api_key: key });
+      const text = JSON.stringify(resultOf(r) || {});
+      check(`platform ${label}: refused, and checked at the local validator`, /"ok":false/.test(text) && seen.some((c) => c.key === key));
+      check(`platform ${label}: the reply does not show the internal url`, showsNoInternalUrl(text));
+    } finally { answers.delete(path); }
+  }
+
+  // The master key is checked at the same local validator, and refused the same way.
+  answers.set("/deploy/solutions", { status: 401, body: { ok: false, error: "Invalid master key" } });
+  try {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    const text = JSON.stringify(resultOf(await call(S, "ateam_auth", { master_key: "made-up-master-key", tenant: "tenantz" })) || {});
+    check("platform master key refused: the reply does not show the internal url", /"ok":false/.test(text) && showsNoInternalUrl(text));
+  } finally { answers.delete("/deploy/solutions"); }
+
+  // After a good sign-in, a later call the API refuses: its error hints name
+  // the public address too (request() → formatError).
+  answers.set("/auth/whoami", { status: 200, body: { ok: true, tenant: "tenantz", env: "prod" } });
+  try {
+    const S = (await mcp("POST", { headers: platform(), body: INIT })).sid;
+    check("platform prod key signs in (control)", succeeded(await call(S, "ateam_auth", { api_key: PROD_KEY })));
+    answers.set("/deploy/solutions", { status: 403, body: { ok: false, error: "Forbidden" } });
+    const r = await call(S, "ateam_list_solutions");
+    const text = JSON.stringify(resultOf(r) || r.text);
+    check("platform call refused by the API: refused (control)", /403|Forbidden/i.test(text));
+    check("platform call refused by the API: the error does not show the internal url", showsNoInternalUrl(text));
+  } finally { answers.delete("/deploy/solutions"); answers.delete("/auth/whoami"); }
+}
+
+// The control: only the PLATFORM session keeps keys local. A bearer session's
+// ateam_auth with an env key and no url still routes by the key's environment.
+// fetch is wrapped so the routed call is recorded and answered here: nothing
+// leaves 127.0.0.1.
+console.log("integration: a bearer session still routes an env key by its environment");
+{
+  const DEV_KEY = "adas_dev_tenantz_99999999999999999999999999999999";
+  const BEARER_CTRL = `adas_tenantc_${randomBytes(16).toString("hex")}`;
+  const realFetch = globalThis.fetch;
+  const outbound = [];
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.startsWith("http://127.0.0.1")) return realFetch(url, opts);
+    outbound.push(u);
+    return new Response(JSON.stringify({ ok: true, tenant: "tenantz", env: "dev" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const S = (await mcp("POST", { headers: bearer(BEARER_CTRL), body: INIT })).sid;
+    seen.length = 0;
+    const r = await mcp("POST", {
+      headers: { ...sid(S), ...bearer(BEARER_CTRL) },
+      body: { jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "ateam_auth", arguments: { api_key: DEV_KEY } } },
+    });
+    check("bearer session: the env key never reached the local validator", !seen.some((c) => c.key === DEV_KEY));
+    check(`bearer session: the sign-in went to the dev API (${outbound.join(", ") || "none"})`,
+      outbound.some((u) => u.startsWith("https://dev-api.ateam-ai.com/")) && r.status === 200);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 // ─── done ────────────────────────────────────────────────────────────────────
