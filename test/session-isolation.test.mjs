@@ -773,8 +773,43 @@ console.log("integration: a platform session signs env keys in at the local vali
     check(`platform ${label}: its sign-in reached the local validator`, seen.some((c) => c.key === key));
     const l = await listAs(S);
     check(`platform ${label}: later calls go to the local validator with that key`, l.ok && onlyKey(l.calls, key, "tenantz"));
+    // What the agent is shown names a public address, never the compose-internal
+    // validator url the key was checked at.
+    check(`platform ${label}: base_url does not show the local validator (${body?.base_url})`,
+      typeof body?.base_url === "string" && !body.base_url.includes("127.0.0.1"));
   }
   answers.delete("/auth/whoami");
+}
+
+// The control: only the PLATFORM session keeps keys local. A bearer session's
+// ateam_auth with an env key and no url still routes by the key's environment.
+// fetch is wrapped so the routed call is recorded and answered here: nothing
+// leaves 127.0.0.1.
+console.log("integration: a bearer session still routes an env key by its environment");
+{
+  const DEV_KEY = "adas_dev_tenantz_99999999999999999999999999999999";
+  const BEARER_CTRL = `adas_tenantc_${randomBytes(16).toString("hex")}`;
+  const realFetch = globalThis.fetch;
+  const outbound = [];
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.startsWith("http://127.0.0.1")) return realFetch(url, opts);
+    outbound.push(u);
+    return new Response(JSON.stringify({ ok: true, tenant: "tenantz", env: "dev" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const S = (await mcp("POST", { headers: bearer(BEARER_CTRL), body: INIT })).sid;
+    seen.length = 0;
+    const r = await mcp("POST", {
+      headers: { ...sid(S), ...bearer(BEARER_CTRL) },
+      body: { jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "ateam_auth", arguments: { api_key: DEV_KEY } } },
+    });
+    check("bearer session: the env key never reached the local validator", !seen.some((c) => c.key === DEV_KEY));
+    check(`bearer session: the sign-in went to the dev API (${outbound.join(", ") || "none"})`,
+      outbound.some((u) => u.startsWith("https://dev-api.ateam-ai.com/")) && r.status === 200);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 // ─── done ────────────────────────────────────────────────────────────────────
