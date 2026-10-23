@@ -112,7 +112,7 @@ Developers find ateam-mcp through:
 | `ateam_workspace_save` | Make the workspace's work live (the only way the other tools see it) |
 | `ateam_workspace_close` | Finish; optionally save first. Brings back the single-file write tools withheld while it was open |
 
-The `ateam_workspace_*` tools are listed only when the platform says workspaces are available for the signed-in workspace (they are switched off by default); otherwise they are absent.
+The `ateam_workspace_*` tools are listed whenever you are signed in. A workspace the platform cannot give (a trial workspace, a key tied to no person) is refused by the call itself, with the single-file tools to use instead.
 
 Changes to a solution can also live as cards on the Dev Studio board in the A-Team app. ateam-mcp has no card tools: an owner or admin starts a card and the owner approves it on the board, and a solution card is run by the in-app Builder, which builds on `dev` and never ships to production. `ateam_bootstrap` (`branching.changes_as_cards`) says what an agent needs to know.
 

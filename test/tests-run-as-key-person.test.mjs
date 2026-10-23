@@ -87,6 +87,10 @@ test("ateam_test_voice: no full-pipeline claim; ran_as; points", () => {
   const d = tool("ateam_test_voice").description;
   assertPoints("ateam_test_voice description", d);
   assert.match(d, /ran_as repeats its actor_id/, "ateam_test_voice does not say where ran_as comes from");
+  // Voice keeps no caller check of its own (phone slice VOICE-4): no turn field called verification, and a real call is Customer verification's
+  assert.doesNotMatch(d, /response, verification, entities/, "ateam_test_voice still promises a verification field per turn");
+  assert.match(d, /real phone call is checked by Customer verification \(spec topic customer-verification\)/);
+  assert.match(d, /phone_number \(it only labels the call: no actor, no credential\)/);
 });
 
 test("ateam_test_notification and ateam_get_execution_logs: no synthetic actor, the job is ran_as's", () => {

@@ -149,7 +149,7 @@ import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId } from "./api.js";
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
-  withheldSentence, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, BACKGROUND_DEFAULT_MS, waitCommand, foregroundFromWait,
+  QUICK_WAIT_SECONDS, withheldCall, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, BACKGROUND_DEFAULT_MS, waitCommand, foregroundFromWait,
 } from "./workspaceTools.js";
 
 // A step that waits for a person: the Builder's human_step_testing words, verbatim.
@@ -368,6 +368,17 @@ export const MCP_VERSION = (() => {
 // Builder under the edge's limit. The caller's hop to a hosted ateam-mcp has
 // the same limit, and polling here does nothing for it: see "The hosted call's
 // budget" below.
+/** The Builder has no such job, or none could be reached: a final answer, never "still running". */
+function jobNotFound(jobId, label) {
+  return {
+    ok: false,
+    code: "JOB_NOT_FOUND",
+    job_id: jobId,
+    error: `The ${label} job "${jobId}" could not be found on the Builder (it is kept about 30 minutes after it ends, and is lost when the Builder restarts), or the Builder could not be reached.`,
+    hint: "Check what is deployed before you deploy again: ateam_get_solution(solution_id, view: \"status\"). Only deploy again if it is not there.",
+  };
+}
+
 async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000, intervalMs = 2000 } = {}) {
   const start = Date.now();
   let lastStatus = null;
@@ -375,22 +386,30 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
   // caught as a "transient" poll error and retried for the whole budget, then
   // reported as "polling timed out". Refused now, at once, with nothing sent.
   const jobPath = apiPath`/deploy/jobs/${jobId}`;
+  let seen = false; // a poll was answered: the Builder knows this job
   while (Date.now() - start < maxMs) {
     await new Promise(r => setTimeout(r, intervalMs));
     try {
       const job = await get(jobPath, sid);
+      seen = true;
       lastStatus = job?.status;
       if (job?.status === 'done' || job?.status === 'failed') {
         return job; // job entry has the full result merged in
       }
     } catch (err) {
+      // A 404 is the Builder saying it has no such job (kept 30 minutes after it ends, gone after a restart, or never existed):
+      // waiting longer cannot change that, and "still running" would be a lie.
+      if (err?.status === 404) return jobNotFound(jobId, label);
       // Transient — keep polling. Log at debug level if requested.
       if (process.env.MCP_DEBUG_POLLS) console.warn(`[pollDeployJob:${label}] poll error (will retry): ${err.message}`);
     }
   }
+  // Not one poll was answered: the job cannot be shown to exist (the Builder was unreachable, or the id is wrong).
+  if (!seen) return jobNotFound(jobId, label);
   return {
     ok: false,
-    error: `${label} polling timed out after ${Math.round(maxMs / 60_000)}min`,
+    timed_out: true,
+    error: `${label} polling timed out after ${maxMs >= 60_000 ? `${Math.round(maxMs / 60_000)}min` : `${Math.round(maxMs / 1000)}s`}`,
     last_status: lastStatus,
     job_id: jobId,
     hint: 'The job may still be running on the server. Call get(`/deploy/jobs/<job_id>`) directly to check.',
@@ -425,7 +444,10 @@ async function pollDeployJob(jobId, sid, { label = 'deploy', maxMs = 15 * 60_000
 //
 // Runs live in this process's memory. A restart forgets them (the deploy is the
 // Builder's and goes on regardless), and resume then says there is no run.
-export const HOSTED_CALL_BUDGET_MS = 75_000;
+//
+// 45 s, not the 75 s it was: the chat client gives up on a tool call near 60 s (seen live, 2026-10-13: a deploy answered
+// "timed out after 60s" while it was still within its budget), and the edge near 100 s.
+export const HOSTED_CALL_BUDGET_MS = 45_000;
 
 // How long a finished run can still be resumed: as long as the Builder keeps a
 // finished deploy job (startAsyncDeployJob evicts after 30 minutes).
@@ -559,6 +581,33 @@ async function buildRunWithinBudget(args, sid) {
     ? inFlight
     : startBuildRun(owner, solutionId, deployArgs, argsKey, sid);
   return answerWithinBudget(run, callStartMs);
+}
+
+/** A connector upload not finished within the hosted call's budget: no verdict yet, and how to ask again. The job goes on. */
+function uploadStillRunning(solutionId, connectorId, jobId) {
+  return {
+    ok: null,
+    status: "running",
+    solution_id: solutionId,
+    connector_id: connectorId,
+    job_id: jobId,
+    message: `The upload of connector "${connectorId}" is still running. This call answers now because the chat connection gives up after about 60 seconds. It was not stopped, and nothing of it is sent again.`,
+    _next: `ateam_upload_connector({ solution_id: "${solutionId}", connector_id: "${connectorId}", job_id: "${jobId}", resume: true }) waits for THIS upload again (up to ${HOSTED_CALL_BUDGET_MS / 1000}s) and answers with its result; it uploads nothing new. Do not tell the user it is deployed until it says so.`,
+  };
+}
+
+/** A redeploy not finished within the hosted call's budget: no verdict yet, and how to ask again. The job goes on. */
+function redeployStillRunning(solutionId, skillId, jobId) {
+  const again = `ateam_redeploy({ solution_id: "${solutionId}", ${skillId ? `skill_id: "${skillId}", ` : ""}job_id: "${jobId}", resume: true })`;
+  return {
+    ok: null,
+    status: "running",
+    solution_id: solutionId,
+    ...(skillId && { skill_id: skillId }),
+    job_id: jobId,
+    message: `The redeploy of "${solutionId}" is still running. This call answers now because the chat connection gives up after about 60 seconds. The redeploy was not stopped, and nothing of it is sent again.`,
+    _next: `${again} waits for THIS redeploy again (up to ${HOSTED_CALL_BUDGET_MS / 1000}s) and answers with its result; it deploys nothing new. Do not tell the user it is deployed until it says so.`,
+  };
 }
 
 // ─── The redeploy verdict ───────────────────────────────────────────
@@ -1941,7 +1990,11 @@ export const tools = [
       // the skill call for a key with no person (an anonymous run) and for a
       // phone caller (phone::<number>, an actor Core does not know) — C6. Who
       // the test runs as is the Builder's to say: the pointer.
-      "Simulate a voice call with text, not audio. A person's key reaches the skill (skill job included); with no person on the key, or a phone caller, Core refuses the skill call today (C6): test it with ateam_conversation. Each turn returns response, verification, entities; ran_as repeats its actor_id.\n\n" +
+      // Phone slice VOICE-4 (Core batch): voice keeps no caller check of its own, so a turn carries no
+      // `verification` field; a phone_number only labels the simulated call (no actor, no credential, its skill
+      // jobs are refused before they reach Core, routes/voiceSimulate.js); a REAL phone call is named to Core by
+      // Core itself (cp.verification_api callStart) and checked by Customer verification.
+      "Simulate a voice call with text, not audio. A person's key reaches the skill (skill job included); with no person on the key, or with a phone_number (it only labels the call: no actor, no credential), the skill call is refused before it reaches Core: test what a phone caller can do with ateam_conversation. A real phone call is checked by Customer verification (spec topic customer-verification), which this tool does not exercise. Each turn returns the reply (bot), tool_calls and entities; ran_as repeats its actor_id.\n\n" +
       TEST_RUNS_AS_AT,
     inputSchema: {
       type: "object",
@@ -2471,6 +2524,14 @@ export const tools = [
         replace: {
           type: "boolean",
           description: "FULL REPLACE: the connector becomes exactly `files`. Every other file is deleted from Core, from the Builder's source and, when GitHub is connected, from the repo's working branch (dev) — every file under connectors/<connector-id>/ you leave out, deployed or not, files written with ateam_github_patch included (some files are kept — repo.kept names each with its reason). The reply names each: dropped (Core), authored.removed (the Builder's source), repo.deleted (the branch), repo.branch_only (the branch files that were never deployed), repo.kept (kept, with the reason). Main is never touched (a promote carries it). With github:true the repo is left as it is. Default: false (= merge). An incomplete file set with replace:true deletes the rest of the connector.",
+        },
+        resume: {
+          type: "boolean",
+          description: "true with job_id: wait again for an upload that answered status:\"running\" and answer with its result. Uploads nothing new.",
+        },
+        job_id: {
+          type: "string",
+          description: "With resume:true: the job_id a status:\"running\" answer gave.",
         },
         force: {
           type: "boolean",
@@ -3728,7 +3789,7 @@ export const tools = [
     name: "ateam_redeploy",
     core: true,
     description:
-      "Re-deploy skills WITHOUT changing any definitions. ⚠️ HEAVY OPERATION: regenerates MCP servers (Python code) for every skill, pushes each to A-Team Core, restarts connectors, and verifies tool discovery. Takes 30-120s depending on skill count. Use after connector restarts, Core hiccups, or stale state. For incremental changes, prefer ateam_patch (which updates + redeploys in one step).",
+      "Re-deploy skills WITHOUT changing any definitions. ⚠️ HEAVY OPERATION: regenerates MCP servers (Python code) for every skill, pushes each to A-Team Core, restarts connectors, and verifies tool discovery. Takes 30-120s depending on skill count; over a hosted connection the call answers within " + HOSTED_CALL_BUDGET_MS / 1000 + "s, and a redeploy not done by then answers status:'running' with a job_id (ateam_redeploy({solution_id, job_id, resume:true}) waits for it again). Use after connector restarts, Core hiccups, or stale state. For incremental changes, prefer ateam_patch (which updates + redeploys in one step).",
     inputSchema: {
       type: "object",
       properties: {
@@ -3739,6 +3800,14 @@ export const tools = [
         skill_id: {
           type: "string",
           description: "Optional: redeploy a single skill only. Omit to redeploy ALL skills in the solution.",
+        },
+        resume: {
+          type: "boolean",
+          description: "true with job_id: wait again for a redeploy that answered status:\"running\" and answer with its result. Deploys nothing new.",
+        },
+        job_id: {
+          type: "string",
+          description: "With resume:true: the job_id a status:\"running\" answer gave.",
         },
       },
       required: ["solution_id"],
@@ -8247,10 +8316,12 @@ export const handlers = {
     return done ? shapeWorkspaceResult("exec", done, { keepWorkspace: true }) : started;
   },
   ateam_workspace_status: ({ workspace_id }, sid) => workspaceCall("status", { workspace_id }, sid, { timeoutMs: 140_000 }),
+  // A save deploys and takes 70-80 s; the chat client gives up near 60 s. Core is asked to answer "still saving" after the same
+  // QUICK_WAIT_SECONDS an exec waits; the save goes on, and ateam_workspace_status says how it ended.
   ateam_workspace_save: ({ workspace_id, message }, sid) =>
-    workspaceCall("save", { workspace_id, message }, sid, { timeoutMs: 140_000 }),
+    workspaceCall("save", { workspace_id, message, wait_ms: QUICK_WAIT_SECONDS * 1000 }, sid, { timeoutMs: 140_000 }),
   ateam_workspace_close: ({ workspace_id, save }, sid) =>
-    workspaceCall("close", { workspace_id, save: save === true ? true : undefined }, sid, { timeoutMs: 140_000 }),
+    workspaceCall("close", { workspace_id, save: save === true ? true : undefined, ...(save === true && { wait_ms: QUICK_WAIT_SECONDS * 1000 }) }, sid, { timeoutMs: 140_000 }),
 
   ateam_github_write: async ({ solution_id, path: filePath, content, message, ref }, sid) => {
     const before = await _existingContentOrNull(solution_id, filePath, ref, sid);
@@ -8392,7 +8463,18 @@ export const handlers = {
     return del(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}`, sid);
   },
 
-  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace, force }, sid) => {
+  ateam_upload_connector: async ({ solution_id, connector_id, github, files, ref, replace, force, resume, job_id }, sid) => {
+    // Over a hosted connection the call answers within HOSTED_CALL_BUDGET_MS (the chat client gives up near 60 s); an upload not done by
+    // then keeps running on the Builder and answers status:"running" with its job_id; resume:true + job_id waits for it again.
+    const hosted = callTransport() !== "stdio";
+    const waitMs = hosted ? HOSTED_CALL_BUDGET_MS : 15 * 60_000;
+    if (resume === true || resume === "true") {
+      if (typeof job_id !== "string" || !job_id) {
+        return { ok: false, code: "NO_JOB_TO_RESUME", error: "resume:true needs the job_id a status:\"running\" answer gave.", _next: "Call ateam_upload_connector({ solution_id, connector_id, job_id, resume: true }) with that job_id; this call uploaded nothing." };
+      }
+      const again = await pollDeployJob(job_id, sid, { label: 'connector-upload', maxMs: waitMs, intervalMs: 2000 });
+      return again?.timed_out && hosted ? uploadStillRunning(solution_id, connector_id, job_id) : again;
+    }
     // OPEN-32: accept content_base64 per file (single-line, escape-safe) and
     // decode it to plain content here, so an agent can upload a multi-file
     // connector without hand-escaping ~90KB of HTML/JS/JSON in one tool call —
@@ -8440,7 +8522,8 @@ export const handlers = {
       return await post(url, body, sid, { timeoutMs: 300_000 });
     }
     if (!kicked?.async || !kicked.job_id) return kicked; // backend didn't honor async
-    return await pollDeployJob(kicked.job_id, sid, { label: 'connector-upload', maxMs: 15 * 60_000, intervalMs: 2000 });
+    const polled = await pollDeployJob(kicked.job_id, sid, { label: 'connector-upload', maxMs: waitMs, intervalMs: 2000 });
+    return polled?.timed_out && hosted ? uploadStillRunning(solution_id, connector_id, kicked.job_id) : polled;
   },
 
   // ── Phase 9 strip: focused minimal responses ────────────────────────
@@ -8711,7 +8794,11 @@ export const handlers = {
     };
   },
 
-  ateam_redeploy: async ({ solution_id, skill_id }, sid) => {
+  ateam_redeploy: async ({ solution_id, skill_id, resume, job_id }, sid) => {
+    // Over a hosted connection the call answers within HOSTED_CALL_BUDGET_MS (the chat client gives up near 60 s): a redeploy that is
+    // not done by then keeps running on the Builder and answers status:"running" with its job_id; resume:true + job_id waits for it again.
+    const hosted = callTransport() !== "stdio";
+    const waitMs = hosted ? HOSTED_CALL_BUDGET_MS : 15 * 60_000;
     const endpoint = skill_id
       ? apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/redeploy`
       : apiPath`/deploy/solutions/${solution_id}/redeploy`;
@@ -8723,14 +8810,19 @@ export const handlers = {
     // useful error/hint to the agent.
     let result;
     let lastErr = null;
-    try {
+    const label = skill_id ? `redeploy-skill ${skill_id}` : 'redeploy-bulk';
+    if (resume === true || resume === "true") {
+      if (typeof job_id !== "string" || !job_id) {
+        return { ok: false, code: "NO_JOB_TO_RESUME", error: "resume:true needs the job_id a status:\"running\" answer gave.", _next: "Call ateam_redeploy({ solution_id, job_id, resume: true }) with that job_id; this call deployed nothing." };
+      }
+      result = await pollDeployJob(job_id, sid, { label, maxMs: waitMs, intervalMs: 2000 });
+      if (result?.code === "JOB_NOT_FOUND") return { ok: false, solution_id, ...(skill_id && { skill_id }), code: result.code, job_id, error: result.error, hint: result.hint, message: `Re-deploy status unknown: ${result.error}` };
+      if (result?.timed_out && hosted) return redeployStillRunning(solution_id, skill_id, job_id);
+    } else try {
       const kicked = await post(endpoint, { async: true }, sid, { timeoutMs: 30_000 });
       if (kicked?.async && kicked.job_id) {
-        result = await pollDeployJob(kicked.job_id, sid, {
-          label: skill_id ? `redeploy-skill ${skill_id}` : 'redeploy-bulk',
-          maxMs: 15 * 60_000,
-          intervalMs: 2000,
-        });
+        result = await pollDeployJob(kicked.job_id, sid, { label, maxMs: waitMs, intervalMs: 2000 });
+        if (result?.timed_out && hosted) return redeployStillRunning(solution_id, skill_id, kicked.job_id);
       } else {
         result = kicked; // backend didn't honor async — already-finished sync result
       }
@@ -8795,6 +8887,7 @@ export const handlers = {
       // Machine-readable, so a caller (the ateam-proxy connector) does not have
       // to parse the sentence below. Not isError: the Builder's ok:true stands.
       ...(verdict.degraded && { code: "DEPLOYED_WITH_ERRORS" }),
+      ...(result.code === "JOB_NOT_FOUND" && { code: result.code }),
       // What this redeploy could NOT write to `dev` (a file still held, or a
       // push that failed). It is the way out an UNPUSHED_BUILDER_CHANGE
       // refusal names, so the caller must see when it did not work.
@@ -9311,7 +9404,7 @@ function whyNotSignedIn(ctx) {
 /**
  * Are the workspace tools offered to this session? Whenever it is signed in. There is no availability probe: one that failed
  * once (Core restarting during a deploy, a 502) hid the five tools for a whole
- * chat, because a client lists once. A switch that is off, a trial workspace or a key tied to no person is answered by the
+ * chat, because a client lists once. A trial workspace, local mode or a key tied to no person is answered by the
  * call itself, with a plain refusal that names the single-file tools to use instead (workspaceTools.js).
  */
 export function workspaceOffered(sessionId) {
@@ -9445,9 +9538,10 @@ export async function handleToolCall(name, args, sessionId) {
 
   // While a workspace is open, the old writers of `dev` are refused (and not listed): see workspaceTools.js.
   // Only a tool the session was NOT offered is refused, so a client that cached the old list gets a plain sentence.
-  if (WORKSPACE_WITHHELD.has(name) && getWorkspaceId(sessionId)) {
+  const withheld = getWorkspaceId(sessionId) ? withheldCall(name, args) : null;
+  if (withheld) {
     return {
-      content: [{ type: "text", text: withheldSentence(name) }],
+      content: [{ type: "text", text: withheld }],
       isError: true,
       structuredContent: { ok: false, code: "WORKSPACE_OPEN" },
     };
