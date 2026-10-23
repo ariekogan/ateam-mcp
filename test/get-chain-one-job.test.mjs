@@ -1,10 +1,11 @@
-// A DEV STUDIO CARD KEEPS EVERY TURN ON ONE CHAIN, AND ateam_get_chain MUST LET YOU READ ANY OF THEM.
+// A LONG CHAIN MUST STAY READABLE: ateam_get_chain MUST LET YOU READ ANY JOB OF IT.
 //
 // Core answers any job id of a chain with the SAME whole chain (every job's steps in one array, oldest job
-// first). The 50KB answer cap used to cut the tail of that array mid-token, so on a card the first turn filled
-// the answer and every later turn was unreadable: on 2026-10-16 turn 3 of a card reported "full stop added,
-// live on dev" and nothing could show what it had done. The `job_id` argument was documented as "that job's
-// tree", which it never was.
+// first). The 50KB answer cap used to cut the tail of that array mid-token, so on a card (which then kept every
+// turn on one chain) the first turn filled the answer and every later turn was unreadable: on 2026-10-16 turn 3
+// of a card reported "full stop added, live on dev" and nothing could show what it had done. Each run has a chain
+// of its own since 2026-10-22; any long chain still meets the cap. The `job_id` argument was documented as "that
+// job's tree", which it never was.
 //
 //   - a chain over the cap now comes back as VALID JSON that lists every job and outlines every step
 //   - only_this_job:true returns the steps of that one job (arguments and results included)
@@ -23,7 +24,7 @@ import { scopeChainToJob, formatResultForTest } from "../src/tools.js";
 
 const CAP = 50_000;
 
-/** A card's chain: one job per turn, every step carrying a big result like a real dev.save does. */
+/** A long chain: one job per turn, every step carrying a big result like a real dev.save does. */
 function cardChain({ jobs = 3, stepsPerJob = 40, resultChars = 400 } = {}) {
   const chainJobs = [];
   const executionSteps = [];

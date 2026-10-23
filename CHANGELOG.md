@@ -2,9 +2,17 @@
 
 ## Unreleased
 
-- `ateam_get_chain`: a chain over the 50KB answer limit (a Dev Studio card keeps
-  every turn on one chain) comes back as valid JSON that lists every job and
-  outlines every step, instead of being cut mid-token with the newer turns gone.
+- A background job (a skill's `askAnySkill` call with `background:true`) is a chain
+  of its own, not part of the chain that started it: its chain id is its job id,
+  and it goes on after that chain is done. `ateam_test_skill` (`wait_for:'chain'`),
+  `ateam_test_status`, `ateam_get_chain`, `ateam_chain_status`, `ateam_test_abort`
+  and `ateam_bootstrap` say so: the starting chain's tree does not list it and its
+  `chain_done` does not wait for it, so read, poll or abort it with its job id as
+  `chain_id`.
+- `ateam_get_chain`: a chain over the 50KB answer limit comes back as valid JSON
+  that lists every job and outlines every step, instead of being cut mid-token
+  with the newer jobs gone. The text no longer says a Dev Studio card keeps every
+  turn on one chain (each run has a chain of its own).
   New `only_this_job: true` with a `job_id` returns that one job's steps in full;
   an id that is not a job of the chain is refused with the jobs it has. The
   `job_id` text no longer claims it narrows the tree (Core answers any id of a

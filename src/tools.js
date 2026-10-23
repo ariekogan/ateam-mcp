@@ -328,6 +328,18 @@ const CONVERSATION_CONTINUES =
 const REPLY_WINDOW =
   "Core sends a message to the skill of that actor's last turn only within 60 s of it (5 min if the message is 25 characters or fewer), never when it starts with a new-task verb (build, create, make, …); later it is routed like a first message, so an answer can miss its question.";
 
+// A BACKGROUND JOB IS A CHAIN OF ITS OWN — what Core does today (sys.askAnySkill { background: true }, Core 2026-10-23). The routed
+// skill starts as the FIRST job of a chain of its own: Core passes it no chainId, so its chain id is its own job id, and it keeps
+// running after the job that asked answers. It is linked to its starter (triggerId "ask-any-skill-<starter id>", started_by_job) but is
+// not a member of the starter's chain, so the starter's chain never lists it and its chain_done never waits for it. The askAnySkill
+// step's result carries job_id and chain_id (the same id), so the chain tools read it by that id like any chain. These are
+// ateam-mcp's words, said wherever a chain is described as root + handoffs + askAnySkill subcalls: whole (BACKGROUND_JOB_CHAIN)
+// where there is room, and as a shorter sentence in the descriptions that sit at Core's 1200-character cut (test/core-description-cut).
+const BACKGROUND_JOB_CHAIN =
+  "A background job (askAnySkill background:true) is a chain of its own, not part of the chain that started it: its chain_id is its job_id, and it goes on after that chain is done.";
+const CHAIN_ID_IS =
+  "THE EXECUTION'S IDENTITY — what ateam_conversation returns and what you actually hold. A chain is the whole run: root job + every handoff + every askAnySkill subcall. " + BACKGROUND_JOB_CHAIN + " Prefer this.";
+
 // The RUNNING version, read from package.json — never hardcoded. "Deployed" means
 // three different things here (the mac1 container, npm, and each developer's local
 // checkout+process), and a stale local PROCESS is indistinguishable from a broken
@@ -1761,8 +1773,8 @@ export const tools = [
       "Send a test message to a deployed skill and get the execution result.\n\n" +
       "Wait modes (wait_for):\n" +
       "  • 'root' (default, back-compat) — wait until the message's root job completes, return single-job result. Fast, ignores any sub-skills the root delegated to via askAnySkill.\n" +
-      "  • 'chain' — wait until EVERY job in the chain (root + handoffs + askAnySkill subcalls, recursively) reaches a terminal state, then return the full chain tree. Use when testing multi-skill flows (orchestrator → workers, builders → sub-builders, etc.). The response.chain field carries chainJobs[] with parentJobId/relation/depth and executionSteps[] with tool-nesting (opId/parentOpId/_toolDepth).\n\n" +
-      "Legacy: wait:false is equivalent to wait_for:'never' — returns job_id immediately for polling via ateam_test_status. wait:true is the same as the default wait_for:'root'.\n\n" +
+      "  • 'chain' — wait until EVERY job in the chain (root + handoffs + askAnySkill subcalls, recursively) reaches a terminal state, then return the full chain tree. A background job (askAnySkill background:true) is a chain of its own, not in this one. Use when testing multi-skill flows. The response.chain field carries chainJobs[] with parentJobId/relation/depth and executionSteps[] with tool-nesting (opId/parentOpId/_toolDepth).\n\n" +
+      "Legacy: wait:false = wait_for:'never' (returns job_id at once; poll it with ateam_test_status); wait:true = wait_for:'root'.\n\n" +
       "Attachments: pass `attachments` to send files with the message exactly as a file dropped into the chat (see the parameter).\n\n" +
       "The reply carries ran_as (with wait_for:'chain', inside response.kickoff) beside actor_id. " + TEST_RUNS_AS_AT,
     inputSchema: {
@@ -2704,14 +2716,13 @@ export const tools = [
       note: "safe:false when include_chain:true (that fetches the full tree)." },
     description:
       "Poll the progress of an async test. Pass chain_id for the WHOLE run (recommended — the root job finishing does NOT mean the run finished; a handoff may still be going). Pass job_id to poll one job alone: iteration count, tool call steps, status, and result when done.\n\n" +
-      "Set include_chain:true to ALSO include the full chain tree (every job in the chain, rooted at this job_id, with parent/child linkage). Use when this job dispatched askAnySkill subcalls and you want a single snapshot of the whole multi-skill state instead of polling each child job_id separately.",
+      "Set include_chain:true to ALSO include the full chain tree (every job in the chain, rooted at this job_id, with parent/child linkage). Use when this job dispatched askAnySkill subcalls and you want a single snapshot of the whole multi-skill state instead of polling each child job_id separately. " + BACKGROUND_JOB_CHAIN + " It is not in this tree: pass its job_id as chain_id.",
     inputSchema: {
       type: "object",
       properties: {
         chain_id: {
           type: "string",
-          description:
-            "THE EXECUTION'S IDENTITY — what ateam_conversation returns and what you actually hold. A chain is the whole run: root job + every handoff + every askAnySkill subcall. Prefer this.",
+          description: CHAIN_ID_IS,
         },
         actor_id: {
           type: "string",
@@ -2747,18 +2758,17 @@ export const tools = [
     // degrades. Use once at the end; poll ateam_chain_status instead.
     monitoring: { safe: false, cost: "heavy", output: "grows_with_run", use_instead: "ateam_chain_status" },
     description:
-      "Inspect the full chain tree — the whole run rooted at chain_id, through every handoff and askAnySkill subcall. Use after a chain has run, to analyze its structure; to watch a run use ateam_chain_status (this answer grows with the run). Two shapes:\n" +
+      "Inspect the full chain tree — the whole run rooted at chain_id, through every handoff and askAnySkill subcall. Use after a chain has run, to analyze its structure; to watch a run use ateam_chain_status (this answer grows with the run). A background job (askAnySkill background:true) is a chain of its own, not in this tree: pass its job_id as chain_id. Two shapes:\n" +
       "  • response.data.chainJobs[] — one per job: jobId, skill, status, iteration, depth, relation ('root' | 'subcall' | 'handoff'), parentJobId, parentSkill, goal.\n" +
       "  • response.data.executionSteps[] — every tool call of every job, tagged _skill, _jobId, _depth, _relation, _parentSkill, _parentJobId, _toolDepth.\n\n" +
-      "ONE JOB IN FULL: the answer holds EVERY job, oldest first, and ~50KB is the limit. A Dev Studio card keeps all its turns on one chain, so a long chain comes back as an outline (every job; per step tool, status, reason; no arguments or results) and says so. To read one job in full: ateam_get_chain({ job_id: \"<jobId>\", only_this_job: true }).\n\n" +
+      "ONE JOB IN FULL: the answer holds EVERY job, oldest first, and ~50KB is the limit, so a long chain comes back as an outline (every job; per step tool, status, reason; no arguments or results) and says so. To read one job in full: ateam_get_chain({ job_id: \"<jobId>\", only_this_job: true }).\n\n" +
       "Auth: your api_key; tenant scoped by the key; only chains your actor can access.",
     inputSchema: {
       type: "object",
       properties: {
         chain_id: {
           type: "string",
-          description:
-            "THE EXECUTION'S IDENTITY — what ateam_conversation returns and what you actually hold. A chain is the whole run: root job + every handoff + every askAnySkill subcall. Prefer this.",
+          description: CHAIN_ID_IS,
         },
         actor_id: {
           type: "string",
@@ -2771,7 +2781,7 @@ export const tools = [
         },
         only_this_job: {
           type: "boolean",
-          description: "Optional. true = return only the steps of the job whose id is in job_id (arguments and results included), not every job of the chain. The chain's jobs are still listed. Use it for one turn of a long chain, such as one turn of a Dev Studio card. job_id must be a job id of the chain; a chain id that is not a job id is refused with the list of the chain's jobs.",
+          description: "Optional. true = return only the steps of the job whose id is in job_id (arguments and results included), not every job of the chain. The chain's jobs are still listed. Use it for one job of a long chain. job_id must be a job id of the chain; a chain id that is not a job id is refused with the list of the chain's jobs.",
         },
         skill_slug: {
           type: "string",
@@ -2797,7 +2807,7 @@ export const tools = [
     },
     description:
       "SLIM chain status — the chip-quick poll. Given a chain_id (from ateam_conversation), returns the WHOLE-CHAIN aggregate status cheaply: chain_status + chain_done (true only when the ENTIRE chain — root job + every handoff + askAnySkill subcall — is terminal), plus pending_question, result, and a short progress line.\n\n" +
-      "This is what you poll on a loop after ateam_conversation — NOT ateam_get_chain (that returns the full tree; too heavy for periodic polling). A single job can finish while the chain is still running, so poll chain_done, not a job's status.\n\n" +
+      "This is what you poll on a loop after ateam_conversation — NOT ateam_get_chain (that returns the full tree; too heavy for periodic polling). A single job can finish while the chain is still running, so poll chain_done, not a job's status. A background job (askAnySkill background:true) is a chain of its own that chain_done does not wait for: poll it with its job_id as chain_id.\n\n" +
       "Loop: call every ~2s until chain_done === true. " + WAITING_ON_THE_USER + " Otherwise read `result` / fetch the full tree once via ateam_get_chain if you need per-job detail.",
     inputSchema: {
       type: "object",
@@ -2882,15 +2892,14 @@ export const tools = [
     // /api/job/:id/chain, a per-actor read) carries. Kept and described for that,
     // since an undeclared actor_id would be latched all the same.
     description:
-      "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. Once the abort lands no new step, planning round or sub-agent turn starts; a model or tool call already in flight finishes first. " +
+      "Abort a running test. Pass chain_id to abort the WHOLE run — every job in the chain — and get back which ones stopped. Aborting by job_id stops that job only, leaving handoffs running. " + BACKGROUND_JOB_CHAIN + " Abort it with its own chain_id. Once the abort lands no new step, planning round or sub-agent turn starts; a model or tool call already in flight finishes first. " +
       "The abort uses the actor the test's start ran as, whatever actor_id says: Core stops a job that actor may access and refuses any other with 403 JOB_ACCESS_DENIED, so an anonymous abort stops only anonymous runs. " + TEST_RUNS_AS_AT + " (Advanced.)",
     inputSchema: {
       type: "object",
       properties: {
         chain_id: {
           type: "string",
-          description:
-            "THE EXECUTION'S IDENTITY — what ateam_conversation returns and what you actually hold. A chain is the whole run: root job + every handoff + every askAnySkill subcall. Prefer this.",
+          description: CHAIN_ID_IS,
         },
         actor_id: {
           type: "string",
@@ -5720,7 +5729,7 @@ export const handlers = {
       ],
     },
     conversation_flow: {
-      _important: "ateam_conversation is ASYNC and CHAIN-based. A conversation runs across handoffs + askAnySkill subcalls for possibly minutes — a synchronous wait would hit the 100s edge timeout (524). ALWAYS poll by CHAIN, NEVER by a single job (a job can terminate while the chain is still active).",
+      _important: "ateam_conversation is ASYNC and CHAIN-based. A conversation runs across handoffs + askAnySkill subcalls for possibly minutes — a synchronous wait would hit the 100s edge timeout (524). ALWAYS poll by CHAIN, NEVER by a single job (a job can terminate while the chain is still active). " + BACKGROUND_JOB_CHAIN + " The conversation's chain_done does not wait for it: poll it with its own job_id as chain_id.",
       steps: [
         "1. KICK OFF — ateam_conversation(solution_id, message[, actor_id]) → returns { chain_id, actor_id, ran_as } immediately (what actor_id and ran_as are: who_it_runs_as below). The reply is NOT here.",
         "2. POLL (chip-quick, cheap) — loop ateam_chain_status(chain_id) every ~2s. It returns the whole-chain aggregate { chain_status, chain_done, pending_question, result }. Stop when chain_done === true. " + WAITING_ON_THE_USER + " (step 4)",
@@ -8932,10 +8941,11 @@ const MAX_RESPONSE_CHARS = 50_000;
 
 /**
  * ONE JOB OF A CHAIN, in full. Core's chain answer holds the steps of EVERY job of the chain in one array, oldest job first, and the
- * output cap cuts the end off: a Dev Studio card keeps every turn on one chain (the card's id), so the first turn fills the answer
+ * output cap cuts the end off: a Dev Studio card then kept every turn on one chain (the card's id), so the first turn filled the answer
  * and each later turn, the newer ones, were never readable (2026-10-16: a turn reported "full stop added, live on dev" and nothing
- * could show what it did). The chain's jobs stay listed; only the steps are narrowed. An id that is not a job of this chain is
- * refused WITH the jobs it does have, because a chain id (a card id) is what people hold.
+ * could show what it did). Each run has a chain of its own since 2026-10-22, but any long chain still meets the cap. The chain's jobs
+ * stay listed; only the steps are narrowed. An id that is not a job of this chain is refused WITH the jobs it does have, because the
+ * id people hold is a chain id, which need not be a job id.
  */
 export function scopeChainToJob(body, jobId) {
   const data = body?.data;
