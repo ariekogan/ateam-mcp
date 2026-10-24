@@ -2122,7 +2122,7 @@ export const tools = [
   {
     name: "ateam_list_solutions",
     core: true,
-    description: "List all solutions deployed in the Skill Builder.",
+    description: "List the solution deployed in this workspace. A workspace holds exactly ONE solution: the list has that single entry (or none yet), and there is no way to create additional ones.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -5625,6 +5625,10 @@ function _withRewriteHint(result, before, after, filePath) {
   return hint && result && typeof result === "object" ? { ...result, hint } : result;
 }
 
+// Said in every ateam_list_solutions answer: a workspace holds one solution and nothing creates a second.
+const ONE_SOLUTION_NOTE =
+  "A workspace holds exactly ONE solution. If one is listed, it is the only solution in this workspace, and there is NO way to create additional ones. To build something else, use another workspace.";
+
 export const handlers = {
   // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
   //
@@ -7098,7 +7102,7 @@ export const handlers = {
       } catch { /* non-fatal — leave the row as-is */ }
       return out;
     }));
-    return { ...raw, solutions: enriched };
+    return { ...raw, solutions: enriched, note: ONE_SOLUTION_NOTE };
   },
 
   ateam_get_solution: async ({ solution_id, view, skill_id, section, offset, limit }, sid) => {
