@@ -2122,7 +2122,7 @@ export const tools = [
   {
     name: "ateam_list_solutions",
     core: true,
-    description: "List the solution deployed in this workspace. A workspace holds exactly ONE solution: the list has that single entry (or none yet), and there is no way to create additional ones.",
+    description: "List the solution deployed in this workspace. A workspace holds exactly ONE solution: the list has that single entry (or none yet), and there is no way to create additional ones. Deploying a solution with a different id REPLACES (deletes) the existing one.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -5627,7 +5627,7 @@ function _withRewriteHint(result, before, after, filePath) {
 
 // Said in every ateam_list_solutions answer: a workspace holds one solution and nothing creates a second.
 const ONE_SOLUTION_NOTE =
-  "A workspace holds exactly ONE solution. If one is listed, it is the only solution in this workspace, and there is NO way to create additional ones. To build something else, use another workspace.";
+  "A workspace holds exactly ONE solution. If one is listed, it is the only solution in this workspace, and there is NO way to create additional ones. Deploying a solution with a different id REPLACES (deletes) the existing one; to keep it, build the other solution in another workspace.";
 
 export const handlers = {
   // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
