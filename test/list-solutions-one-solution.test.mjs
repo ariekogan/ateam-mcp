@@ -1,0 +1,14 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { tools } from "../src/tools.js";
+
+test("ateam_list_solutions says a workspace holds one solution and none can be added", () => {
+  const t = tools.find((x) => x.name === "ateam_list_solutions");
+  assert.match(t.description, /exactly ONE solution/);
+  assert.match(t.description, /no way to create additional/);
+});
+
+test("the description warns that a different id replaces the existing solution", () => {
+  const t = tools.find((x) => x.name === "ateam_list_solutions");
+  assert.match(t.description, /REPLACES \(deletes\) the existing one/);
+});
