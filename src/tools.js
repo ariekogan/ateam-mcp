@@ -105,6 +105,12 @@ function signInRefusal(err, base, sessionId, path = "/deploy/solutions") {
 // started yet is listed from the recorded solution.ui_plugins[] alone.
 const PLUGIN_LISTED_LIVE =
   "Core lists a running connector's plugins live, so ateam_upload_connector needs no deploy and no promote to show one.";
+// A page's chat guide (Builder CHAT_GUIDE_RULE, served at /spec/widgets → chat_guide; Core
+// reads it for routing from the manifest FILE, never from a ui_plugins[] entry or the browser).
+const CHAT_GUIDE_POINTER =
+  "Optional: \"chatGuide\": \"<skill-id>\" in that manifest.json names the skill that guides the page in the chat beside it " +
+  "(in dev mode, while the page is open, the chat leans to that skill). It is read from the manifest file, never from a solution.ui_plugins[] entry: " +
+  "ateam_get_spec({ topic: \"widgets\", search: \"chat_guide\" }).";
 const DISCOVERED_PLUGIN_IS_MERGED =
   "Nothing to declare: ateam_build_and_run's deploy, on every run, calls ui.listPlugins + ui.getPlugin on each connector listed in platform_connectors or in a skill's connectors[] " +
   "(list this connector in the skill that opens the plugin) and MERGES each plugin it finds into solution.ui_plugins[], a shallow merge in which the fields you set yourself win. " +
@@ -2438,7 +2444,8 @@ export const tools = [
       "If the connector generates its plugin list from ui-dist/<plugin>/manifest.json, the emitted manifest is picked up automatically; " +
       "if the connector has a HARDCODED list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), you MUST add this plugin there (copy the manifest.json render block). " +
       `${DISCOVERED_PLUGIN_IS_MERGED}\n\n` +
-      "The scaffold MERGES into the existing connector (server.js + other files preserved), GitHub-backed or repo-less.",
+      "The scaffold MERGES into the existing connector (server.js + other files preserved), GitHub-backed or repo-less. " +
+      CHAT_GUIDE_POINTER,
     inputSchema: {
       type: "object",
       properties: {
@@ -8727,6 +8734,7 @@ export const handlers = {
           ? `Edit ui-dist/${plugin_name}/index.html — replace the placeholder UI.`
           : null,
         `A manifest.json (with the render block) was written to ui-dist/${plugin_name}/manifest.json — this is the source of truth Core reads.`,
+        CHAT_GUIDE_POINTER,
         `If this connector was scaffolded by ateam_create_connector, its ui.listPlugins / ui.getPlugin read ui-dist/*/manifest.json automatically — nothing else to register. ${PLUGIN_LISTED_LIVE} ⚠️ ONLY a connector with a HARDCODED plugin list (legacy, e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js) needs this plugin added there by hand — copy the render block from manifest.json.`,
         `Verify with ateam_get_widget_catalog (or ateam_get_solution(solution_id, "connectors_health")).`,
         DISCOVERED_PLUGIN_IS_MERGED,
