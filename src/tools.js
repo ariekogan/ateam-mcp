@@ -107,6 +107,8 @@ const PLUGIN_LISTED_LIVE =
   "Core lists a running connector's plugins live, so ateam_upload_connector needs no deploy and no promote to show one.";
 // A page's chat guide (Builder CHAT_GUIDE_RULE, served at /spec/widgets → chat_guide; Core
 // reads it for routing from the manifest FILE, never from a ui_plugins[] entry or the browser).
+// A next step of ateam_create_plugin only: its description is over Core's cut and may not grow
+// (test/core-description-cut.test.mjs).
 const CHAT_GUIDE_POINTER =
   "Optional: \"chatGuide\": \"<skill-id>\" in that manifest.json names the skill that guides the page in the chat beside it " +
   "(in dev mode, while the page is open, the chat leans to that skill). It is read from the manifest file, never from a solution.ui_plugins[] entry: " +
@@ -2444,8 +2446,7 @@ export const tools = [
       "If the connector generates its plugin list from ui-dist/<plugin>/manifest.json, the emitted manifest is picked up automatically; " +
       "if the connector has a HARDCODED list (e.g. personal-assistant-ui-mcp: UI_PLUGINS[] + PLUGIN_MANIFESTS{} in server.js), you MUST add this plugin there (copy the manifest.json render block). " +
       `${DISCOVERED_PLUGIN_IS_MERGED}\n\n` +
-      "The scaffold MERGES into the existing connector (server.js + other files preserved), GitHub-backed or repo-less. " +
-      CHAT_GUIDE_POINTER,
+      "The scaffold MERGES into the existing connector (server.js + other files preserved), GitHub-backed or repo-less.",
     inputSchema: {
       type: "object",
       properties: {
