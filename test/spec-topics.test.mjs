@@ -67,7 +67,7 @@ check(
 const ADVISOR_POINTER_TOPICS = [
   "skill", "solution", "actor-storage", "voice", "voice-native", "widgets",
   "python_helpers", "triggers", "sub-agent", "consumer-roles",
-  "mobile-connector", "device-capabilities",
+  "mobile-connector", "device-capabilities", "ai-models",
 ];
 const brokenPointers = ADVISOR_POINTER_TOPICS.filter((t) => !enumValues.includes(t));
 check(
