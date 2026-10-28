@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.120 — 2026-10-28
+
+### `ateam_get_spec` has an `ai-models` topic (#78)
+
+- The Builder's advisor and capability index point at `/spec/ai-models`;
+  this tool had no such topic, so following the pointer answered
+  `Unknown spec topic "ai-models"`.
+- The `ai-models` and `realizations` topic texts send an agent to the
+  vision chooser (`realizations`, search `vision_chooser`) for anything a
+  camera must notice, and to `recognise_in_video` for the cloud AI routes.
+
 ## 0.4.115 — 2026-10-04
 
 Released together with Builder builder-prod-20261004-001, whose served texts these tools point at.
