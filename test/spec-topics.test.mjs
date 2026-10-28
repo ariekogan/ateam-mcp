@@ -67,7 +67,7 @@ check(
 const ADVISOR_POINTER_TOPICS = [
   "skill", "solution", "actor-storage", "voice", "voice-native", "widgets",
   "python_helpers", "triggers", "sub-agent", "consumer-roles",
-  "mobile-connector", "device-capabilities",
+  "mobile-connector", "device-capabilities", "ai-models",
 ];
 const brokenPointers = ADVISOR_POINTER_TOPICS.filter((t) => !enumValues.includes(t));
 check(
@@ -100,6 +100,14 @@ check("the capability index is reachable", enumValues.includes("capabilities"));
 // WHETHER without HOW is where the 2026-09-04 build failed: the agent knew the
 // camera existed and still implemented continuous guidance as a photo loop.
 check("the realization catalog is reachable", enumValues.includes("realizations"));
+// An agent asked to recognise an action built it on the phone's object detector, which names things
+// and cannot tell an action apart. Both doors it may open, ai-models and realizations, send it to the
+// one vision chooser, where the cloud AI routes are (the Builder's catalog, held by its own tests).
+check("  and an agent asking to recognise an action is sent to the vision chooser from ai-models",
+  /'ai-models' = [^]*?'realizations' with search vision_chooser[^]*?never tells an action apart/.test(topicSchema.description));
+check("  and from realizations itself, which names the cloud AI routes",
+  /'realizations' = HOW[^]*?search vision_chooser[^]*?cloud AI ones \(recognise_in_video\)/.test(topicSchema.description));
+check("  and no topic points at the old which_vision_for_what field", !topicSchema.description.includes("which_vision_for_what"));
 check("  and bootstrap names it as the FIRST call",
   /_first_call[\s\S]{0,200}topic:'capabilities'/.test(SRC));
 check("  and the advisor's fallback names it too",
