@@ -7102,7 +7102,8 @@ export const handlers = {
       } catch { /* non-fatal — leave the row as-is */ }
       return out;
     }));
-    return { ...raw, solutions: enriched, note: ONE_SOLUTION_NOTE };
+    // Said only when the list agrees with it: a legacy row count above one would contradict the note.
+    return enriched.length > 1 ? { ...raw, solutions: enriched } : { ...raw, solutions: enriched, note: ONE_SOLUTION_NOTE };
   },
 
   ateam_get_solution: async ({ solution_id, view, skill_id, section, offset, limit }, sid) => {
