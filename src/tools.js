@@ -2122,7 +2122,7 @@ export const tools = [
   {
     name: "ateam_list_solutions",
     core: true,
-    description: "List all solutions deployed in the Skill Builder.",
+    description: "List the solution deployed in this workspace. A workspace holds exactly ONE solution: the list has that single entry (or none yet), and there is no way to create additional ones. Deploying a solution with a different id REPLACES (deletes) the existing one.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -5629,6 +5629,10 @@ function _withRewriteHint(result, before, after, filePath) {
   return hint && result && typeof result === "object" ? { ...result, hint } : result;
 }
 
+// Said in every ateam_list_solutions answer: a workspace holds one solution and nothing creates a second.
+const ONE_SOLUTION_NOTE =
+  "A workspace holds exactly ONE solution. If one is listed, it is the only solution in this workspace, and there is NO way to create additional ones. Deploying a solution with a different id REPLACES (deletes) the existing one; to keep it, build the other solution in another workspace.";
+
 export const handlers = {
   // (_args, sid) — the SESSION ID IS LOAD-BEARING HERE.
   //
@@ -7102,7 +7106,8 @@ export const handlers = {
       } catch { /* non-fatal — leave the row as-is */ }
       return out;
     }));
-    return { ...raw, solutions: enriched };
+    // Said only when the list agrees with it: a legacy row count above one would contradict the note.
+    return enriched.length > 1 ? { ...raw, solutions: enriched } : { ...raw, solutions: enriched, note: ONE_SOLUTION_NOTE };
   },
 
   ateam_get_solution: async ({ solution_id, view, skill_id, section, offset, limit }, sid) => {
