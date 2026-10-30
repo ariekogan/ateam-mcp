@@ -14,6 +14,7 @@ import {
   getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
   servedBy, KEY_ENVIRONMENTS, signInContext, sessionEnvironment, beginSignIn, shownBase, envApiKeyPresent,
+  LOCAL_API_URL, hostEnvironments, sessionShownBase,
 } from "./api.js";
 
 // Mutating / stateful tools whose result should carry a `_where` stamp
@@ -5657,10 +5658,10 @@ export const handlers = {
     served_by: servedBy(sid),
     runtime: {
       ateam_mcp_version: MCP_VERSION,
-      base_url: shownBase(getBaseUrl(sid)),
+      base_url: shownBase(sessionShownBase(sid)),
       // "as set by ateam_auth's `url`" (af5e366) was written 22 minutes before
       // bff5934 made the KEY pick the environment (MGAP-A31).
-      _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to: the environment its sign-in's key names (adas_<env>_…), a `url` given to ateam_auth for a host that is neither environment, or this server's default before any sign-in. " +
+      _note: "The version of the ateam-mcp process actually serving this call, and the API THIS SESSION talks to: the environment its sign-in's key names (adas_<env>_…) — for the platform's own builder inside a deployment, that deployment (its requests go to the deployment's own validator) — a `url` given to ateam_auth for a host that is neither environment, or this server's default before any sign-in. " +
         "`served_by` (top of this result, and on every ateam_get_spec / ateam_get_examples / ateam_get_workflows / ateam_spec_search result) names that environment: prod or dev, or the base itself for any other host. It says which API ANSWERED; the environment of this session's sign-in is in `session`. " +
         "If a fix looks missing, check this FIRST — a local MCP process keeps running the code it loaded at session start, so a pushed/published fix is not live until the process restarts.",
     },
@@ -6024,7 +6025,14 @@ export const handlers = {
     // signed in AFRESH: nothing the previous tenant left — url, master key,
     // actor, context — reaches this one. First, before anything below reads the
     // record. See resetPlatformSession.
-    resetPlatformSession(sessionId);
+    const platformSession = resetPlatformSession(sessionId);
+    // A platform session signs in this deployment's own keys, and they go to
+    // this deployment's own validator only (below). A url would send them to
+    // any host the caller names, so it is refused before anything is sent.
+    // ateam-proxy-mcp never passes one, and refuses its callers' ateam_auth.
+    if (platformSession && url) {
+      return { ok: false, message: "Refusing to authenticate: a platform session signs in at this deployment's own API, so it takes no url. Nothing was sent." };
+    }
 
     // Master key mode: cross-tenant auth using shared secret
     if (master_key) {
@@ -6032,9 +6040,12 @@ export const handlers = {
         return { ok: false, message: "Master key requires a tenant parameter. Specify which tenant to operate on." };
       }
       const apiUrl = url ? url.replace(/\/+$/, "") : undefined;
+      // A platform session's master key is checked at this deployment's own
+      // validator (the process default); it is shown by its public address.
+      const shownUrl = platformSession && LOCAL_API_URL ? (hostEnvironments()["self-hosted"] || "this deployment's own API") : null;
       // A refused key leaves the session exactly as it was (api.js beginSignIn).
       const refused = beginSignIn(sessionId);
-      setSessionCredentials(sessionId, { tenant, apiKey: null, apiUrl, explicit: true, masterKey: master_key });
+      setSessionCredentials(sessionId, { tenant, apiKey: null, apiUrl, shownUrl, explicit: true, masterKey: master_key });
       // Verify by listing solutions
       try {
         const result = await get("/deploy/solutions", sessionId);
@@ -6046,7 +6057,7 @@ export const handlers = {
           message: `Master key authenticated to tenant "${tenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found. Use tenant parameter on any tool to switch tenants without re-auth.`,
         };
       } catch (err) {
-        const base = getBaseUrl(sessionId);
+        const base = sessionShownBase(sessionId);
         refused();
         return { ok: false, tenant, message: `Master key auth failed: ${signInRefusal(err, base, sessionId)}` };
       }
@@ -6085,7 +6096,28 @@ export const handlers = {
       }
     }
 
-    const apiUrl = explicitUrl || baseUrlForKeyEnv(api_key) || undefined;
+    // ── A PLATFORM SESSION'S KEYS ARE THIS DEPLOYMENT'S OWN ──────────────
+    //
+    // Only the deployment this server runs inside holds CORE_MCP_SECRET, so a
+    // platform session is that deployment's ateam-proxy-mcp, and every key it
+    // signs in with was read from that same deployment's database. Its home is
+    // the validator this process is configured with (ADAS_API_URL, set by
+    // compose on prod, mac1 and every self-host box), never a hosted host the
+    // key's environment names: a self-host box mints adas_prod_* keys (its
+    // URL is not dev-*), and sending them to api.ateam-ai.com answered "could
+    // not tell me who you are", so the in-product builder could not sign in on
+    // any box. On prod and mac1 the local validator is the same system the
+    // hosted name reached. Bearer, OAuth and stdio sessions are unchanged.
+    //
+    // What the session is SHOWN as being on stays the deployment's public API
+    // (this box's own api.<DOMAIN>, else the environment the key names): the
+    // validator's compose name never reaches a served text.
+    const localValidator = platformSession && !explicitUrl ? LOCAL_API_URL : null;
+    if (platformSession && !explicitUrl && !localValidator) {
+      console.warn("[Auth] Platform sign-in with no ADAS_API_URL: this server does not know its own deployment's validator, so the key goes where its environment points (a self-host box's key then reaches our hosted API and is refused). Set ADAS_API_URL in compose.");
+    }
+    const apiUrl = explicitUrl || localValidator || baseUrlForKeyEnv(api_key) || undefined;
+    const shownUrl = localValidator ? (hostEnvironments()["self-hosted"] || baseUrlForKeyEnv(api_key) || "this deployment's own API") : null;
 
     // ── WHO IS THIS KEY? ───────────────────────────────────────────────────
     //
@@ -6106,7 +6138,7 @@ export const handlers = {
     if (!resolvedTenant) {
       const base = apiUrl || getBaseUrl(sessionId);
       try {
-        const me = await whoami(api_key, base);
+        const me = await whoami(api_key, base, { shownAs: shownUrl });
         resolvedTenant = me.tenant;
       } catch (err) {
         // The API recognised the key and refused its PERSON (deleted, or no
@@ -6114,14 +6146,15 @@ export const handlers = {
         // the key is — "upgrade it or pass tenant" would send the reader the
         // wrong way. formatError reads the whole body (whoami carries it).
         const person = personRefused(err?.status, err?.body);
+        const shown = shownUrl || base;
         if (person) {
-          return { ok: false, code: person.code, message: `Authentication failed: ${signInRefusal(err, base, sessionId, "/auth/whoami")}` };
+          return { ok: false, code: person.code, message: `Authentication failed: ${signInRefusal(err, shown, sessionId, "/auth/whoami")}` };
         }
         return {
           ok: false,
           message:
             `This key does not name its tenant — the tenant is sealed inside it and only the server can read it — ` +
-            `and ${shownBase(base)} could not tell me who you are: ${err.message} ` +
+            `and ${shownBase(shown)} could not tell me who you are: ${err.message} ` +
             `Nothing was authenticated: acting on a guessed tenant is the one failure this must never have. ` +
             `If that host is an older deployment without /auth/whoami, upgrade it or pass tenant: "<name>" explicitly.`,
         };
@@ -6137,7 +6170,7 @@ export const handlers = {
     // A refused key leaves the session exactly as it was (api.js beginSignIn):
     // it stayed on the refused key, and its opening said it was signed in.
     const refused = beginSignIn(sessionId);
-    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, explicit: true });
+    setSessionCredentials(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl, shownUrl, explicit: true });
     // Verify the key works by listing solutions
     try {
       const result = await get("/deploy/solutions", sessionId);
@@ -6147,7 +6180,7 @@ export const handlers = {
       // SESSION_TTL — a reconnect or a new chat stayed on it. A new sign-in on
       // the A-Team page drops it (oauth.js exchangeAuthorizationCode).
       setAuthOverride(sessionId, { tenant: resolvedTenant, apiKey: api_key, apiUrl });
-      const urlNote = apiUrl ? ` (via ${shownBase(apiUrl)})` : "";
+      const urlNote = apiUrl ? ` (via ${shownBase(shownUrl || apiUrl)})` : "";
       const environment = sessionEnvironment(sessionId);
       return {
         ok: true,
@@ -6168,9 +6201,9 @@ export const handlers = {
         // `session` opening too: they disagreed for this very key.
         environment,
         ...(environment === "unstated" && !explicitUrl && {
-          environment_note: `This key does not name an environment, so the process default was used (${shownBase(getBaseUrl(sessionId))}). Recreate it as adas_<env>_<tenant>_<hex> to make the environment explicit — until then nothing here can confirm which system you are on.`,
+          environment_note: `This key does not name an environment, so the process default was used (${shownBase(sessionShownBase(sessionId))}). Recreate it as adas_<env>_<tenant>_<hex> to make the environment explicit — until then nothing here can confirm which system you are on.`,
         }),
-        base_url: shownBase(getBaseUrl(sessionId)),
+        base_url: shownBase(sessionShownBase(sessionId)),
         message: `Authenticated to tenant "${resolvedTenant}"${urlNote}. ${result.solutions?.length || 0} solution(s) found.`,
       };
     } catch (err) {
@@ -6179,7 +6212,7 @@ export const handlers = {
       // versa). Surface the base we tried and, if it looks like that mismatch,
       // say to retry with that API's base as url — instead of a generic
       // "invalid/unconfigured key". The text names no host but prod's.
-      const base = getBaseUrl(sessionId) || "";
+      const base = shownUrl || getBaseUrl(sessionId) || "";
       // Read the base the key was tried at, THEN put the session back, THEN
       // say why: built before, the refusal described the unverified key as
       // the session's own ("may have been rotated").
