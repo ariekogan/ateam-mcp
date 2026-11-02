@@ -6506,6 +6506,41 @@ export const handlers = {
       }
     }
 
+    // Phase 1b: a NEW skill needs a solution to belong to. Creating one into a
+    // solution that was never initialized used to write skill.json, fail to add
+    // it to the (absent) solution.json as a "non-fatal" warning, and then fail
+    // the redeploy with a bare "Skill not found" / "Solution not found" — after
+    // a half-write. Check BEFORE anything is written: the solution must exist
+    // in the store this patch uses or in the other one. Only a definite 404
+    // (or an empty definition) counts as absent; any other read failure is
+    // ambiguous and does not block, so a flaky store never refuses a real patch.
+    if (isNewSkill) {
+      const solutionAbsent = async (read) => {
+        try {
+          const r = await read();
+          const def = r && typeof r === "object" ? (r.solution || r.content || r) : r;
+          if (typeof def === "string") return def.trim().length === 0;
+          return !def || typeof def !== "object" || Object.keys(def).length === 0;
+        } catch (e) {
+          return e?.status === 404;
+        }
+      };
+      const ghAbsent = await solutionAbsent(() => get(apiPath`/deploy/solutions/${solution_id}/github/read?path=solution.json`, sid));
+      const fsAbsent = ghAbsent
+        ? await solutionAbsent(() => get(apiPath`/deploy/solutions/${solution_id}/definition?raw=1`, sid))
+        : false;
+      if (ghAbsent && fsAbsent) {
+        return {
+          ok: false,
+          phase: "read",
+          code: "SOLUTION_NOT_INITIALIZED",
+          error: `Refusing to create skill "${skill_id}": solution "${solution_id}" does not exist yet (no solution.json in GitHub and no definition in the Builder). Nothing was written.`,
+          hint: `Create the solution first: ateam_build_and_run({ solution: { id: "${solution_id}", ... }, skills: [ ...including "${skill_id}" with its tools or connectors ] }) — the first deploy needs the full solution object. After that, ateam_patch can add or change skills.`,
+          phases,
+        };
+      }
+    }
+
     // Phase 2: Apply patch in memory
     let patched = { ...current };
     try {
