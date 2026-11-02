@@ -59,9 +59,11 @@ test("solution exists in GitHub → the new skill is created as before", async (
   assert.ok(writes.some((w) => w.includes("/github/patch")), "skill was not written");
 });
 
-test("solution only in the Builder → not refused", async () => {
-  const { r } = await patchWith({ solutionInGithub: false, solutionInBuilder: true });
-  assert.notEqual(r.code, "SOLUTION_NOT_INITIALIZED");
+test("solution only in the Builder → refused (the write goes to GitHub), hint names ateam_redeploy", async () => {
+  const { r, writes } = await patchWith({ solutionInGithub: false, solutionInBuilder: true });
+  assert.equal(r.code, "SOLUTION_NOT_INITIALIZED");
+  assert.match(r.hint, /ateam_redeploy/);
+  assert.deepEqual(writes, []);
 });
 
 test("an unclear read error (500) does not block the patch", async () => {
