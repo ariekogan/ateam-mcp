@@ -143,7 +143,7 @@ import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachme
 // Who a test job runs as: ONE pointer to the Builder's /spec, never a copy of its words.
 import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 // Signing in and switching workspace: ONE statement of the steps, rendered where it is read.
-import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
+import { connectSteps, switchSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId } from "./api.js";
@@ -1581,6 +1581,23 @@ export const tools = [
           description:
             "Only for a host other than A-Team's own API (localhost, a self-hosted deployment), or for an older key that names no API (adas_<tenant>_<hex>, which otherwise lands on this server's default API). " +
             "Leave it out for a current A-Team key: the key already names its API, and a url that contradicts it is refused.",
+        },
+      },
+    },
+  },
+  {
+    name: "ateam_switch_workspace",
+    core: true,
+    description:
+      "Move this session to ANOTHER workspace of the same person, with no sign-out and no key to paste: the key this session is signed in with says which person it is, and the API lets that person switch to any workspace they own or administer. " +
+      "Call it with no `tenant` to list them (the current one is marked). Call it with `tenant: \"<workspace>\"` to switch: the API hands the other workspace's own key to this server, which signs the session in with it — the key never appears in the chat. Afterwards say which workspace you are on (ateam_bootstrap's `session` field names it) before changing anything. " +
+      "It is refused, with the reason, when: this environment has not turned it on (today the dev environment only; elsewhere sign in again with the other workspace's key), the key was not minted by a signed-in person, the key's own workspace has more than one owner/admin, or the person is not owner/admin of the target. Calls in the new workspace run as the person who minted THAT workspace's key.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: {
+          type: "string",
+          description: "The workspace to switch to. Leave it out to list the workspaces you can switch to.",
         },
       },
     },
@@ -3859,7 +3876,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_github_status", "ateam_get_repository_binding", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
   ],
   additive: [
-    "ateam_auth",
+    "ateam_auth", "ateam_switch_workspace",
     // Starts (or brings back) the one workspace, and reports on it: no file of the solution changes.
     "ateam_workspace_open", "ateam_workspace_status",
     // Intent detection + planning only: Core plans the first step and executes
@@ -3947,7 +3964,7 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_workspace_open", "ateam_workspace_exec", "ateam_workspace_status", "ateam_workspace_save", "ateam_workspace_close",
   ],
   all: [
-    "ateam_bootstrap", "ateam_auth", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
+    "ateam_bootstrap", "ateam_auth", "ateam_switch_workspace", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
     "ateam_design_advisor", "ateam_spec_search",
     "ateam_validate_skill", "ateam_validate_solution",
     "ateam_list_solutions", "ateam_get_solution", "ateam_show_skill_minimal", "ateam_show_solution_minimal",
@@ -6017,6 +6034,40 @@ export const handlers = {
       ],
     },
   });
+  },
+
+  ateam_switch_workspace: async ({ tenant }, sessionId) => {
+    // A master-key session switches by passing `tenant` on any tool; it has no person for this route to read.
+    if (isMasterMode(sessionId)) {
+      return { ok: false, message: switchSteps({ masterMode: true }) };
+    }
+    const wanted = typeof tenant === "string" ? tenant.trim() : "";
+    if (!wanted) {
+      const out = await get("/auth/workspaces", sessionId);
+      return {
+        ok: true,
+        current: out.current,
+        workspaces: out.workspaces,
+        message: "Workspaces you can switch to (current one marked). Call ateam_switch_workspace with tenant to switch.",
+      };
+    }
+    const out = await post("/auth/workspaces/switch", { tenant: wanted }, sessionId);
+    if (out.same) return { ok: true, tenant: out.tenant, message: `Already on workspace "${out.tenant}".` };
+    if (!out.api_key) {
+      return { ok: false, message: `The API did not return a key for "${wanted}". Nothing changed.` };
+    }
+    // The key goes straight into the sign-in path and is never returned.
+    // A key that names no environment keeps the API this session talks to (ateam_auth would otherwise fall back to the default).
+    const apiUrl = parseApiKey(out.api_key).env ? undefined : getBaseUrl(sessionId);
+    const signedIn = await handlers.ateam_auth({ api_key: out.api_key, tenant: out.tenant, url: apiUrl }, sessionId);
+    if (!signedIn.ok) return { ok: false, message: `Switch to "${wanted}" failed: ${signedIn.message}` };
+    return {
+      ok: true,
+      tenant: signedIn.tenant,
+      environment: signedIn.environment,
+      note: out.note,
+      message: `Switched to workspace "${signedIn.tenant}". ${signedIn.message}`,
+    };
   },
 
   ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId) => {
@@ -9367,7 +9418,7 @@ export async function handleToolCall(name, args, sessionId) {
   // it (94b9bc0), they went into the previous tenant's record, which a call
   // already in flight as that tenant still holds. isMasterMode implies an
   // explicit ateam_auth, so this does not get ahead of the auth gate below.
-  if (!PUBLIC_TOOLS.has(name) && isMasterMode(sessionId) && args?.tenant) {
+  if (!PUBLIC_TOOLS.has(name) && name !== "ateam_switch_workspace" && isMasterMode(sessionId) && args?.tenant) {
     switchTenant(sessionId, args.tenant);
   }
 
