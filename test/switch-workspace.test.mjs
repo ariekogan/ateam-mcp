@@ -5,10 +5,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { setSessionCredentials, getCredentials } from "../src/api.js";
+import { setSessionCredentials, getCredentials, getBaseUrl } from "../src/api.js";
 import { handleToolCall } from "../src/tools.js";
 
 const SID = "sess-switch";
+const MSID = "sess-switch-master";
 const KEY_A = "adas_tenanta_00000000000000000000000000000000";
 const KEY_B = "adas_tenantb_11111111111111111111111111111111";
 const seen = [];
@@ -62,4 +63,29 @@ test("a refused switch leaves the session where it was", async () => {
   const res = await handleToolCall("ateam_switch_workspace", { tenant: "other" }, SID);
   assert.ok(/NOT_YOUR_WORKSPACE|no/i.test(res.content[0].text));
   assert.equal(getCredentials(SID).tenant, "tenanta");
+});
+
+test("a master-key session is told to pass tenant on any tool, and is not moved by this one", async () => {
+  setSessionCredentials(MSID, { tenant: "tenanta", apiKey: null, apiUrl: origin, explicit: true, masterKey: "m" });
+  const res = await handleToolCall("ateam_switch_workspace", { tenant: "tenantb" }, MSID);
+  assert.ok(/master key/i.test(res.content[0].text));
+  assert.equal(getCredentials(MSID).tenant, "tenanta");
+});
+
+test("a returned key that names no environment keeps the session's API", async () => {
+  start();
+  const before = getBaseUrl(SID);
+  const LEGACY = "adas_tenantb_22222222222222222222222222222222";
+  const prev = api.listeners("request")[0];
+  api.removeAllListeners("request");
+  api.on("request", (req, res) => {
+    if (req.url.startsWith("/auth/workspaces/switch")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ ok: true, tenant: "tenantb", api_key: LEGACY }));
+    }
+    prev(req, res);
+  });
+  const out = JSON.parse((await handleToolCall("ateam_switch_workspace", { tenant: "tenantb" }, SID)).content[0].text);
+  assert.equal(out.ok, true, out.message);
+  assert.equal(getBaseUrl(SID), before);
 });

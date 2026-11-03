@@ -143,7 +143,7 @@ import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachme
 // Who a test job runs as: ONE pointer to the Builder's /spec, never a copy of its words.
 import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 // Signing in and switching workspace: ONE statement of the steps, rendered where it is read.
-import { connectSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
+import { connectSteps, switchSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId } from "./api.js";
@@ -6037,6 +6037,10 @@ export const handlers = {
   },
 
   ateam_switch_workspace: async ({ tenant }, sessionId) => {
+    // A master-key session switches by passing `tenant` on any tool; it has no person for this route to read.
+    if (isMasterMode(sessionId)) {
+      return { ok: false, message: switchSteps({ masterMode: true }) };
+    }
     const wanted = typeof tenant === "string" ? tenant.trim() : "";
     if (!wanted) {
       const out = await get("/auth/workspaces", sessionId);
@@ -6053,7 +6057,9 @@ export const handlers = {
       return { ok: false, message: `The API did not return a key for "${wanted}". Nothing changed.` };
     }
     // The key goes straight into the sign-in path and is never returned.
-    const signedIn = await handlers.ateam_auth({ api_key: out.api_key, tenant: out.tenant }, sessionId);
+    // A key that names no environment keeps the API this session talks to (ateam_auth would otherwise fall back to the default).
+    const apiUrl = parseApiKey(out.api_key).env ? undefined : getBaseUrl(sessionId);
+    const signedIn = await handlers.ateam_auth({ api_key: out.api_key, tenant: out.tenant, url: apiUrl }, sessionId);
     if (!signedIn.ok) return { ok: false, message: `Switch to "${wanted}" failed: ${signedIn.message}` };
     return {
       ok: true,
@@ -9412,7 +9418,7 @@ export async function handleToolCall(name, args, sessionId) {
   // it (94b9bc0), they went into the previous tenant's record, which a call
   // already in flight as that tenant still holds. isMasterMode implies an
   // explicit ateam_auth, so this does not get ahead of the auth gate below.
-  if (!PUBLIC_TOOLS.has(name) && isMasterMode(sessionId) && args?.tenant) {
+  if (!PUBLIC_TOOLS.has(name) && name !== "ateam_switch_workspace" && isMasterMode(sessionId) && args?.tenant) {
     switchTenant(sessionId, args.tenant);
   }
 
