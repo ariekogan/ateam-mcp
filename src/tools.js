@@ -1586,6 +1586,23 @@ export const tools = [
     },
   },
   {
+    name: "ateam_switch_workspace",
+    core: true,
+    description:
+      "Move this session to ANOTHER workspace of the same person, with no sign-out and no key to paste: the key this session is signed in with says which person it is, and the API lets that person switch to any workspace they own or administer. " +
+      "Call it with no `tenant` to list them (the current one is marked). Call it with `tenant: \"<workspace>\"` to switch: the API hands the other workspace's own key to this server, which signs the session in with it — the key never appears in the chat. Afterwards say which workspace you are on (ateam_bootstrap's `session` field names it) before changing anything. " +
+      "It is refused, with the reason, when: this environment has not turned it on (today the dev environment only; elsewhere sign in again with the other workspace's key), the key was not minted by a signed-in person, the key's own workspace has more than one owner/admin, or the person is not owner/admin of the target. Calls in the new workspace run as the person who minted THAT workspace's key.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: {
+          type: "string",
+          description: "The workspace to switch to. Leave it out to list the workspaces you can switch to.",
+        },
+      },
+    },
+  },
+  {
     name: "ateam_get_spec",
     core: true,
     description:
@@ -3859,7 +3876,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_github_status", "ateam_get_repository_binding", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
   ],
   additive: [
-    "ateam_auth",
+    "ateam_auth", "ateam_switch_workspace",
     // Starts (or brings back) the one workspace, and reports on it: no file of the solution changes.
     "ateam_workspace_open", "ateam_workspace_status",
     // Intent detection + planning only: Core plans the first step and executes
@@ -3947,7 +3964,7 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_workspace_open", "ateam_workspace_exec", "ateam_workspace_status", "ateam_workspace_save", "ateam_workspace_close",
   ],
   all: [
-    "ateam_bootstrap", "ateam_auth", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
+    "ateam_bootstrap", "ateam_auth", "ateam_switch_workspace", "ateam_get_spec", "ateam_get_workflows", "ateam_get_examples",
     "ateam_design_advisor", "ateam_spec_search",
     "ateam_validate_skill", "ateam_validate_solution",
     "ateam_list_solutions", "ateam_get_solution", "ateam_show_skill_minimal", "ateam_show_solution_minimal",
@@ -6017,6 +6034,34 @@ export const handlers = {
       ],
     },
   });
+  },
+
+  ateam_switch_workspace: async ({ tenant }, sessionId) => {
+    const wanted = typeof tenant === "string" ? tenant.trim() : "";
+    if (!wanted) {
+      const out = await get("/auth/workspaces", sessionId);
+      return {
+        ok: true,
+        current: out.current,
+        workspaces: out.workspaces,
+        message: "Workspaces you can switch to (current one marked). Call ateam_switch_workspace with tenant to switch.",
+      };
+    }
+    const out = await post("/auth/workspaces/switch", { tenant: wanted }, sessionId);
+    if (out.same) return { ok: true, tenant: out.tenant, message: `Already on workspace "${out.tenant}".` };
+    if (!out.api_key) {
+      return { ok: false, message: `The API did not return a key for "${wanted}". Nothing changed.` };
+    }
+    // The key goes straight into the sign-in path and is never returned.
+    const signedIn = await handlers.ateam_auth({ api_key: out.api_key, tenant: out.tenant }, sessionId);
+    if (!signedIn.ok) return { ok: false, message: `Switch to "${wanted}" failed: ${signedIn.message}` };
+    return {
+      ok: true,
+      tenant: signedIn.tenant,
+      environment: signedIn.environment,
+      note: out.note,
+      message: `Switched to workspace "${signedIn.tenant}". ${signedIn.message}`,
+    };
   },
 
   ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId) => {
