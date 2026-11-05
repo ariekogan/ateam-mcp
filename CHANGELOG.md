@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.121 — 2026-11-05
+
+### Personal sign-in (#84, #85)
+
+Approve once in the A-Team app with your own Google sign-in, then switch workspace by asking. A switch into a
+prod workspace asks first, and every answer starts with the workspace line. Apps with no browser connect with a
+sign-in code (RFC 8628). Off until SysAdmin → Agent sign-in is turned on; key sign-in works as before.
+
 ## 0.4.120 — 2026-10-28
 
 ### `ateam_get_spec` has an `ai-models` topic (#78)
