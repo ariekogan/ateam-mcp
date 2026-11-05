@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // An ateam_auth override is kept for a bearer only when the key was accepted,
 // and a new sign-in on the A-Team page drops it.
 //
@@ -50,8 +51,11 @@ test("a new sign-in on the A-Team page drops the bearer's override", async () =>
   // page issued is exchanged for the token (exactly what the SDK's /token does).
   const { providers: { prod: provider } } = mountOAuth(express(), KEY_ENVIRONMENTS);
   const client = { client_id: "ateam-public" };
-  provider.codes.set("code-1", { client, params: { codeChallenge: "c", redirectUri: "http://localhost/cb" }, apiKey: BEARER, expiresAt: Date.now() + 60_000 });
-  const tokens = await provider.exchangeAuthorizationCode(client, "code-1");
+  // PKCE is checked by the provider itself (skipLocalPkceValidation, for Core's personal sign-in codes).
+  const verifier = "v".repeat(43);
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  provider.codes.set("code-1", { client, params: { codeChallenge: challenge, redirectUri: "http://localhost/cb" }, apiKey: BEARER, expiresAt: Date.now() + 60_000 });
+  const tokens = await provider.exchangeAuthorizationCode(client, "code-1", verifier);
   assert.equal(tokens.access_token, BEARER);
   assert.equal(getAuthOverride(BEARER), null, "the new sign-in kept the workspace an earlier ateam_auth had moved this bearer to");
 });

@@ -16,6 +16,7 @@ import { timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 // Signing in and switching workspace: ONE statement of the steps (formatError renders them).
 import { connectSteps, switchSteps, notInThisWorkspace, KEY_PAGE_PATH } from "./signInSteps.js";
+import { peekGrantWorkspace } from "./grantAuth.js";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
@@ -185,8 +186,20 @@ export function presentsPlatformSecret(presented) {
  */
 function bearerOf(sessionId) {
   const owner = sessionOwners.get(sessionId);
-  return typeof owner === "string" && owner ? owner : null;
+  return typeof owner === "string" && owner && !owner.startsWith(GRANT_OWNER_PREFIX) ? owner : null;
 }
+
+/**
+ * A PERSONAL SIGN-IN SESSION (grantAuth.js) is owned by its GRANT, never by its access token: the token
+ * changes every 15 minutes (refresh), the person and their approval do not. So every session of one
+ * approval stays the person's across refreshes, and a request with another grant's token is refused
+ * (denySessionReuse). A grant owner is never a bearer (bearerOf): no ateam_auth override is ever kept
+ * for it, because the workspace of a grant session comes from Core, never from a pasted key.
+ */
+export const GRANT_OWNER_PREFIX = "grant:";
+export const grantOwner = (gid) => `${GRANT_OWNER_PREFIX}${gid}`;
+// sessionId → { gid, token, env }: the grant and its NEWEST access token, refreshed on every request.
+const sessionGrants = new Map();
 
 /**
  * THE ENVIRONMENTS A KEY MAY NAME. A CLOSED SET, deliberately.
@@ -671,14 +684,17 @@ export function sessionEnvironment(sessionId) {
  *   - audience: "platform" for a session owned by PLATFORM_PRINCIPAL (the A-Team
  *     app's builder, via ateam-proxy-mcp); else "stdio" when the call (or the
  *     server being built) is on stdio — callTransport, the transport's own
- *     owner; else "hosted". A null transport is NOT local (callTransport).
+ *     owner; "grant" for a personal sign-in session (bindSessionGrant); else "hosted". A null
+ *     transport is NOT local (callTransport).
  *   - signedIn: the gate's own test (isExplicitlyAuthenticated);
- *   - tenant, environment (sessionEnvironment), masterMode.
+ *   - tenant, environment (sessionEnvironment), masterMode;
+ *   - workspaceName: a grant session's workspace as Core names it (else null).
  * @param {string} sessionId
  * @param {{ transport?: string|null }} [opts] — for a caller outside a tool call (createServer).
  */
 export function signInContext(sessionId, { transport = callTransport() } = {}) {
   const audience = sessionOwners.get(sessionId) === PLATFORM_PRINCIPAL ? "platform"
+    : sessionGrants.has(sessionId) ? "grant"
     : transport === "stdio" ? "stdio"
     : "hosted";
   const signedIn = isExplicitlyAuthenticated(sessionId);
@@ -689,6 +705,9 @@ export function signInContext(sessionId, { transport = callTransport() } = {}) {
     tenant: record?.tenant || null,
     environment: signedIn ? sessionEnvironment(sessionId) : null,
     masterMode: !!record?.masterKey,
+    // The grant's workspace may have moved since this call started (another chat switched): name it only
+    // when it is still the workspace this call's record is on.
+    workspaceName: audience === "grant" && signedIn ? grantWorkspaceName(sessionGrants.get(sessionId).gid, record?.tenant) : null,
   };
 }
 
@@ -825,7 +844,33 @@ export function getSessionContext(sessionId) {
  */
 export function clearSession(sessionId) {
   sessionOwners.delete(sessionId);
+  sessionGrants.delete(sessionId);
   sessions.delete(sessionId);
+}
+
+function grantWorkspaceName(gid, tenant) {
+  const w = peekGrantWorkspace(gid);
+  return w && w.tenant === tenant ? w.name || null : null;
+}
+
+/** Bind a session to a personal sign-in grant. Called from seedCredentials on every request. */
+export function bindSessionGrant(sessionId, { gid, token, env }) {
+  if (!gid) throw new Error("bindSessionGrant: gid required");
+  const fresh = sessionOwners.get(sessionId) !== grantOwner(gid);
+  sessionOwners.set(sessionId, grantOwner(gid));
+  sessionGrants.set(sessionId, { gid, token, env: env || null });
+  if (fresh) console.log(`[Auth] Grant bound for session ${sessionId}`);
+}
+
+/** The session's grant ({ gid, token, env }) when it is a personal sign-in session, else null. */
+export function grantOfSession(sessionId) {
+  return sessionGrants.get(sessionId) || null;
+}
+
+/** Drop the session's workspace credentials and keep its grant (the person is still signed in). */
+export function dropSessionWorkspace(sessionId) {
+  sessions.delete(sessionId);
+  adoptRecord(sessionId, null);
 }
 
 // ── Session ownership ──────────────────────────────────────────────

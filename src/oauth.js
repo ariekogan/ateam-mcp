@@ -7,13 +7,17 @@
  * Uses the MCP SDK's built-in auth router and bearer middleware.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import { InvalidTokenError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidTokenError, InvalidClientMetadataError, InvalidGrantError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { parseApiKey, clearAuthOverride, mcpUrlForEnv, envForMcpHost, keyPageForEnv } from "./api.js";
 import { KEY_IS_THE_WORKSPACE, whereTheKeyIsAt } from "./signInSteps.js";
+import {
+  coreCall, CoreUnavailable, resolveToken, refusalText,
+  isGrantAccessToken, isGrantRefreshToken, isGrantCode,
+} from "./grantAuth.js";
 
 // ─── TTLs ─────────────────────────────────────────────────────────
 const AUTH_CODE_TTL = 5 * 60 * 1000;   // 5 minutes
@@ -144,8 +148,14 @@ class ATeamClientsStore {
 // code is redeemed only at the issuer that issued it. `keyPage` is the key page
 // its sign-in page may link (api.js keyPageForEnv), or null for none.
 class ATeamOAuthProvider {
-  constructor(keyPage) {
+  constructor(keyPage, environment = null) {
     this.keyPage = keyPage;
+    // The environment of the MCP host this provider serves. Personal sign-in is used only when this
+    // server's own Core answers for the same environment (grantAuth.js).
+    this.environment = environment;
+    // PKCE is checked where the code lives: Core for a personal sign-in code (atc_), here for a key
+    // page code (verifyPkce below). The SDK then hands the verifier to exchangeAuthorizationCode.
+    this.skipLocalPkceValidation = true;
     this._clientsStore = new ATeamClientsStore();
     this.codes = new Map();     // code -> { client, params, apiKey, expiresAt }
     this.pending = new Map();   // pendingId -> { client, params, expiresAt }
@@ -157,7 +167,11 @@ class ATeamOAuthProvider {
 
   /**
    * Called by the SDK's /authorize handler.
-   * Serves an HTML page where the user enters their API key.
+   *
+   * PERSONAL SIGN-IN FIRST: when this environment has it switched on (SysAdmin → Agent sign-in) and
+   * this server's Core is the environment the host names, the browser goes to the A-Team app's
+   * approval page (/connect?request=…), where the person signs in as themself and taps Approve.
+   * Otherwise, or when Core cannot be asked, the key page as before (now the "Advanced" way).
    */
   async authorize(client, params, res) {
     // The SDK has already matched redirect_uri against the client's record, and
@@ -168,6 +182,22 @@ class ATeamOAuthProvider {
     if (!requester) {
       res.status(400).json({ error: "invalid_request", error_description: "redirect_uri is not an allowed client redirect" });
       return;
+    }
+    if (params.codeChallenge && this.environment) {
+      try {
+        const out = await coreCall("open", {
+          client_id: client.client_id, redirect_uri: params.redirectUri, code_challenge: params.codeChallenge,
+          code_challenge_method: "S256", state: params.state, requester,
+          ip: res.req?.ip || null, ua: res.req?.headers?.["user-agent"] || null,
+        });
+        if (out.ok && out.env === this.environment && out.approve_url) {
+          res.redirect(302, out.approve_url);
+          return;
+        }
+      } catch (err) {
+        if (!(err instanceof CoreUnavailable)) throw err;
+        // No personal sign-in reachable here: the key page below.
+      }
     }
     const pendingId = randomUUID();
     this.pending.set(pendingId, {
@@ -185,12 +215,22 @@ class ATeamOAuthProvider {
     return entry.params.codeChallenge;
   }
 
-  async exchangeAuthorizationCode(client, authorizationCode) {
+  async exchangeAuthorizationCode(client, authorizationCode, codeVerifier, redirectUri) {
+    if (isGrantCode(authorizationCode)) {
+      // A personal sign-in code: Core checks PKCE, the client and the redirect, and burns it.
+      const out = await askCore("redeem", { code: authorizationCode, code_verifier: codeVerifier, client_id: client.client_id, redirect_uri: redirectUri });
+      if (!out.ok) throw new InvalidGrantError(refusalText(out));
+      return { access_token: out.access_token, refresh_token: out.refresh_token, token_type: "Bearer", expires_in: out.expires_in };
+    }
     const entry = this.codes.get(authorizationCode);
     if (!entry) throw new Error("Invalid authorization code");
 
     if (entry.client.client_id !== client.client_id) {
       throw new Error("Authorization code was not issued to this client");
+    }
+    // The SDK skips its own PKCE check for every code (skipLocalPkceValidation, for Core's); a key page code is checked here.
+    if (!verifyPkce(codeVerifier, entry.params.codeChallenge)) {
+      throw new InvalidGrantError("code_verifier does not match the challenge");
     }
     if (entry.expiresAt < Date.now()) {
       this.codes.delete(authorizationCode);
@@ -220,6 +260,11 @@ class ATeamOAuthProvider {
   }
 
   async exchangeRefreshToken(_client, refreshToken) {
+    if (isGrantRefreshToken(refreshToken)) {
+      const out = await askCore("refresh", { refresh_token: refreshToken });
+      if (!out.ok) throw new InvalidGrantError(refusalText(out));
+      return { access_token: out.access_token, refresh_token: out.refresh_token, token_type: "Bearer", expires_in: out.expires_in };
+    }
     // PHASE-1: the refresh token is rt_<raw tenant key>, so "refreshing" is
     // handing the key back. Phase 1 replaces it with Core's rotating refresh
     // (revocable, idle and absolute limits). Unchanged here on purpose.
@@ -236,6 +281,47 @@ class ATeamOAuthProvider {
   }
 }
 
+/** OAuth /revoke (RFC 7009): a personal sign-in token ends its grant at Core. A key cannot be revoked here. */
+ATeamOAuthProvider.prototype.revokeToken = async function revokeToken(_client, request) {
+  const t = request?.token;
+  if (isGrantAccessToken(t) || isGrantRefreshToken(t)) await askCore("revoke", { token: t });
+};
+
+/** Core's answer, or a 5xx-shaped OAuth error when Core cannot be asked (never a 4xx that signs the person out). */
+async function askCore(method, params) {
+  try {
+    return await coreCall(method, params);
+  } catch (err) {
+    if (err instanceof CoreUnavailable) throw new ServerError(err.message);
+    throw err;
+  }
+}
+
+/** RFC 7636 S256, constant time. */
+function verifyPkce(verifier, challenge) {
+  if (typeof verifier !== "string" || typeof challenge !== "string" || !verifier || !challenge) return false;
+  const computed = Buffer.from(createHash("sha256").update(verifier).digest("base64url"));
+  const want = Buffer.from(challenge);
+  return computed.length === want.length && timingSafeEqual(computed, want);
+}
+
+/**
+ * The verifier for one MCP host: a personal sign-in token is valid only on the host of the environment
+ * Core says it belongs to (one process may serve several hosts with one Core). A host this server cannot
+ * name accepts none. A key is checked the same on every host, as before.
+ */
+function verifierFor(environment) {
+  return {
+    async verifyAccessToken(token) {
+      const info = await accessTokens.verifyAccessToken(token);
+      if (info.extra?.grant && (!environment || info.extra.env !== environment)) {
+        throw new InvalidTokenError("This sign-in belongs to another A-Team environment's connector");
+      }
+      return info;
+    },
+  };
+}
+
 /**
  * The bearer gate's verifier, the same on every host: a token is valid when it
  * is a structurally valid adas_* API key. Returns AuthInfo in the MCP SDK's
@@ -243,6 +329,22 @@ class ATeamOAuthProvider {
  */
 const accessTokens = {
   async verifyAccessToken(token) {
+    if (isGrantAccessToken(token)) {
+      // A personal sign-in token: Core says who it is (cached 60 s). Core unreachable is a 5xx, never a 401.
+      let who;
+      try { who = await resolveToken(token); } catch (err) {
+        if (err instanceof CoreUnavailable) throw new ServerError(err.message);
+        throw err;
+      }
+      if (!who) throw new InvalidTokenError("Sign-in token is not valid any more");
+      return {
+        token,
+        clientId: "ateam-public",
+        scopes: ["mcp"],
+        expiresAt: who.exp,
+        extra: { grant: who.gid, userId: who.userId, email: who.email, env: who.env, lastTenant: who.lastTenant },
+      };
+    }
     const parsed = parseApiKey(token);
     if (!parsed.isValid) throw new InvalidTokenError("Invalid access token");
     return {
@@ -459,7 +561,7 @@ export function mountOAuth(app, environments) {
     const origin = mcpUrlForEnv(environment, environments);
     if (!origin) continue;
     const serverUrl = new URL(origin);
-    const provider = new ATeamOAuthProvider(keyPageForEnv(environment, environments));
+    const provider = new ATeamOAuthProvider(keyPageForEnv(environment, environments), environment);
     const router = express.Router();
 
     // SDK OAuth router (/.well-known/*, /authorize, /token, /register)
@@ -558,11 +660,11 @@ export function mountOAuth(app, environments) {
   // the 401 still refuses, and points nowhere.
   const bearerMiddlewareFor = (mountPath) => {
     const gates = new Map([...hosts].map(([environment, { serverUrl }]) => [environment, requireBearerAuth({
-      verifier: accessTokens,
+      verifier: verifierFor(environment),
       requiredScopes: [],
       resourceMetadataUrl: prmUrlFor(serverUrl, mountPath),
     })]));
-    const unnamed = requireBearerAuth({ verifier: accessTokens, requiredScopes: [] });
+    const unnamed = requireBearerAuth({ verifier: verifierFor(null), requiredScopes: [] });
     return (req, res, next) => (gates.get(envForMcpHost(req.hostname, environments)) || unnamed)(req, res, next);
   };
 

@@ -5,17 +5,26 @@
 > Agent API → Core. `src/` IS the published artifact (`files: ["src/"]`, no
 > build). These are in addition to the generic ADAS rules. Each is a hard blocker.
 
-## 1. OAuth access-token IS the raw `adas_<tenant>_<32hex>` API key (BLOCKING)
+## 1. Two kinds of OAuth token, told apart by prefix (BLOCKING)
 
-- The OAuth `access_token` must stay the literal `adas_` key (never opaque);
-  `refresh_token` = `rt_<apiKey>`; `scope: "claudeai"`; `expires_in: 3600`.
-- `parseApiKey()` (`src/api.js`) is the **single** structural definition of a
-  valid key/token; `verifyAccessToken` must stay structural-only (no server-side
-  token store — real authZ is delegated to Core via the forwarded key).
-- Making the token opaque, changing the key format/regex, or adding non-structural
-  validation without updating **every** call site (`src/oauth.js` ×3, `src/api.js`
-  ×3, `src/tools.js`) + the `/authorize` hint text ⇒ BLOCKING (breaks every OAuth'd
-  Claude.ai session + refresh).
+- **Personal sign-in (`atg_` access, `atr_` refresh, `atc_` code)** — `src/grantAuth.js`. The person
+  approves the client in the A-Team app as themself; Core issues the tokens and is the ONLY one that
+  knows them (sha256 hashes in Core's `agent_grants`). `verifyAccessToken` asks Core (`resolve`, cached
+  60 s by the token's hash). `atg_` lives 15 minutes, `atr_` rotates on every refresh. The workspace key
+  Core hands over (`workspaceKey`) stays in this server's memory per grant (`grantWorkspaces`) and in the
+  session record; it NEVER goes into a tool result, a token, a log line or the chat.
+  - A failed call to Core is a 5xx (`CoreUnavailable` → `ServerError`), NEVER a 401: a 401 makes the
+    client refresh, and a refresh that also fails makes the person approve again.
+  - Core's door is ateam-mcp's OWN value, `HMAC-SHA256(CORE_MCP_SECRET, "ateam-mcp/agent-auth/v1")`
+    (`deriveServiceSecret`, the same construction as Core's `utils/serviceDoors.js`; both sides pin the
+    vector in a test). Sending the raw `CORE_MCP_SECRET` to `cp.agent_auth_api` ⇒ BLOCKING.
+  - PKCE: the SDK's local check is off (`skipLocalPkceValidation`) because Core checks an `atc_` code;
+    a key page code is checked here (`verifyPkce`). Removing either check ⇒ BLOCKING.
+  - The grant path is used only on the MCP host whose environment is Core's own (`open` returns `env`).
+- **Key page sign-in (legacy, kept)** — the access token is the literal `adas_` key; `refresh_token` =
+  `rt_<apiKey>`. `parseApiKey()` (`src/api.js`) is the **single** structural definition of a valid key,
+  and `verifyAccessToken` stays structural-only for it (real authZ is Core's, via the forwarded key).
+  Changing the key format/regex without updating **every** call site ⇒ BLOCKING.
 - Because the code is exchanged for that raw key, `redirect_uri` decides who gets
   it. A redirect is accepted only if `redirectRequester` (`src/oauth.js`) allows
   it, at `/register` AND at `/authorize`: the exact Claude / ChatGPT / Cursor /
@@ -30,7 +39,9 @@
 
 - `mcp-session-id` is client-supplied and non-secret (logged/echoed). A bound
   session may be reused (POST/GET/DELETE) ONLY by the same owner — the same
-  validated bearer, or the platform principal for a platform session (§3):
+  validated bearer, the same GRANT for a personal sign-in (`grant:<gid>`, `grantOwner`:
+  its token rotates every 15 minutes, the grant does not), or the platform principal
+  for a platform session (§3):
   `denySessionReuse`/`sessionOwnershipOk` MUST run on **every** MCP verb. Any new
   route/method under `MCP_PATHS` must call it.
 - The server NEVER supplies a token to a request: no cache of `/token` responses,
@@ -56,7 +67,10 @@
 - `PLATFORM_PRINCIPAL` is a Symbol so no bearer can equal it, and it is NEVER an
   `authOverrides` key: an override is re-applied to every session of its key, so
   one shared platform credential holding one would carry a tenant into every proxy
-  session. Every override lookup goes through `bearerOf`, which answers null for it.
+  session. Every override lookup goes through `bearerOf`, which answers null for it,
+  and null for a grant owner too: a personal sign-in session takes no key (`ateam_auth`
+  refuses there) and its workspace comes only from Core (`ateam_switch_workspace`).
+  No override is ever keyed by an opaque `atg_` token or a grant. `test/personal-signin.test.mjs`.
 - Extend `test/session-isolation.test.mjs` when touching this path. It tests each
   layer on its own, on every verb, plus the idle sweep, and that a `/token`
   exchange does not authenticate a bearer-less request from the same IP. Regressing any of them ⇒ BLOCKING (cross-tenant auth bypass on the

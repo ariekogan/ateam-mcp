@@ -15,6 +15,10 @@
  *               ateam_auth does;
  *   - platform: the A-Team app's own builder (ateam-proxy-mcp). The platform
  *               signs each workspace in itself; its sessions get no steps.
+ *   - grant:    PERSONAL SIGN-IN (grantAuth.js). The person approved this client in the A-Team app,
+ *               once; the session has their workspaces, not a key. Switching is asking
+ *               (ateam_switch_workspace), and every switch into a PROD workspace is confirmed by the
+ *               user first (Arie, 2026-11-05). Every answer leads with WORKSPACE_LINE_RULE.
  *
  * A leaf module apart from publicTools.js and testRunsAs.js: api.js renders these in formatError,
  * and tools.js and oauth.js render them too.
@@ -88,9 +92,35 @@ const PLATFORM_CHOOSES =
   "This session belongs to the A-Team app's own builder: the platform signs a workspace in before that workspace's " +
   "calls, and the workspace is the one the user has open in the app. There are no sign-in steps to give here.";
 
+/** "Where am I", for a grant session: the first line of every answer (Arie, 2026-11-05). */
+export function workspaceLine({ tenant = null, workspaceName = null, environment = null } = {}) {
+  if (!tenant) return "Workspace: none chosen yet";
+  return `Workspace: ${workspaceName || tenant} (${environment || "environment unstated"})`;
+}
+
+export const WORKSPACE_LINE_RULE =
+  "START EVERY ANSWER to the user with the line \"Workspace: <name> (<environment>)\" exactly as the newest tool " +
+  "result gives it, so they always see where the work happens.";
+
+/** A PROD switch on a grant session waits for the user's yes (Arie, 2026-11-05). */
+export const PROD_SWITCH_CONFIRM =
+  "A PROD workspace is confirmed first: tell the user \"You are about to work in PROD workspace <name>. OK?\" and only " +
+  "after they say yes call ateam_switch_workspace again with the same tenant and confirm_prod: true.";
+
+const GRANT_SWITCH = [
+  "HOW TO SWITCH WORKSPACE — the user just asks; there is no sign-out and no key:",
+  "1. ateam_switch_workspace with no tenant lists the workspaces the user owns or administers (the current one is marked).",
+  "2. ateam_switch_workspace with tenant switches: every chat of this connection follows, and the next new chat starts there.",
+  `3. ${PROD_SWITCH_CONFIRM}`,
+].join("\n");
+
 /** How to sign in, for this way of being connected. */
 export function connectSteps({ audience = "hosted", environment = null } = {}) {
   if (audience === "platform") return PLATFORM_CHOOSES;
+  if (audience === "grant") {
+    return "The user is signed in as themself (personal sign-in), and no workspace is chosen yet. Nothing to sign in: " +
+      `pick one.\n${GRANT_SWITCH}`;
+  }
   if (audience === "stdio") {
     return [
       "HOW TO SIGN IN — this session is a local ateam-mcp process (stdio):",
@@ -120,6 +150,7 @@ export function connectSteps({ audience = "hosted", environment = null } = {}) {
 /** How to move this session to another workspace (or sign in again after a key is rotated). */
 export function switchSteps({ audience = "hosted", environment = null, masterMode = false } = {}) {
   if (audience === "platform") return PLATFORM_CHOOSES;
+  if (audience === "grant") return GRANT_SWITCH;
   if (masterMode) {
     return "HOW TO SWITCH WORKSPACE — this session holds a master key: pass `tenant: \"<workspace>\"` on a workspace " +
       "tool, and the session acts on that workspace from then on.";
@@ -163,6 +194,18 @@ export function notInThisWorkspace(ctx = {}) {
  */
 export function sessionOpening(ctx) {
   const { signedIn, tenant = null, environment = null, masterMode = false } = ctx;
+  if (ctx.audience === "grant") {
+    return [
+      signedIn
+        ? `${workspaceLine(ctx)}. The user signed in as themself (personal sign-in): every tool that reads, changes ` +
+          "or deploys acts on this workspace, with that workspace's key, which this server holds and never shows. " +
+          TEST_RUNS_AS_AT
+        : `${workspaceLine(ctx)}. ${NO_SIGN_IN_NEEDED} Every other tool is refused until a workspace is chosen.`,
+      WORKSPACE_LINE_RULE,
+      signedIn ? `If the user means another workspace:\n${GRANT_SWITCH}` : connectSteps(ctx),
+      NO_KEY_IN_CHAT,
+    ].join("\n\n");
+  }
   if (!signedIn) {
     return [
       `You are NOT signed in to any A-Team workspace. ${NO_SIGN_IN_NEEDED} Every other tool is refused until this ` +

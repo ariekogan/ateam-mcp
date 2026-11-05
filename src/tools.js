@@ -146,7 +146,10 @@ import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
 import { connectSteps, switchSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionOpening } from "./signInSteps.js";
 // The ONE list of tools that need no sign-in; every other tool is gated (handleToolCall).
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
-import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId } from "./api.js";
+import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId, grantOfSession } from "./api.js";
+// Personal sign-in: the grant's workspaces come from Core; the key stays in this server (grantAuth.js).
+import { listGrantWorkspaces, chooseWorkspace, peekGrantWorkspace, actsAs, refusalText, refusalCode } from "./grantAuth.js";
+import { workspaceLine, PROD_SWITCH_CONFIRM } from "./signInSteps.js";
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
   QUICK_WAIT_SECONDS, withheldCall, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, BACKGROUND_DEFAULT_MS, waitCommand, foregroundFromWait,
@@ -1590,6 +1593,7 @@ export const tools = [
     core: true,
     description:
       "Move this session to ANOTHER workspace of the same person, with no sign-out and no key to paste: the key this session is signed in with says which person it is, and the API lets that person switch to any workspace they own or administer. " +
+      "On a PERSONAL SIGN-IN (the user approved this connection in the A-Team app as themself) it works in every environment, and a switch into a PROD workspace needs the user's yes first (confirm_prod). " +
       "Call it with no `tenant` to list them (the current one is marked). Call it with `tenant: \"<workspace>\"` to switch: the API hands the other workspace's own key to this server, which signs the session in with it — the key never appears in the chat. Afterwards say which workspace you are on (ateam_bootstrap's `session` field names it) before changing anything. " +
       "It is refused, with the reason, when: this environment has not turned it on (today the dev environment only; elsewhere sign in again with the other workspace's key), the key was not minted by a signed-in person, the key's own workspace has more than one owner/admin, or the person is not owner/admin of the target. Calls in the new workspace run as the person who minted THAT workspace's key.",
     inputSchema: {
@@ -1598,6 +1602,10 @@ export const tools = [
         tenant: {
           type: "string",
           description: "The workspace to switch to. Leave it out to list the workspaces you can switch to.",
+        },
+        confirm_prod: {
+          type: "boolean",
+          description: "Personal sign-in only: true once the user said yes to working in this PROD workspace. Never set it without asking them first.",
         },
       },
     },
@@ -6036,7 +6044,9 @@ export const handlers = {
   });
   },
 
-  ateam_switch_workspace: async ({ tenant }, sessionId) => {
+  ateam_switch_workspace: async ({ tenant, confirm_prod }, sessionId) => {
+    const grant = grantOfSession(sessionId);
+    if (grant) return switchGrantWorkspace(grant, { tenant, confirm_prod }, sessionId);
     // A master-key session switches by passing `tenant` on any tool; it has no person for this route to read.
     if (isMasterMode(sessionId)) {
       return { ok: false, message: switchSteps({ masterMode: true }) };
@@ -6071,6 +6081,13 @@ export const handlers = {
   },
 
   ateam_auth: async ({ api_key, master_key, tenant, url }, sessionId) => {
+    // A personal sign-in session never takes a key: its workspaces come from the person's approval.
+    if (grantOfSession(sessionId)) {
+      return {
+        ok: false,
+        message: `This connection is signed in as the user themself, so it takes no key. ${switchSteps({ audience: "grant" })}\n\n${NO_KEY_IN_CHAT}`,
+      };
+    }
     // A platform session (ateam-proxy-mcp's one session for every tenant) is
     // signed in AFRESH: nothing the previous tenant left — url, master key,
     // actor, context — reaches this one. First, before anything below reads the
@@ -9309,10 +9326,70 @@ function summarizeSpecResult(result) {
  * first-time setup problem (2026-08-21: a Builder deploy logged out a live
  * session mid-work). So where a restart can be the cause, both are stated.
  */
+/**
+ * ateam_switch_workspace on a PERSONAL SIGN-IN session: list the person's workspaces, or switch.
+ *
+ * Core checks the person's owner/admin role NOW, at every switch, and hands the workspace's key to this
+ * server (grantAuth.js chooseWorkspace); the key goes into the session and never into this result. The
+ * switch is the grant's: every chat of this connection follows it at its next call (http.js
+ * seedGrantSession), and Core remembers it for the next new chat. A PROD workspace is switched to only with
+ * confirm_prod, which the agent sets after the user said yes (Arie, 2026-11-05).
+ */
+async function switchGrantWorkspace(grant, { tenant, confirm_prod }, sessionId) {
+  const wanted = typeof tenant === "string" ? tenant.trim().toLowerCase() : "";
+  const listed = await listGrantWorkspaces(grant.token);
+  if (!listed.ok) return { ok: false, code: refusalCode(listed), message: `Could not list your workspaces: ${refusalText(listed)}` };
+  const current = peekGrantWorkspace(grant.gid)?.tenant || null;
+  const env = listed.env || grant.env || null;
+  const workspaces = (listed.workspaces || []).map((w) => ({ tenant: w.tenant, name: w.name, role: w.role, environment: env, current: w.tenant === current }));
+  if (!wanted) {
+    return {
+      ok: true,
+      environment: env,
+      current,
+      workspaces,
+      message: workspaces.length
+        ? "Your workspaces (owner or admin; the current one is marked). Call ateam_switch_workspace with tenant to switch."
+        : "You are not owner or admin of any active workspace in this environment, so there is none to work in.",
+    };
+  }
+  if (wanted === current) return { ok: true, tenant: current, environment: env, message: `Already on workspace "${current}".` };
+  const target = workspaces.find((w) => w.tenant === wanted);
+  if (!target) {
+    return {
+      ok: false,
+      code: "NOT_YOUR_WORKSPACE",
+      message: `"${wanted}" is not a workspace you own or administer here. Nothing changed. Yours: ${workspaces.map((w) => w.tenant).join(", ") || "none"}.`,
+    };
+  }
+  if (env === "prod" && confirm_prod !== true) {
+    return {
+      ok: false,
+      code: "CONFIRM_PROD",
+      needs_confirmation: true,
+      tenant: target.tenant,
+      environment: env,
+      message: `"${target.name}" is a PROD workspace. Nothing changed yet. ${PROD_SWITCH_CONFIRM}`,
+    };
+  }
+  const chosen = await chooseWorkspace(grant.token, grant.gid, target.tenant);
+  if (!chosen.ok) return { ok: false, code: refusalCode(chosen), message: `Switch to "${target.tenant}" refused: ${refusalText(chosen)} Nothing changed.` };
+  const w = chosen.workspace;
+  setSessionCredentials(sessionId, { tenant: w.tenant, apiKey: w.apiKey, apiUrl: baseUrlForKeyEnv(w.apiKey) || undefined, explicit: true });
+  return {
+    ok: true,
+    tenant: w.tenant,
+    name: w.name,
+    environment: w.env,
+    message: `Switched to workspace "${w.name}" (${w.env}). ${actsAs(w)} Every chat of this connection is on it now.`,
+  };
+}
+
 export const WHY_NOT_SIGNED_IN = Object.freeze({
   // The platform signs each workspace in before its calls: a refusal here is a
   // call that arrived first, and it replays on stage auth_gate (below).
   platform: "The A-Team platform had not signed a workspace in on this session when the call arrived.",
+  grant: "The user is signed in as themself, but no workspace is chosen yet (they have more than one, or the last one is no longer theirs).",
   stdioEnvKey:
     "An ADAS_API_KEY is set in this process's environment, but it does not sign a session in and is never sent: " +
     "a key baked into a shared config could point work at the wrong workspace. This process signs in with ateam_auth (below).",
@@ -9331,6 +9408,7 @@ export const WHY_NOT_SIGNED_IN = Object.freeze({
 });
 
 function whyNotSignedIn(ctx) {
+  if (ctx.audience === "grant") return WHY_NOT_SIGNED_IN.grant;
   if (ctx.audience === "platform") return WHY_NOT_SIGNED_IN.platform;
   if (ctx.audience === "stdio") return envApiKeyPresent() ? WHY_NOT_SIGNED_IN.stdioEnvKey : WHY_NOT_SIGNED_IN.stdioRestart;
   return WHY_NOT_SIGNED_IN.hosted;
@@ -9440,7 +9518,9 @@ export async function handleToolCall(name, args, sessionId) {
   // wrong tenant. This was an allow-list of tenant tools (TENANT_TOOLS,
   // eb5e007) that fifteen later tools never joined, so they ran on that env
   // fallback — promote, rollback and repo writes among them.
-  if (!PUBLIC_TOOLS.has(name) && !isExplicitlyAuthenticated(sessionId)) {
+  // On a personal sign-in, choosing the workspace IS how the session gets one, so it passes the gate.
+  const choosing = name === "ateam_switch_workspace" && !!grantOfSession(sessionId);
+  if (!PUBLIC_TOOLS.has(name) && !choosing && !isExplicitlyAuthenticated(sessionId)) {
     const ctx = signInContext(sessionId);
     return {
       content: [{
@@ -9489,7 +9569,12 @@ export async function handleToolCall(name, args, sessionId) {
   }
 
   try {
-    const result = await handler(args, sessionId);
+    let result = await handler(args, sessionId);
+    // A personal sign-in session: every answer leads with where the work happens (Arie, 2026-11-05). Its
+    // first field, so content[0] stays the one JSON result every consumer parses.
+    if (grantOfSession(sessionId) && result && typeof result === "object" && !Array.isArray(result)) {
+      result = { workspace: workspaceLine(signInContext(sessionId)), ...result };
+    }
 
     // An actor id comes back here: ateam_conversation/ateam_test_skill return
     // the thread as actor_id, and the docs tell callers to pass it back for
