@@ -4,7 +4,7 @@
 //
 // What must hold:
 //   - ateam-mcp's value at Core's door is HMAC-SHA256(CORE_MCP_SECRET, "ateam-mcp/agent-auth/v1"), the
-//     same vector Core's own test pins (ai-dev-assistant apps/backend/security/tests/browserServiceSecret);
+//     same literal vector Core's own test pins (ai-dev-assistant apps/backend/security/tests/browserServiceSecret.test.js);
 //   - an atg_ token Core refuses is a 401; Core unreachable is a 5xx, never a 401 (a 401 signs out);
 //   - a session belongs to the GRANT, so a refreshed token keeps it and another grant's token is refused;
 //   - a new chat starts on the person's last workspace, or the only one; never a guess between several;
@@ -70,6 +70,8 @@ beforeEach(() => _setCoreFetch(null));
 test("the door value is HMAC-SHA256(master, 'ateam-mcp/agent-auth/v1') — the vector Core pins too", () => {
   const want = createHmac("sha256", "test-master").update("ateam-mcp/agent-auth/v1").digest("hex");
   assert.equal(deriveServiceSecret("test-master"), want);
+  // The literal Core pins too (ai-dev-assistant apps/backend/security/tests/browserServiceSecret.test.js).
+  assert.equal(want, "8cd66f544c1d3803d194d6b34093ffca44628f4385d6dbb85cffa6c5c184f1f9");
   assert.throws(() => deriveServiceSecret(""), /master secret is required/);
 });
 
