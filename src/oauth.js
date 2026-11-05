@@ -11,11 +11,12 @@ import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { authenticateClient } from "@modelcontextprotocol/sdk/server/auth/middleware/clientAuth.js";
 import { InvalidTokenError, InvalidClientMetadataError, InvalidGrantError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { parseApiKey, clearAuthOverride, mcpUrlForEnv, envForMcpHost, keyPageForEnv } from "./api.js";
 import { KEY_IS_THE_WORKSPACE, whereTheKeyIsAt } from "./signInSteps.js";
 import {
-  coreCall, CoreUnavailable, resolveToken, refusalText,
+  coreCall, CoreUnavailable, resolveToken, refusalText, refusalCode,
   isGrantAccessToken, isGrantRefreshToken, isGrantCode,
 } from "./grantAuth.js";
 
@@ -279,6 +280,56 @@ class ATeamOAuthProvider {
       expires_in: 3600,
     };
   }
+}
+
+export const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+// No redirect names a device client, so the approval page cannot name it from the allowlist; it says
+// what it is instead (never a client_name the caller chose).
+const DEVICE_REQUESTER = { name: "An app using a sign-in code", host: "device" };
+
+function mountDeviceFlow(router, provider, serverUrl) {
+  const form = [express.urlencoded({ extended: false }), express.json()];
+  const oauthError = (res, status, error, description) => res.status(status).json({ error, error_description: description });
+  const core = async (res, method, params) => {
+    try { return await coreCall(method, params); } catch (err) {
+      if (err instanceof CoreUnavailable) { oauthError(res, 503, "temporarily_unavailable", err.message); return null; }
+      throw err;
+    }
+  };
+
+  // The client is authenticated at both endpoints the same way as at the SDK's /token (RFC 8628 §3.1, §3.4):
+  // a registered client_id, and its secret when it was issued one.
+  const clientAuth = authenticateClient({ clientsStore: provider.clientsStore });
+
+  router.post("/device_authorization", ...form, clientAuth, async (req, res) => {
+    const out = await core(res, "deviceOpen", { client_id: req.client.client_id, requester: DEVICE_REQUESTER, ua: req.headers["user-agent"] || null });
+    if (!out) return;
+    if (!out.ok) return oauthError(res, 400, refusalCode(out) || "invalid_request", refusalText(out));
+    if (out.env !== provider.environment) return oauthError(res, 400, "unsupported_grant_type", "Sign-in codes are not offered on this connector");
+    res.set("Cache-Control", "no-store").json({
+      device_code: out.device_code, user_code: out.user_code,
+      verification_uri: out.verification_uri, verification_uri_complete: out.verification_uri_complete,
+      expires_in: out.expires_in, interval: out.interval,
+    });
+  });
+
+  router.post("/token", ...form, (req, res, next) => (req.body?.grant_type === DEVICE_GRANT ? clientAuth(req, res, next) : next("route")), async (req, res) => {
+    const out = await core(res, "devicePoll", { device_code: req.body.device_code, client_id: req.client.client_id });
+    if (!out) return;
+    if (!out.ok) return oauthError(res, 400, refusalCode(out) || "invalid_grant", refusalText(out));
+    res.set("Cache-Control", "no-store").json({ access_token: out.access_token, refresh_token: out.refresh_token, token_type: "Bearer", expires_in: out.expires_in });
+  });
+
+  // The authorization server metadata names the device endpoint (RFC 8628 §4), on top of the SDK's document.
+  router.get("/.well-known/oauth-authorization-server", (_req, res, next) => {
+    const send = res.json.bind(res);
+    res.json = (body) => send({
+      ...body,
+      device_authorization_endpoint: new URL("/device_authorization", serverUrl).href,
+      grant_types_supported: [...new Set([...(body?.grant_types_supported || []), DEVICE_GRANT])],
+    });
+    next();
+  });
 }
 
 /** OAuth /revoke (RFC 7009): a personal sign-in token ends its grant at Core. A key cannot be revoked here. */
@@ -563,6 +614,12 @@ export function mountOAuth(app, environments) {
     const serverUrl = new URL(origin);
     const provider = new ATeamOAuthProvider(keyPageForEnv(environment, environments), environment);
     const router = express.Router();
+
+    // ─── DEVICE CODE (RFC 8628) — personal sign-in for an app with no browser (a terminal) ───────
+    // Before the SDK router, which knows only authorization_code and refresh_token. Core holds every
+    // rule (services/agentAuth.js deviceOpen/devicePoll); this host only speaks the protocol, and only
+    // when its Core is the environment this host names.
+    mountDeviceFlow(router, provider, serverUrl);
 
     // SDK OAuth router (/.well-known/*, /authorize, /token, /register)
     // IMPORTANT: resourceServerUrl MUST match the connector URL that users configure
