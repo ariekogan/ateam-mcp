@@ -11,6 +11,7 @@ import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { authenticateClient } from "@modelcontextprotocol/sdk/server/auth/middleware/clientAuth.js";
 import { InvalidTokenError, InvalidClientMetadataError, InvalidGrantError, ServerError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { parseApiKey, clearAuthOverride, mcpUrlForEnv, envForMcpHost, keyPageForEnv } from "./api.js";
 import { KEY_IS_THE_WORKSPACE, whereTheKeyIsAt } from "./signInSteps.js";
@@ -296,10 +297,12 @@ function mountDeviceFlow(router, provider, serverUrl) {
     }
   };
 
-  router.post("/device_authorization", ...form, async (req, res) => {
-    const clientId = req.body?.client_id;
-    if (typeof clientId !== "string" || !clientId) return oauthError(res, 400, "invalid_request", "client_id is required");
-    const out = await core(res, "deviceOpen", { client_id: clientId, requester: DEVICE_REQUESTER, ua: req.headers["user-agent"] || null });
+  // The client is authenticated at both endpoints the same way as at the SDK's /token (RFC 8628 §3.1, §3.4):
+  // a registered client_id, and its secret when it was issued one.
+  const clientAuth = authenticateClient({ clientsStore: provider.clientsStore });
+
+  router.post("/device_authorization", ...form, clientAuth, async (req, res) => {
+    const out = await core(res, "deviceOpen", { client_id: req.client.client_id, requester: DEVICE_REQUESTER, ua: req.headers["user-agent"] || null });
     if (!out) return;
     if (!out.ok) return oauthError(res, 400, refusalCode(out) || "invalid_request", refusalText(out));
     if (out.env !== provider.environment) return oauthError(res, 400, "unsupported_grant_type", "Sign-in codes are not offered on this connector");
@@ -310,9 +313,8 @@ function mountDeviceFlow(router, provider, serverUrl) {
     });
   });
 
-  router.post("/token", ...form, async (req, res, next) => {
-    if (req.body?.grant_type !== DEVICE_GRANT) return next();
-    const out = await core(res, "devicePoll", { device_code: req.body.device_code, client_id: req.body.client_id });
+  router.post("/token", ...form, (req, res, next) => (req.body?.grant_type === DEVICE_GRANT ? clientAuth(req, res, next) : next("route")), async (req, res) => {
+    const out = await core(res, "devicePoll", { device_code: req.body.device_code, client_id: req.client.client_id });
     if (!out) return;
     if (!out.ok) return oauthError(res, 400, refusalCode(out) || "invalid_grant", refusalText(out));
     res.set("Cache-Control", "no-store").json({ access_token: out.access_token, refresh_token: out.refresh_token, token_type: "Bearer", expires_in: out.expires_in });

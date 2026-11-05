@@ -70,3 +70,22 @@ test("another environment's Core is refused, and a Core outage is a 503, not a s
   core = { down: true };
   assert.equal((await post("/token", { grant_type: DEVICE_GRANT, device_code: "atd_x", client_id: "c-term" })).status, 503);
 });
+
+test("a client that was issued a secret must present it at both device endpoints (RFC 8628 §3.1, §3.4)", async () => {
+  const reg = await new Promise((resolve, reject) => {
+    const body = JSON.stringify({ client_name: "term", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"], token_endpoint_auth_method: "client_secret_post" });
+    const r = http.request({ host: "127.0.0.1", port: PORT, method: "POST", path: "/register", headers: { Host: "mcp.ateam-ai.com", "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } }, (res) => {
+      let t = ""; res.on("data", (c) => (t += c)); res.on("end", () => resolve(JSON.parse(t)));
+    });
+    r.on("error", reject); r.end(body);
+  });
+  assert.ok(reg.client_secret, JSON.stringify(reg));
+  core = { deviceOpen: () => OPENED, devicePoll: () => ({ ok: true, access_token: "atg_a", refresh_token: "atr_r", expires_in: 900 }) };
+  const before = calls.length;
+  assert.equal((await post("/device_authorization", { client_id: reg.client_id })).status, 400);
+  assert.equal((await post("/device_authorization", { client_id: reg.client_id, client_secret: "wrong" })).status, 400);
+  assert.equal((await post("/token", { grant_type: DEVICE_GRANT, device_code: "atd_x", client_id: reg.client_id })).status, 400);
+  assert.equal(calls.length, before, "Core is never asked for an unauthenticated client");
+  assert.equal((await post("/device_authorization", { client_id: reg.client_id, client_secret: reg.client_secret })).status, 200);
+  assert.equal((await post("/token", { grant_type: DEVICE_GRANT, device_code: "atd_x", client_id: reg.client_id, client_secret: reg.client_secret })).status, 200);
+});
