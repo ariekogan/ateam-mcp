@@ -393,7 +393,7 @@ const accessTokens = {
         clientId: "ateam-public",
         scopes: ["mcp"],
         expiresAt: who.exp,
-        extra: { grant: who.gid, userId: who.userId, email: who.email, env: who.env, lastTenant: who.lastTenant },
+        extra: { grant: who.gid, userId: who.userId, email: who.email, env: who.env, lastTenant: who.lastTenant, link: who.link || null, remote: who.remote || null },
       };
     }
     const parsed = parseApiKey(token);

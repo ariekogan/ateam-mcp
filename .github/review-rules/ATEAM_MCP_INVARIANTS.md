@@ -21,6 +21,22 @@
   - PKCE: the SDK's local check is off (`skipLocalPkceValidation`) because Core checks an `atc_` code;
     a key page code is checked here (`verifyPkce`). Removing either check ⇒ BLOCKING.
   - The grant path is used only on the MCP host whose environment is Core's own (`open` returns `env`).
+  - **One connector for prod and dev** (`src/envLink.js`, slice 8). A PRODUCTION grant may reach the
+    person's DEV workspaces when production Core offers it (`resolve` → `link`, a SysAdmin switch). This
+    server then is a client of A-Team's DEV connector: it gets a DEV grant by the device code there (the
+    person approves on DEV) and passes the person's calls on with it. Rules:
+    - The DEV address is this server's own (`mcpUrlForEnv("dev", KEY_ENVIRONMENTS)`), never a setting or
+      anything a caller or Core says; only a grant whose `env` is `prod` gets a link ⇒ else BLOCKING.
+    - No `device_code`, DEV `atg_`/`atr_` or key ever goes into a tool result, a log line or the chat
+      (the user code and approval link are for the person and may). DEV refresh tokens are saved on the
+      prod grant via Core `linkSet` (sealed there), over the token they replaced (`previous_refresh_token`).
+    - NEVER SILENTLY INTO PROD. While the grant's active workspace is a DEV one (`remote`), every call is
+      passed on or refused with the reason; none runs here. `remote` is saved on the grant BEFORE DEV is
+      asked to switch. Only the person's own switch sends `leave_remote` to `workspaceKey`; an automatic
+      start never does (Core refuses it while remote). Any path that runs a call in a PROD workspace while
+      `remote` is set, or that clears `remote` without the person's confirmed switch ⇒ BLOCKING.
+    - DEV must be approved by the same person (email on both sides) or the link is dropped.
+    - Linking starts only when the agent asks for DEV (`environment: "dev"`).
 - **Key page sign-in (legacy, kept)** — the access token is the literal `adas_` key; `refresh_token` =
   `rt_<apiKey>`. `parseApiKey()` (`src/api.js`) is the **single** structural definition of a valid key,
   and `verifyAccessToken` stays structural-only for it (real authZ is Core's, via the forwarded key).
@@ -125,6 +141,11 @@
   be in `STAMP_WHERE_TOOLS` and return an object (for the `_where` stamp).
 
 ## 5. Tenant-scoped tools: explicit-auth gated, never default the tenant (BLOCKING)
+
+- ONE CHECK RUNS BEFORE THE GATE: a personal sign-in whose active workspace is a DEV one (`remoteOf`) has
+  every call but `ateam_switch_workspace` / `ateam_auth` passed on to the DEV connector
+  (`forwardToolCall`), where the DEV connector's own gate applies. It never falls through to this gate
+  with a PROD workspace (§1, "One connector for prod and dev").
 
 - The auth gate DENIES BY DEFAULT: every tool requires an EXPLICIT sign-in
   (`ateam_auth` or a bearer — `isExplicitlyAuthenticated`) unless it is in
