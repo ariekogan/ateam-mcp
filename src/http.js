@@ -36,9 +36,11 @@ import {
   startSessionSweeper, getSessionStats, sweepStaleSessions,
   bindSessionBearer, bindSessionPlatform, getAuthOverride, getSessionOwner, sessionOwnershipOk,
   presentsPlatformSecret, PLATFORM_PRINCIPAL, getBaseUrl,
+  grantOwner,
   hostEnvironments, envForMcpHost, appUrlForEnv, keyPageForEnv,
 } from "./api.js";
 import { mountOAuth } from "./oauth.js";
+import { seedGrantSession } from "./grantSession.js";
 import { connectGithubPage } from "./pages.js";
 import { whereTheKeyIsAt } from "./signInSteps.js";
 
@@ -354,7 +356,10 @@ export function startHttpServer(port = 3100) {
   // A platform session (x-adas-token) is bound to PLATFORM_PRINCIPAL the same
   // way, so the same comparison keeps it apart from bearers in BOTH directions.
   const denySessionReuse = (req, res, sessionId) => {
-    const presented = req.platformPrincipal ? PLATFORM_PRINCIPAL : req.auth?.token;
+    // A personal sign-in is presented as its GRANT (api.js grantOwner): its token rotates every 15 minutes.
+    const presented = req.platformPrincipal ? PLATFORM_PRINCIPAL
+      : req.auth?.extra?.grant ? grantOwner(req.auth.extra.grant)
+      : req.auth?.token;
     if (sessionId && !sessionOwnershipOk(getSessionOwner(sessionId), presented)) {
       console.warn(`[Auth] DENY session reuse: owner mismatch for session ${sessionId} (presented=${req.platformPrincipal ? "platform" : req.auth?.token ? "other-bearer" : "none"})`);
       res.status(401).json({
@@ -576,6 +581,7 @@ async function seedCredentials(req, sessionId) {
   }
   const token = req.auth?.token;
   if (!token) return;
+  if (req.auth?.extra?.grant) return seedGrantSession(req, sessionId);
 
   // Track bearer → session (persistent actor identity)
   bindSessionBearer(sessionId, token);
@@ -646,3 +652,4 @@ async function seedCredentials(req, sessionId) {
     setSessionCredentials(sessionId, { tenant: null, apiKey: token, apiUrl, explicit: true });
   }
 }
+
