@@ -125,14 +125,21 @@ export async function activeWorkspace(token, gid) {
   return w;
 }
 
-/** Make `tenant` the grant's active workspace: Core checks the person NOW and hands its key to this server. */
-export async function chooseWorkspace(token, gid, tenant) {
-  const out = await coreCall("workspaceKey", { access_token: token, tenant });
+/**
+ * Make `tenant` the grant's active workspace: Core checks the person NOW and hands its key to this server.
+ * `leaveRemote`: the person's own switch, which may leave a DEV workspace (envLink.js); an automatic start never sends
+ * it, so Core refuses it while a DEV workspace is active.
+ */
+export async function chooseWorkspace(token, gid, tenant, { leaveRemote = false } = {}) {
+  const out = await coreCall("workspaceKey", { access_token: token, tenant, ...(leaveRemote && { leave_remote: true }) });
   if (!out.ok) return out;
   const w = { tenant: out.tenant, name: out.name || out.tenant, env: out.env, apiKey: out.api_key, keyMintedBy: out.key_minted_by || null, person: out.person || null, checkedAt: Date.now() };
   grantWorkspaces.set(gid, w);
   return { ok: true, workspace: w };
 }
+
+/** Forget the cached answer for this token, so the next request reads the grant as a switch just left it. */
+export function forgetResolve(token) { resolveCache.delete(sha(token)); }
 
 /** The grant's active workspace as last checked, with no call to Core (for labels only, never for a decision). */
 export function peekGrantWorkspace(gid) { return grantWorkspaces.get(gid) || null; }

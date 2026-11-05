@@ -17,6 +17,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 // Signing in and switching workspace: ONE statement of the steps (formatError renders them).
 import { connectSteps, switchSteps, notInThisWorkspace, KEY_PAGE_PATH } from "./signInSteps.js";
 import { peekGrantWorkspace } from "./grantAuth.js";
+import { dropPeer, remoteOf } from "./envLink.js";
 
 const BASE_URL = process.env.ADAS_API_URL || "https://api.ateam-ai.com";
 // CORE_URL removed — all requests now route through BASE_URL (skill-validator)
@@ -697,6 +698,10 @@ export function signInContext(sessionId, { transport = callTransport() } = {}) {
     : sessionGrants.has(sessionId) ? "grant"
     : transport === "stdio" ? "stdio"
     : "hosted";
+  // A personal sign-in working in a DEV workspace through the DEV connector (envLink.js): it holds no workspace here,
+  // and every call of it is passed on. Named as DEV's last answer named it (a label, never a decision).
+  const remote = audience === "grant" ? remoteOf(sessionGrants.get(sessionId).gid) : null;
+  if (remote) return { audience, signedIn: true, tenant: remote.tenant, environment: "dev", masterMode: false, workspaceName: remote.name || null, remote: true };
   const signedIn = isExplicitlyAuthenticated(sessionId);
   const record = signedIn ? sessionRecord(sessionId) : null;
   return {
@@ -846,6 +851,7 @@ export function clearSession(sessionId) {
   sessionOwners.delete(sessionId);
   sessionGrants.delete(sessionId);
   sessions.delete(sessionId);
+  dropPeer(sessionId); // its client at the DEV connector, if it had one (envLink.js)
 }
 
 function grantWorkspaceName(gid, tenant) {
@@ -854,15 +860,15 @@ function grantWorkspaceName(gid, tenant) {
 }
 
 /** Bind a session to a personal sign-in grant. Called from seedCredentials on every request. */
-export function bindSessionGrant(sessionId, { gid, token, env }) {
+export function bindSessionGrant(sessionId, { gid, token, env, email = null }) {
   if (!gid) throw new Error("bindSessionGrant: gid required");
   const fresh = sessionOwners.get(sessionId) !== grantOwner(gid);
   sessionOwners.set(sessionId, grantOwner(gid));
-  sessionGrants.set(sessionId, { gid, token, env: env || null });
+  sessionGrants.set(sessionId, { gid, token, env: env || null, email: email || null });
   if (fresh) console.log(`[Auth] Grant bound for session ${sessionId}`);
 }
 
-/** The session's grant ({ gid, token, env }) when it is a personal sign-in session, else null. */
+/** The session's grant ({ gid, token, env, email }) when it is a personal sign-in session, else null. */
 export function grantOfSession(sessionId) {
   return sessionGrants.get(sessionId) || null;
 }

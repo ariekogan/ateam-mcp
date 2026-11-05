@@ -2,8 +2,9 @@
  * PERSONAL SIGN-IN — the session side (http.js seedCredentials calls it on every request of a grant).
  * grantAuth.js talks to Core; this file puts the grant's workspace into the session (api.js).
  */
-import { bindSessionGrant, dropSessionWorkspace, getCredentials, setSessionCredentials, baseUrlForKeyEnv } from "./api.js";
+import { bindSessionGrant, dropSessionWorkspace, getCredentials, setSessionCredentials, baseUrlForKeyEnv, mcpUrlForEnv, KEY_ENVIRONMENTS } from "./api.js";
 import { activeWorkspace, chooseWorkspace, listGrantWorkspaces } from "./grantAuth.js";
+import { noteGrant, remoteOf } from "./envLink.js";
 /**
  * A PERSONAL SIGN-IN SESSION (grantAuth.js): bind the grant, then put the grant's active workspace in.
  *
@@ -15,11 +16,21 @@ import { activeWorkspace, chooseWorkspace, listGrantWorkspaces } from "./grantAu
  * are no longer owner or admin there, the key is dropped from every session of the grant.
  *
  * A Core outage throws CoreUnavailable; it reaches the client as a 5xx, never as a sign-out.
+ *
+ * ONE CONNECTOR FOR PROD AND DEV (envLink.js): while the grant's active workspace is a DEV one, the session holds no
+ * PROD workspace at all; its calls are passed on to the DEV connector. It never starts on a PROD workspace then, not
+ * even the person's only one: leaving DEV is the person's own switch.
  */
 export async function seedGrantSession(req, sessionId) {
   const { token, extra } = req.auth;
   const gid = extra.grant;
-  bindSessionGrant(sessionId, { gid, token, env: extra.env });
+  bindSessionGrant(sessionId, { gid, token, env: extra.env, email: extra.email });
+  // The DEV connector is A-Team's own (this server's table), never an address a setting or a caller names.
+  noteGrant(gid, extra, { devMcpUrl: mcpUrlForEnv("dev", KEY_ENVIRONMENTS) });
+  if (remoteOf(gid)) {
+    dropSessionWorkspace(sessionId);
+    return;
+  }
   let w = await activeWorkspace(token, gid);
   if (w?.dropped) {
     console.warn(`[Auth] Grant session ${sessionId}: no longer allowed in "${w.tenant}"; its key is dropped.`);

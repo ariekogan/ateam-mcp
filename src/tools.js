@@ -11,7 +11,7 @@
 import {
   get, post, patch, del,
   setSessionCredentials, isExplicitlyAuthenticated,
-  getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext,
+  getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext, dropSessionWorkspace,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
   servedBy, KEY_ENVIRONMENTS, signInContext, sessionEnvironment, beginSignIn, shownBase, envApiKeyPresent,
 } from "./api.js";
@@ -148,8 +148,13 @@ import { connectSteps, switchSteps, NO_KEY_IN_CHAT, notInThisWorkspace, sessionO
 import { PUBLIC_TOOLS, NO_SIGN_IN_NEEDED } from "./publicTools.js";
 import { isTimeoutError, jsonBodyOf, jsonVerdictOf, callTransport, formatError, personRefused, getWorkspaceId, setWorkspaceId, grantOfSession } from "./api.js";
 // Personal sign-in: the grant's workspaces come from Core; the key stays in this server (grantAuth.js).
-import { listGrantWorkspaces, chooseWorkspace, peekGrantWorkspace, actsAs, refusalText, refusalCode } from "./grantAuth.js";
+import { listGrantWorkspaces, chooseWorkspace, peekGrantWorkspace, actsAs, refusalText, refusalCode, forgetResolve } from "./grantAuth.js";
 import { workspaceLine, PROD_SWITCH_CONFIRM } from "./signInSteps.js";
+import {
+  LOCAL_WHILE_REMOTE, remoteOf, offerOf, setRemote, leftRemote, ensureLink, approveDevResult, forwardToolCall, peerJson,
+  personOf, refuseOtherPerson,
+} from "./envLink.js";
+
 import {
   WORKSPACE_TOOL_NAMES, WORKSPACE_WITHHELD, WORKSPACE_DESCRIPTIONS, WORKSPACE_ID_PROP,
   QUICK_WAIT_SECONDS, withheldCall, forbiddenArgIn, workspaceMemoryAfter, shapeWorkspaceResult, workspaceFailure, execWaitsInBackground, BACKGROUND_DEFAULT_MS, waitCommand, foregroundFromWait,
@@ -1592,10 +1597,11 @@ export const tools = [
     name: "ateam_switch_workspace",
     core: true,
     description:
-      "Move this session to ANOTHER workspace of the same person, with no sign-out and no key to paste: the key this session is signed in with says which person it is, and the API lets that person switch to any workspace they own or administer. " +
-      "On a PERSONAL SIGN-IN (the user approved this connection in the A-Team app as themself) it works in every environment, and a switch into a PROD workspace needs the user's yes first (confirm_prod). " +
-      "Call it with no `tenant` to list them (the current one is marked). Call it with `tenant: \"<workspace>\"` to switch: the API hands the other workspace's own key to this server, which signs the session in with it — the key never appears in the chat. Afterwards say which workspace you are on (ateam_bootstrap's `session` field names it) before changing anything. " +
-      "It is refused, with the reason, when: this environment has not turned it on (today the dev environment only; elsewhere sign in again with the other workspace's key), the key was not minted by a signed-in person, the key's own workspace has more than one owner/admin, or the person is not owner/admin of the target. Calls in the new workspace run as the person who minted THAT workspace's key.",
+      "Move this session to ANOTHER workspace of the same person, with no sign-out and no key to paste. " +
+      "Call it with no `tenant` to list them (the current one is marked), with `tenant` to switch; the workspace's key goes to this server, never into the chat. Afterwards say which workspace you are on before changing anything. " +
+      "PERSONAL SIGN-IN (the user approved this connection in the A-Team app): works in every environment; a switch into a PROD workspace needs the user's yes first (confirm_prod). " +
+      "The production connector can also reach the user's DEV workspaces when its SysAdmin turned that on: the list shows both, each with its environment; the first time, pass environment \"dev\" and the answer asks the user to approve once on DEV (a link they open), then call again. " +
+      "With a workspace KEY instead, it is refused, with the reason, outside the dev environment, when the key was not minted by a signed-in person, when its workspace has more than one owner/admin, or when the person is not owner/admin of the target; calls then run as the person who minted that workspace's key.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1606,6 +1612,11 @@ export const tools = [
         confirm_prod: {
           type: "boolean",
           description: "Personal sign-in only: true once the user said yes to working in this PROD workspace. Never set it without asking them first.",
+        },
+        environment: {
+          type: "string",
+          enum: ["prod", "dev"],
+          description: "Personal sign-in only: which environment the workspace is in, when the same name exists in both (or to list only one). Leave it out otherwise.",
         },
       },
     },
@@ -6044,9 +6055,9 @@ export const handlers = {
   });
   },
 
-  ateam_switch_workspace: async ({ tenant, confirm_prod }, sessionId) => {
+  ateam_switch_workspace: async ({ tenant, confirm_prod, environment }, sessionId) => {
     const grant = grantOfSession(sessionId);
-    if (grant) return switchGrantWorkspace(grant, { tenant, confirm_prod }, sessionId);
+    if (grant) return switchGrantWorkspace(grant, { tenant, confirm_prod, environment }, sessionId);
     // A master-key session switches by passing `tenant` on any tool; it has no person for this route to read.
     if (isMasterMode(sessionId)) {
       return { ok: false, message: switchSteps({ masterMode: true }) };
@@ -9334,46 +9345,85 @@ function summarizeSpecResult(result) {
  * switch is the grant's: every chat of this connection follows it at its next call (http.js
  * seedGrantSession), and Core remembers it for the next new chat. A PROD workspace is switched to only with
  * confirm_prod, which the agent sets after the user said yes (Arie, 2026-11-05).
+ *
+ * ONE CONNECTOR FOR PROD AND DEV (envLink.js): on the production connector, with its SysAdmin switch on, the list also
+ * holds the person's DEV workspaces, and a DEV workspace is switched to through the DEV connector. Linking DEV (one
+ * approval there) starts only when asked for DEV by name (environment "dev"), so a mistyped name never opens a DEV
+ * request.
  */
-async function switchGrantWorkspace(grant, { tenant, confirm_prod }, sessionId) {
+async function switchGrantWorkspace(grant, { tenant, confirm_prod, environment }, sessionId) {
   const wanted = typeof tenant === "string" ? tenant.trim().toLowerCase() : "";
+  const wantEnv = environment === "dev" || environment === "prod" ? environment : null;
+  const offer = offerOf(grant.gid);
+  const remote = remoteOf(grant.gid);
+
+  if (wantEnv === "dev") return switchToDev(grant, { wanted, offer, remote, start: true }, sessionId);
+
   const listed = await listGrantWorkspaces(grant.token);
   if (!listed.ok) return { ok: false, code: refusalCode(listed), message: `Could not list your workspaces: ${refusalText(listed)}` };
-  const current = peekGrantWorkspace(grant.gid)?.tenant || null;
+  const current = remote ? null : peekGrantWorkspace(grant.gid)?.tenant || null;
   const env = listed.env || grant.env || null;
   const workspaces = (listed.workspaces || []).map((w) => ({ tenant: w.tenant, name: w.name, role: w.role, environment: env, current: w.tenant === current }));
+  // DEV's own list, when DEV is linked (never starts a link): for the full list, and to catch a name in both.
+  const dev = offer && wantEnv !== "prod" && offer.linked ? await devList(grant, sessionId) : null;
+
   if (!wanted) {
-    return {
+    const out = {
       ok: true,
       environment: env,
-      current,
+      // Who is signed in here: the production connector compares it with DEV's (envLink.js, the same person).
+      ...(grant.email && { signed_in_as: { email: grant.email } }),
       workspaces,
       message: workspaces.length
         ? "Your workspaces (owner or admin; the current one is marked). Call ateam_switch_workspace with tenant to switch."
         : "You are not owner or admin of any active workspace in this environment, so there is none to work in.",
     };
+    if (dev?.workspaces) {
+      out.workspaces = [...workspaces, ...dev.workspaces];
+      out.message = "Your workspaces in PROD and DEV (owner or admin; the current one is marked). Call ateam_switch_workspace with tenant to switch, and environment when a name is in both.";
+    } else if (offer && wantEnv !== "prod") {
+      out.dev = dev?.note || { linked: false, how: DEV_HOW };
+    }
+    return out;
   }
-  if (wanted === current) return { ok: true, tenant: current, environment: env, message: `Already on workspace "${current}".` };
+
   const target = workspaces.find((w) => w.tenant === wanted);
+  const inDev = dev?.workspaces?.some((w) => w.tenant === wanted);
+  if (target && inDev && wantEnv !== "prod") {
+    return {
+      ok: false,
+      code: "WHICH_ENVIRONMENT",
+      tenant: wanted,
+      message: `"${wanted}" exists in PROD and in DEV. Nothing changed. Ask the user which one, then call ateam_switch_workspace again with environment "prod" or "dev".`,
+    };
+  }
   if (!target) {
+    if (inDev) return switchToDev(grant, { wanted, offer, remote, start: false }, sessionId);
     return {
       ok: false,
       code: "NOT_YOUR_WORKSPACE",
-      message: `"${wanted}" is not a workspace you own or administer here. Nothing changed. Yours: ${workspaces.map((w) => w.tenant).join(", ") || "none"}.`,
+      message: `"${wanted}" is not a workspace you own or administer here. Nothing changed. Yours: ${workspaces.map((w) => w.tenant).join(", ") || "none"}.` +
+        (offer && !offer.linked ? ` ${DEV_HOW}` : dev?.note?.error ? ` (Your DEV workspaces could not be checked: ${dev.note.error})` : ""),
     };
   }
+  if (!remote && wanted === current) return { ok: true, tenant: current, environment: env, message: `Already on workspace "${current}".` };
   if (env === "prod" && confirm_prod !== true) {
+    const unchecked = offer?.linked && dev?.note?.error ? ` (Whether DEV also has a workspace named "${wanted}" could not be checked just now: ${dev.note.error}.)` : "";
     return {
       ok: false,
       code: "CONFIRM_PROD",
       needs_confirmation: true,
       tenant: target.tenant,
       environment: env,
-      message: `"${target.name}" is a PROD workspace. Nothing changed yet. ${PROD_SWITCH_CONFIRM}`,
+      message: `"${target.name}" is a PROD workspace. Nothing changed yet.${unchecked} ${PROD_SWITCH_CONFIRM}`,
     };
   }
-  const chosen = await chooseWorkspace(grant.token, grant.gid, target.tenant);
+  // The person's own switch: it may leave a DEV workspace (Core refuses that to an automatic start).
+  const chosen = await chooseWorkspace(grant.token, grant.gid, target.tenant, { leaveRemote: true });
   if (!chosen.ok) return { ok: false, code: refusalCode(chosen), message: `Switch to "${target.tenant}" refused: ${refusalText(chosen)} Nothing changed.` };
+  forgetResolve(grant.token);
+  // Core's workspaceKey cleared the DEV workspace on the grant; every chat of this connection leaves DEV with it.
+  if (remote) leftRemote(grant.gid);
   const w = chosen.workspace;
   setSessionCredentials(sessionId, { tenant: w.tenant, apiKey: w.apiKey, apiUrl: baseUrlForKeyEnv(w.apiKey) || undefined, explicit: true });
   return {
@@ -9382,6 +9432,95 @@ async function switchGrantWorkspace(grant, { tenant, confirm_prod }, sessionId) 
     name: w.name,
     environment: w.env,
     message: `Switched to workspace "${w.name}" (${w.env}). ${actsAs(w)} Every chat of this connection is on it now.`,
+  };
+}
+
+const DEV_HOW = "To reach the user's DEV workspaces too (one approval on DEV), call ateam_switch_workspace with environment \"dev\" (and the DEV workspace's name, if known).";
+
+/** The person's DEV workspaces, through the DEV connector (linked only). { workspaces } or { note } with why not. */
+async function devList(grant, sessionId) {
+  const { json, text } = await peerJson(sessionId, grant, "ateam_switch_workspace", {});
+  if (!json?.ok || !Array.isArray(json.workspaces)) return { note: { linked: true, error: String(json?.message || text || "no answer").slice(0, 300) } };
+  if (!samePerson(grant, json)) return { note: { linked: true, error: `DEV is linked to ${json?.signed_in_as?.email || "another account"}, not to ${grant.email || "this account"}; ask to switch with environment "dev" to approve it again` } };
+  const remote = remoteOf(grant.gid);
+  return { workspaces: json.workspaces.map((w) => ({ tenant: w.tenant, name: w.name, role: w.role, environment: "dev", current: !!remote && w.current === true })), json };
+}
+
+/** DEV must be approved by the person signed in here: the same email (case-insensitive) on both sides. */
+function samePerson(grant, devJson) {
+  const here = personOf(grant.gid) || (grant.email ? String(grant.email).toLowerCase() : null);
+  const there = devJson?.signed_in_as?.email ? String(devJson.signed_in_as.email).toLowerCase() : null;
+  return !!here && !!there && here === there;
+}
+
+/**
+ * Into a DEV workspace (or list DEV only): link DEV once if needed (only when `start`), then switch there through the DEV
+ * connector, which checks the person's role on DEV. From then on every call of every chat of this connection is passed
+ * on to DEV.
+ *
+ * ORDER (never silently into prod): "the active workspace is a DEV one" is saved on the grant FIRST, and this session's
+ * PROD key dropped, before DEV is asked to switch. If DEV then refuses, the connection is in DEV with DEV's own current
+ * workspace (or none), never back in a PROD one.
+ */
+async function switchToDev(grant, { wanted, offer, remote, start }, sessionId) {
+  if (!offer) {
+    return { ok: false, code: "DEV_LINK_OFF", message: "This connector does not reach DEV workspaces (SysAdmin → Agent sign-in → One Connector for Prod and Dev is OFF). Nothing changed." };
+  }
+  let fresh = false;
+  if (start) {
+    const link = await ensureLink(grant.token, grant.gid);
+    if (link.refused) return { ok: false, code: "DEV_LINK_REFUSED", message: link.refused };
+    if (link.approve) return approveDevResult(link.approve, { waiting: link.waiting });
+    fresh = !!link.fresh;
+  }
+  const listed = await peerJson(sessionId, grant, "ateam_switch_workspace", {});
+  const json = listed.json;
+  if (!json?.ok || !Array.isArray(json.workspaces)) {
+    return { ok: false, code: listed.result?.structuredContent?.code || "DEV_UNAVAILABLE", message: `Could not list the DEV workspaces: ${String(json?.message || listed.text).slice(0, 300)} Nothing changed.` };
+  }
+  if (!samePerson(grant, json)) {
+    await refuseOtherPerson(grant.token, grant.gid, sessionId);
+    return {
+      ok: false,
+      code: "DEV_OTHER_PERSON",
+      message: `DEV was approved by ${json?.signed_in_as?.email || "another account"}, not by ${grant.email || "the account signed in here"}, so the link was dropped and nothing changed. ` +
+        "Call ateam_switch_workspace with environment \"dev\" again and approve DEV signed in with the same account.",
+    };
+  }
+  const linkedAs = fresh ? `DEV is now linked to this connection (approved as ${json.signed_in_as.email}). ` : "";
+  const devWorkspaces = json.workspaces.map((w) => ({ tenant: w.tenant, name: w.name, role: w.role, environment: "dev", current: !!remote && w.current === true }));
+  if (!wanted) {
+    return { ok: true, environment: "dev", workspaces: devWorkspaces, message: `${linkedAs}Your DEV workspaces (owner or admin). Call ateam_switch_workspace with tenant to switch.` };
+  }
+  const target = devWorkspaces.find((w) => w.tenant === wanted);
+  if (!target) {
+    return {
+      ok: false,
+      code: "NOT_YOUR_WORKSPACE",
+      message: `${linkedAs}"${wanted}" is not a DEV workspace you own or administer. Nothing changed. Yours in DEV: ${devWorkspaces.map((w) => w.tenant).join(", ") || "none"}.`,
+    };
+  }
+  await setRemote(grant.token, grant.gid, { tenant: target.tenant, name: target.name || target.tenant });
+  forgetResolve(grant.token);
+  dropSessionWorkspace(sessionId);
+  const moved = await peerJson(sessionId, grant, "ateam_switch_workspace", { tenant: target.tenant });
+  if (!moved.json?.ok) {
+    return {
+      ok: false,
+      code: moved.json?.code || moved.result?.structuredContent?.code || "DEV_SWITCH_REFUSED",
+      message: `This connection is in DEV now, but DEV refused the switch to "${target.tenant}": ${String(moved.json?.message || moved.text).slice(0, 300)} ` +
+        "DEV's own current workspace (if any) is the one in use. Try again, pick another workspace, or switch to a PROD workspace.",
+    };
+  }
+  const name = moved.json.name || target.name || target.tenant;
+  if (name !== target.name) await setRemote(grant.token, grant.gid, { tenant: target.tenant, name }).catch(() => {});
+  return {
+    ok: true,
+    tenant: target.tenant,
+    name,
+    environment: "dev",
+    message: `${linkedAs}Switched to DEV workspace "${name}". Every chat of this connection now works in DEV: its calls are passed on to the DEV connector. ` +
+      String(moved.json.message || "").replace(/^Switched to workspace ".*?" \(dev\)\.\s*/, ""),
   };
 }
 
@@ -9427,7 +9566,9 @@ function whyNotSignedIn(ctx) {
  * call itself, with a plain refusal that names the single-file tools to use instead (workspaceTools.js).
  */
 export function workspaceOffered(sessionId) {
-  return isExplicitlyAuthenticated(sessionId);
+  // A personal sign-in in a DEV workspace holds no workspace here, and its calls go to the DEV connector (envLink.js).
+  const grant = grantOfSession(sessionId);
+  return isExplicitlyAuthenticated(sessionId) || !!(grant && remoteOf(grant.gid));
 }
 
 /** The tools a session lists: the core tools, minus the workspace tools until it is signed in, minus the old `dev` writers while a workspace is open. */
@@ -9468,6 +9609,12 @@ async function workspaceCall(method, params, sid, opts = { timeoutMs: 60_000 }) 
 }
 
 export async function handleToolCall(name, args, sessionId) {
+  // ONE CONNECTOR FOR PROD AND DEV (envLink.js): while this personal sign-in's active workspace is a DEV one, the call
+  // is passed on to the DEV connector, whose answer comes back as it is. Only moving between workspaces stays here.
+  const linkGrant = grantOfSession(sessionId);
+  if (linkGrant && remoteOf(linkGrant.gid) && !LOCAL_WHILE_REMOTE.has(name)) {
+    return forwardToolCall(sessionId, linkGrant, name, args);
+  }
   const handler = handlers[name];
   if (!handler) {
     return {
