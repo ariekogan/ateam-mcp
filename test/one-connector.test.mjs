@@ -255,7 +255,26 @@ test("an ended DEV link refuses the call and stays in DEV: never into PROD", asy
   await request("atg_p5", core, s2);
   assert.equal(getCredentials(s2).tenant, null);
   assert.equal((await handleToolCall("ateam_get_solution", {}, s2)).isError, true);
+  // The refusal names the call that approves DEV again, and that call does start a new approval.
+  assert.match(textOf(r), /tenant "vc-ai" and environment "dev"/);
+  const again = await switchTo(s, { tenant: "vc-ai", environment: "dev" });
+  assert.equal(again.code, "APPROVE_DEV", JSON.stringify(again));
   clearSession(s); clearSession(s2);
+});
+
+test("a kept DEV client renews and saves with the newest production token, not the one it started with", async () => {
+  const { core, dev, s } = await linkedInDev("atg_p7_old");
+  // The production access token rotates (every 15 min) while this session's DEV client lives on.
+  await request("atg_p7_new", core, s);
+  dev.access = "atg_dev_expired_on_dev";
+  const r = parse(await handleToolCall("ateam_list_solutions", {}, s));
+  assert.equal(r.ran_on, "dev");
+  assert.equal(dev.refreshes, 1);
+  const saves = core.calls.filter((c) => c.method === "linkSet" && c.params.refresh_token === dev.refresh);
+  assert.equal(saves.length, 1, "the renewed DEV refresh token was not saved");
+  assert.equal(saves[0].params.access_token, "atg_p7_new", "saved with an old production token");
+  assert.equal(core.g.devRefresh, dev.refresh);
+  clearSession(s);
 });
 
 test("DEV down or the switch turned off: refused with the reason, never run in PROD", async () => {

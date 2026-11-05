@@ -56,7 +56,7 @@ const offers = new Map();   // gid → { env, mcp_url, linked } | null  (product
 const remotes = new Map();  // gid → { env, tenant, name } | null    (present = known; null = a PROD workspace or none)
 const links = new Map();    // gid → { id, mcpUrl, clientId, refresh, saved, access, accessUntil, refreshing }
 const pendings = new Map(); // gid → { mcpUrl, clientId, deviceCode, userCode, url, until, interval }
-const peers = new Map();    // sessionId → { gid, client, linkId }
+const peers = new Map();    // sessionId → { gid, client, linkId, prod: { token } (the newest production token) }
 const people = new Map();   // gid → the person's email on this side, for the same-person check
 
 /**
@@ -238,21 +238,26 @@ export function approveDevResult(approve, { waiting = false } = {}) {
 
 // ── Passing calls on to the DEV connector ────────────────────────────────────
 
-/** This session's MCP client at the DEV connector (one per session, so per-chat state stays per chat on DEV too). */
-async function peerClient(sessionId, gid, prodTokenOf) {
-  const link = await loadLink(prodTokenOf(), gid);
+/**
+ * This session's MCP client at the DEV connector (one per session, so per-chat state stays per chat on DEV too).
+ * `prodToken` is the session's CURRENT production access token: it rotates every 15 minutes while a client lives much
+ * longer, so a kept client takes the newest one at every call (renewing DEV and saving its refresh token use it).
+ */
+async function peerClient(sessionId, gid, prodToken) {
+  const link = await loadLink(prodToken, gid);
   if (!link) throw new LinkEnded("not linked");
   // A session at the DEV connector belongs to ONE DEV grant (its owner check): after a new approval, a new session.
   const have = peers.get(sessionId);
-  if (have && have.gid === gid && have.linkId === link.id) return have.client;
+  if (have && have.gid === gid && have.linkId === link.id) { have.prod.token = prodToken; return have.client; }
   if (have) { peers.delete(sessionId); have.client.close().catch(() => {}); }
+  const prod = { token: prodToken };
   const authed = async (url, init = {}) => {
     // No standing event stream to DEV: answers come back on the call itself (405 = "none offered", RFC-allowed).
     if ((init.method || "GET").toUpperCase() === "GET") return new Response(null, { status: 405 });
     let sent = null;
     const send = async (refused) => {
       const headers = new Headers(init.headers);
-      sent = await peerAccess(prodTokenOf(), gid, { refused });
+      sent = await peerAccess(prod.token, gid, { refused });
       headers.set("Authorization", `Bearer ${sent}`);
       try { return await fetchImpl(url, { ...init, headers }); } catch (err) { throw new PeerUnavailable(`the DEV connector could not be reached: ${err.message}`); }
     };
@@ -262,7 +267,7 @@ async function peerClient(sessionId, gid, prodTokenOf) {
   };
   const client = new Client({ name: "ateam-mcp-prod-link", version: "1" }, { capabilities: {} });
   await client.connect(new StreamableHTTPClientTransport(new URL("/mcp", link.mcpUrl), { fetch: authed }));
-  peers.set(sessionId, { gid, client, linkId: link.id });
+  peers.set(sessionId, { gid, client, linkId: link.id, prod });
   if (peers.size > MAX_PEERS) {
     const [oldest, p] = peers.entries().next().value;
     peers.delete(oldest);
@@ -294,13 +299,13 @@ export async function forwardToolCall(sessionId, grant, name, args) {
       "To work in a PROD workspace, ask to switch (ateam_switch_workspace).");
   }
   try {
-    const client = await peerClient(sessionId, grant.gid, () => grant.token);
+    const client = await peerClient(sessionId, grant.gid, grant.token);
     return await client.callTool({ name, arguments: args || {} }, undefined, { timeout: FORWARD_TIMEOUT_MS, resetTimeoutOnProgress: true });
   } catch (err) {
     if (err instanceof LinkEnded) {
       dropPeer(sessionId);
       return refusal("DEV_LINK_ENDED", `${where}\n\nThe DEV link of this connection ended (it was revoked on DEV, or not used for too long). ${name} did not run. ` +
-        `Call ateam_switch_workspace with tenant "${remote?.tenant}" to approve DEV again, or switch to a PROD workspace.`);
+        `To approve DEV again, call ateam_switch_workspace with tenant "${remote?.tenant}" and environment "dev"; or switch to a PROD workspace.`);
     }
     dropPeer(sessionId);
     const timedOut = /timed? ?out/i.test(String(err?.message));
@@ -324,11 +329,11 @@ async function forwardToolCallRaw(sessionId, grant, name, args) {
   // The same path as a passed-on call, but with no active DEV workspace needed yet (listing or switching into one).
   if (!offerOf(grant.gid)) return refusal("DEV_LINK_OFF", "This connector does not reach DEV workspaces.");
   try {
-    const client = await peerClient(sessionId, grant.gid, () => grant.token);
+    const client = await peerClient(sessionId, grant.gid, grant.token);
     return await client.callTool({ name, arguments: args || {} }, undefined, { timeout: FORWARD_TIMEOUT_MS });
   } catch (err) {
     dropPeer(sessionId);
-    if (err instanceof LinkEnded) return refusal("DEV_LINK_ENDED", "The DEV link of this connection ended. Approve DEV again.");
+    if (err instanceof LinkEnded) return refusal("DEV_LINK_ENDED", "The DEV link of this connection ended. To approve DEV again, call ateam_switch_workspace with environment \"dev\".");
     return refusal("DEV_UNAVAILABLE", `The DEV connector could not be reached (${String(err?.message || err).slice(0, 200)}).`);
   }
 }
