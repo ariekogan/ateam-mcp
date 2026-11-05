@@ -705,7 +705,9 @@ export function signInContext(sessionId, { transport = callTransport() } = {}) {
     tenant: record?.tenant || null,
     environment: signedIn ? sessionEnvironment(sessionId) : null,
     masterMode: !!record?.masterKey,
-    workspaceName: audience === "grant" && signedIn ? (peekGrantWorkspace(sessionGrants.get(sessionId).gid)?.name || null) : null,
+    // The grant's workspace may have moved since this call started (another chat switched): name it only
+    // when it is still the workspace this call's record is on.
+    workspaceName: audience === "grant" && signedIn ? grantWorkspaceName(sessionGrants.get(sessionId).gid, record?.tenant) : null,
   };
 }
 
@@ -844,6 +846,11 @@ export function clearSession(sessionId) {
   sessionOwners.delete(sessionId);
   sessionGrants.delete(sessionId);
   sessions.delete(sessionId);
+}
+
+function grantWorkspaceName(gid, tenant) {
+  const w = peekGrantWorkspace(gid);
+  return w && w.tenant === tenant ? w.name || null : null;
 }
 
 /** Bind a session to a personal sign-in grant. Called from seedCredentials on every request. */

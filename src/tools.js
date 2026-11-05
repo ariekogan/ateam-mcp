@@ -9468,15 +9468,6 @@ async function workspaceCall(method, params, sid, opts = { timeoutMs: 60_000 }) 
 }
 
 export async function handleToolCall(name, args, sessionId) {
-  const out = await runTool(name, args, sessionId);
-  // A personal sign-in session: every answer leads with where the work happens (Arie, 2026-11-05).
-  if (grantOfSession(sessionId) && Array.isArray(out?.content)) {
-    out.content = [{ type: "text", text: workspaceLine(signInContext(sessionId)) }, ...out.content];
-  }
-  return out;
-}
-
-async function runTool(name, args, sessionId) {
   const handler = handlers[name];
   if (!handler) {
     return {
@@ -9578,7 +9569,12 @@ async function runTool(name, args, sessionId) {
   }
 
   try {
-    const result = await handler(args, sessionId);
+    let result = await handler(args, sessionId);
+    // A personal sign-in session: every answer leads with where the work happens (Arie, 2026-11-05). Its
+    // first field, so content[0] stays the one JSON result every consumer parses.
+    if (grantOfSession(sessionId) && result && typeof result === "object" && !Array.isArray(result)) {
+      result = { workspace: workspaceLine(signInContext(sessionId)), ...result };
+    }
 
     // An actor id comes back here: ateam_conversation/ateam_test_skill return
     // the thread as actor_id, and the docs tell callers to pass it back for

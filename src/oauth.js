@@ -306,6 +306,23 @@ function verifyPkce(verifier, challenge) {
 }
 
 /**
+ * The verifier for one MCP host: a personal sign-in token is valid only on the host of the environment
+ * Core says it belongs to (one process may serve several hosts with one Core). A host this server cannot
+ * name accepts none. A key is checked the same on every host, as before.
+ */
+function verifierFor(environment) {
+  return {
+    async verifyAccessToken(token) {
+      const info = await accessTokens.verifyAccessToken(token);
+      if (info.extra?.grant && (!environment || info.extra.env !== environment)) {
+        throw new InvalidTokenError("This sign-in belongs to another A-Team environment's connector");
+      }
+      return info;
+    },
+  };
+}
+
+/**
  * The bearer gate's verifier, the same on every host: a token is valid when it
  * is a structurally valid adas_* API key. Returns AuthInfo in the MCP SDK's
  * shape.
@@ -643,11 +660,11 @@ export function mountOAuth(app, environments) {
   // the 401 still refuses, and points nowhere.
   const bearerMiddlewareFor = (mountPath) => {
     const gates = new Map([...hosts].map(([environment, { serverUrl }]) => [environment, requireBearerAuth({
-      verifier: accessTokens,
+      verifier: verifierFor(environment),
       requiredScopes: [],
       resourceMetadataUrl: prmUrlFor(serverUrl, mountPath),
     })]));
-    const unnamed = requireBearerAuth({ verifier: accessTokens, requiredScopes: [] });
+    const unnamed = requireBearerAuth({ verifier: verifierFor(null), requiredScopes: [] });
     return (req, res, next) => (gates.get(envForMcpHost(req.hostname, environments)) || unnamed)(req, res, next);
   };
 

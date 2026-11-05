@@ -89,6 +89,8 @@ test("bearer gate: an atg_ token Core knows is accepted with its grant; one Core
   assert.equal(ok.auth?.extra?.grant, "g1", JSON.stringify(ok));
   fakeCore({ refuseToken: true });
   assert.equal((await verify("atg_refused")).status, 401);
+  fakeCore({ env: "dev" });
+  assert.equal((await verify("atg_dev_token_on_prod_host")).status, 401, "a dev sign-in was accepted on the prod connector");
   fakeCore({ down: true });
   const down = await verify("atg_core_down");
   assert.ok(down.status >= 500, `Core down must not sign the person out: ${JSON.stringify(down)}`);
@@ -128,7 +130,7 @@ test("the only workspace is chosen by itself; with several and none remembered n
   // A workspace tool is refused until one is chosen; choosing passes the gate.
   const refused = await handleToolCall("ateam_list_solutions", {}, many);
   assert.equal(refused.isError, true);
-  const listed = JSON.parse((await handleToolCall("ateam_switch_workspace", {}, many)).content[1].text);
+  const listed = JSON.parse((await handleToolCall("ateam_switch_workspace", {}, many)).content[0].text);
   assert.deepEqual(listed.workspaces.map((w) => w.tenant), ["home", "other"]);
   clearSession(one); clearSession(many);
 });
@@ -140,7 +142,7 @@ test("switching into a PROD workspace waits for the user's yes; then the key goe
   assert.equal(getCredentials(s).tenant, "home");
 
   const ask = await handleToolCall("ateam_switch_workspace", { tenant: "other" }, s);
-  const asked = JSON.parse(ask.content[1].text);
+  const asked = JSON.parse(ask.content[0].text);
   assert.equal(asked.code, "CONFIRM_PROD");
   assert.equal(getCredentials(s).tenant, "home", "a prod switch happened without the user's yes");
   assert.equal(calls.filter((c) => c.method === "workspaceKey" && c.params.tenant === "other").length, 0, "the key was asked for before the yes");
@@ -149,10 +151,13 @@ test("switching into a PROD workspace waits for the user's yes; then the key goe
   const text = textOf(yes);
   assert.equal(getCredentials(s).tenant, "other");
   assert.doesNotMatch(text, /adas_/, "a workspace key reached the tool result");
-  assert.match(JSON.parse(yes.content[1].text).message, /Switched to workspace "Other Co" \(prod\)/);
-  assert.match(text, /^Workspace: Other Co \(prod\)/, "the answer does not lead with where the work happens");
+  assert.match(JSON.parse(yes.content[0].text).message, /Switched to workspace "Other Co" \(prod\)/);
+  const parsed = JSON.parse(yes.content[0].text);
+  assert.equal(yes.content.length, 1, "content[0] must stay the one JSON result");
+  assert.equal(Object.keys(parsed)[0], "workspace");
+  assert.equal(parsed.workspace, "Workspace: Other Co (prod)", "the answer does not lead with where the work happens");
 
-  const notMine = JSON.parse((await handleToolCall("ateam_switch_workspace", { tenant: "nope", confirm_prod: true }, s)).content[1].text);
+  const notMine = JSON.parse((await handleToolCall("ateam_switch_workspace", { tenant: "nope", confirm_prod: true }, s)).content[0].text);
   assert.equal(notMine.code, "NOT_YOUR_WORKSPACE");
   assert.equal(getCredentials(s).tenant, "other");
   clearSession(s);
@@ -162,7 +167,7 @@ test("a dev workspace switches with no confirmation", async () => {
   fakeCore({ env: "dev", gid: "g-dev", lastTenant: "home" });
   const s = sid();
   await seedGrantSession({ auth: { token: "atg_dev", extra: { grant: "g-dev", env: "dev", lastTenant: "home" } } }, s);
-  const r = JSON.parse((await handleToolCall("ateam_switch_workspace", { tenant: "other" }, s)).content[1].text);
+  const r = JSON.parse((await handleToolCall("ateam_switch_workspace", { tenant: "other" }, s)).content[0].text);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(getCredentials(s).tenant, "other");
   clearSession(s);
@@ -172,7 +177,7 @@ test("ateam_auth takes no key on a personal sign-in session, and no override is 
   fakeCore({ lastTenant: "home", gid: "g-auth" });
   const s = sid();
   await seedGrantSession({ auth: { token: "atg_auth", extra: { grant: "g-auth", env: "prod", lastTenant: "home" } } }, s);
-  const r = JSON.parse((await handleToolCall("ateam_auth", { api_key: KEY.other }, s)).content[1].text);
+  const r = JSON.parse((await handleToolCall("ateam_auth", { api_key: KEY.other }, s)).content[0].text);
   assert.equal(r.ok, false);
   assert.match(r.message, /takes no key/);
   assert.equal(getCredentials(s).tenant, "home");
@@ -197,4 +202,19 @@ test("when the person is no longer owner or admin, the key is dropped at the nex
     assert.notEqual(getCredentials(s).tenant, "home", "a workspace the person lost kept its key");
   } finally { Date.now = realNow; }
   clearSession(s);
+});
+
+test("the workspace label names the workspace THIS call ran on, not one another chat switched to meanwhile", async () => {
+  fakeCore({ lastTenant: "home", gid: "g-race" });
+  const a = sid(), b = sid();
+  const r = { auth: { token: "atg_race", extra: { grant: "g-race", env: "prod", lastTenant: "home" } } };
+  await seedGrantSession(r, a);
+  await seedGrantSession(r, b);
+  await handleToolCall("ateam_switch_workspace", { tenant: "other", confirm_prod: true }, b);
+  // Chat a has not had a request since: its record is still Home, so it must not be labelled Other Co.
+  const { signInContext } = await import("../src/api.js");
+  const ctx = signInContext(a, { transport: "http" });
+  assert.equal(ctx.tenant, "home");
+  assert.notEqual(ctx.workspaceName, "Other Co");
+  clearSession(a); clearSession(b);
 });
