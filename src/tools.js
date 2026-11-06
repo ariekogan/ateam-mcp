@@ -1743,6 +1743,10 @@ export const tools = [
           type: "object",
           description: "Optional. The design so far (skills, connectors, capabilities already wired) so the advisor can point at what's still missing. Pass {} at the start.",
         },
+        request_id: {
+          type: "string",
+          description: "Only to wait for an answer that came back status:\"running\" (the advisor was still looking things up): pass its request_id, with the same goal. Asking again starts nothing new.",
+        },
       },
       required: ["goal"],
     },
@@ -2382,8 +2386,8 @@ export const tools = [
         worked: { type: "boolean", description: "Did the workaround work? Omit if you never found out — 'unknown' is a real answer" },
         kind: {
           type: "string",
-          enum: ["failure", "surprise", "misleading_success"],
-          description: "failure = it errored; surprise = it worked but not as documented; misleading_success = it REPORTED success while the intended effect did not happen",
+          enum: ["failure", "surprise", "misleading_success", "platform_gap"],
+          description: "failure = it errored; surprise = it worked but not as documented; misleading_success = it REPORTED success while the intended effect did not happen; platform_gap = the platform could not do what the design needed and you built around it (tool = the capability or tool that fell short, error = what it could not do, workaround = what you built instead)",
         },
         supersedes: {
           type: "string",
@@ -6388,14 +6392,21 @@ export const handlers = {
   // this runs. This comment used to say "Public endpoint (auth-exempt)"
   // (5f539fa) — the exemption that let a bare X-ADAS-TENANT header bill
   // another tenant's LLM.
-  ateam_design_advisor: async ({ goal, design_state }, sid) => {
+  ateam_design_advisor: async ({ goal, design_state, request_id }, sid) => {
+    // The advisor may answer status:"running" with a request_id (Builder engine "agent", advisor v2):
+    // the Builder waits at most wait_ms, so over a hosted connection the call answers inside the chat
+    // client's ~60 s (HOSTED_CALL_BUDGET_MS), and the same call with request_id waits for it again.
+    // A stdio caller's own process can wait longer. The one-call engine ignores wait_ms.
+    const waitMs = callTransport() === "stdio" ? 240_000 : HOSTED_CALL_BUDGET_MS - 5_000;
+    const opts = { timeoutMs: Math.max(90_000, waitMs + 30_000), retries: 1, idempotent: true };
+    if (typeof request_id === "string" && request_id) return post("/spec/advisor", { request_id, wait_ms: waitMs }, sid, opts);
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
     // Direct call to the Builder's /spec/advisor. The session's X-ADAS-TENANT
     // header rides along (post() sets it), so the Builder resolves this tenant's
     // LLM via Core's sys.llm gateway (stage→tier→model, transparent — no keys in
     // the Builder). Reachable externally on prod: the relay forwards /spec/*.
     // A read over POST: declared idempotent, so a transport failure may be re-sent (api.js mayAutoRetry).
-    return post("/spec/advisor", { goal, design_state: design_state || {} }, sid, { timeoutMs: 90_000, retries: 1, idempotent: true });
+    return post("/spec/advisor", { goal, design_state: design_state || {}, wait_ms: waitMs }, sid, opts);
   },
 
   // Semantic search over the full /spec corpus: the Builder's POST /spec/search,
