@@ -324,6 +324,8 @@ check("send-message is a message the host acts on", _widgetProtocolProblems(SEND
 check("  an unknown type next to it is still reported",
   _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"send-text",payload:{text:t}}},"*")`))
     .some((p) => p.includes('type:"send-text"')));
+check("  a known type inside the payload does not hide an unknown outer type", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"send-text",payload:{type:"send-message",text:t}}},"*")`)).some((p) => p.includes('type:"send-text"')));
+check("  a known action inside the payload does not hide an unknown outer one", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"do-it",payload:{action:"mcp-call",requestId:r,connectorId:c,tool:x}}},"*")`)).some((p) => p.includes('action:"do-it"')));
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
