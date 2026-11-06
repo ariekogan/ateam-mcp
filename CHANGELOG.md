@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.123 — 2026-11-07
+
+### Widget lint: send-message (#89)
+
+`widget_health` no longer reports a working widget as broken when it posts `send-message`, which the hosts handle.
+
 ## 0.4.122 — 2026-11-06
 
 ### One connector for prod and dev (#87)
