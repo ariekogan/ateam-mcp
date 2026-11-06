@@ -6394,19 +6394,28 @@ export const handlers = {
   // another tenant's LLM.
   ateam_design_advisor: async ({ goal, design_state, request_id }, sid) => {
     // The advisor may answer status:"running" with a request_id (Builder engine "agent", advisor v2):
-    // the Builder waits at most wait_ms, so over a hosted connection the call answers inside the chat
-    // client's ~60 s (HOSTED_CALL_BUDGET_MS), and the same call with request_id waits for it again.
-    // A stdio caller's own process can wait longer. The one-call engine ignores wait_ms.
-    const waitMs = callTransport() === "stdio" ? 240_000 : HOSTED_CALL_BUDGET_MS - 5_000;
-    const opts = { timeoutMs: Math.max(90_000, waitMs + 30_000), retries: 1, idempotent: true };
-    if (typeof request_id === "string" && request_id) return post("/spec/advisor", { request_id, wait_ms: waitMs }, sid, opts);
+    // the Builder answers within wait_ms, counted from when the call arrives (its fallback included),
+    // and the same call with request_id waits for the same answer again. Sending wait_ms is also how
+    // the Builder knows this caller can ask again: without it, it answers with the one-call advisor.
+    // Hosted: inside HOSTED_CALL_BUDGET_MS (the chat client gives up near 60 s). stdio: inside the
+    // edge's ~100 s (api.ateam-ai.com is behind Cloudflare) and Core's 100 s ceiling for this tool
+    // when Core's in-app builder runs it (latency_ms_p95 25000 x 4).
+    const stdio = callTransport() === "stdio";
+    const waitMs = stdio ? 70_000 : HOSTED_CALL_BUDGET_MS - 10_000;
+    const timeoutMs = stdio ? 85_000 : HOSTED_CALL_BUDGET_MS;
+    if (request_id !== undefined && request_id !== null && request_id !== "") {
+      if (typeof request_id !== "string") throw new Error("request_id must be the string a status:\"running\" answer gave");
+      // Asking again starts nothing, so a transport failure may be re-sent (api.js mayAutoRetry).
+      return post("/spec/advisor", { request_id, wait_ms: waitMs }, sid, { timeoutMs, retries: 1, idempotent: true });
+    }
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
     // Direct call to the Builder's /spec/advisor. The session's X-ADAS-TENANT
     // header rides along (post() sets it), so the Builder resolves this tenant's
     // LLM via Core's sys.llm gateway (stage→tier→model, transparent — no keys in
     // the Builder). Reachable externally on prod: the relay forwards /spec/*.
-    // A read over POST: declared idempotent, so a transport failure may be re-sent (api.js mayAutoRetry).
-    return post("/spec/advisor", { goal, design_state: design_state || {}, wait_ms: waitMs }, sid, opts);
+    // NOT re-sent on a transport failure: a goal starts an advisor run (billed), and a second one would
+    // lose the first one's request_id.
+    return post("/spec/advisor", { goal, design_state: design_state || {}, wait_ms: waitMs }, sid, { timeoutMs, retries: 0 });
   },
 
   // Semantic search over the full /spec corpus: the Builder's POST /spec/search,

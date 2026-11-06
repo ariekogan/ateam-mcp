@@ -45,3 +45,26 @@ test("asking again sends only the request id (nothing new is started); stdio may
   assert.deepEqual(Object.keys(sent[0].body).sort(), ["request_id", "wait_ms"]);
   assert.ok(sent[0].body.wait_ms > HOSTED_CALL_BUDGET_MS);
 });
+
+test("a goal is sent once: a transport failure is not re-sent (a goal starts a billed run); a request_id must be a string", async (t) => {
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    sent.push(JSON.parse(opts.body));
+    return new Response("bad gateway", { status: 502 });
+  };
+  t.after(() => { globalThis.fetch = realFetch; });
+  await run({ goal: "a team app", design_state: {} }, "http").catch(() => null);
+  assert.equal(sent.length, 1);
+  const bad = await run({ goal: "a team app", request_id: 42 }, "http").catch((e) => e);
+  assert.match(JSON.stringify(bad?.message ?? bad), /request_id must be/);
+  assert.equal(sent.length, 1);
+});
+
+test("the call answers inside its budget: hosted under HOSTED_CALL_BUDGET_MS, stdio under the edge's ~100 s", async (t) => {
+  const sent = stub(t, { relevant_capabilities: [], engine: "agent" });
+  await run({ goal: "a team app" }, "stdio");
+  assert.ok(sent[0].body.wait_ms <= 75_000, `stdio wait_ms ${sent[0].body.wait_ms}`);
+  await run({ goal: "a team app" }, "http");
+  assert.ok(sent[1].body.wait_ms <= HOSTED_CALL_BUDGET_MS - 10_000, `hosted wait_ms ${sent[1].body.wait_ms}`);
+});
