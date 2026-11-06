@@ -40,6 +40,7 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_test_skill", "ateam_test_pipeline", "ateam_test_connector", "ateam_test_notification",
   "ateam_verify_surface",
   "ateam_workspace_save", "ateam_workspace_close",
+  "ateam_create_test_persona", "ateam_update_test_persona", "ateam_delete_test_persona",
 ]);
 
 // ─── Signing in, switching workspace, and which environment ────────────────
