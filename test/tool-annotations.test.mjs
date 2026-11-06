@@ -182,6 +182,7 @@ const ADD_BY_POST = [
   [/^\/deploy\/solutions\/[^/]+\/skills\/[^/]+\/test-pipeline$/, "plans one step; executes none of the skill's tools"],
   [/^\/api\/internal\/notify-user$/, "a new [TEST] notification to an existing actor"],
   [/^\/workspace\/(open|status)$/, "opens or reports on the one workspace; no file of the solution changes"],
+  [/^\/deploy\/solutions\/[^/]+\/test-personas$/, "a new test persona, beside the ones there are; runs nothing"],
 ];
 const isAdditive = (r) =>
   isRead(r) || (!r.outside && r.method === "POST" && ADD_BY_POST.some(([rx]) => rx.test(r.path)));
@@ -195,7 +196,7 @@ const ARGS = {
   // exists for, and no longer than one round trip.
   message: "m", messages: ["m"], actor_id: "a", content: "c", step: "st", status: "built",
   tool: "c.list_items", method: "collections", error: "e", api_key: KEY, wait: false, wait_for: "never",
-  workspace_id: "ws-0123456789ab", command: "true",
+  workspace_id: "ws-0123456789ab", command: "true", name: "n",
   plugin_name: "p", files: [{ path: "server.js", content: "x" }], confirm: true, confirm_solution_id: "s",
 };
 
