@@ -315,5 +315,17 @@ check("  also when the call is the type:\"mcp-call\" near-miss",
   _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"mcp-call",payload:{correlationId:cid,connectorId:"c",tool:t}}},"*")`))
     .some((p) => p.includes(REQUEST_ID_FLAG)));
 
+console.log("send-message (a widget puts text in the chat box)");
+// A real case (VC-AI "Ask AICO", 2026-11-06): the host takes this message on the web
+// and the phone, and it was reported as ignored, which would have sent an agent
+// to "fix" a working button.
+const SENDS_TO_CHAT = WRAP(`window.parent.postMessage({ source: "adas-plugin", message: { type: "send-message", payload: { text: text } } }, "*");`);
+check("send-message is a message the host acts on", _widgetProtocolProblems(SENDS_TO_CHAT).length === 0);
+check("  an unknown type next to it is still reported",
+  _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"send-text",payload:{text:t}}},"*")`))
+    .some((p) => p.includes('type:"send-text"')));
+check("  a known type inside the payload does not hide an unknown outer type", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{type:"send-text",payload:{type:"send-message",text:t}}},"*")`)).some((p) => p.includes('type:"send-text"')));
+check("  a known action inside the payload does not hide an unknown outer one", _widgetProtocolProblems(WRAP(`window.parent.postMessage({source:"adas-plugin",message:{action:"do-it",payload:{action:"mcp-call",requestId:r,connectorId:c,tool:x}}},"*")`)).some((p) => p.includes('action:"do-it"')));
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -1035,11 +1035,14 @@ function _postMessageObjects(html) {
 
 // What the hosts act on when a plugin sends it. Core
 // packages/widget-surface/src/attachHostBridge.js KNOWN_ACTIONS / KNOWN_TYPES
-// (select-actor, mcp-call | plugin.command.result, plugin.event, open-job); the
-// phone's usePluginBridge.ts also honours action "close" (the web host has no
-// such action: it is accepted here, since sending it harms nothing).
+// (select-actor, mcp-call | plugin.command.result, plugin.event, open-job,
+// send-message); the phone's usePluginBridge.ts also honours action "close"
+// (the web host has no such action: it is accepted here, since sending it harms
+// nothing). send-message puts the payload's text in the chat box, on the web
+// (attachHostBridge MSG_SEND_MESSAGE -> suggestToComposer) and on the phone
+// (adas-mobile-sdk packages/ui/src/plugin/widgetSendMessage.ts).
 const _HOST_SEND_ACTIONS = ["mcp-call", "select-actor", "close"];
-const _HOST_SEND_TYPES = ["plugin.command.result", "plugin.event", "open-job"];
+const _HOST_SEND_TYPES = ["plugin.command.result", "plugin.event", "open-job", "send-message"];
 const _keyIs = (key, value) => new RegExp(`\\b${key}\\s*:\\s*["']${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`);
 
 // The inline `payload: { ... }` literal of a message object, or null when there
@@ -1056,6 +1059,23 @@ function _inlinePayload(obj) {
   return /[{,]\s*\.\.\.\s*[\w$({[]/.test(payload) ? null : payload;
 }
 const _hasKey = (payload, key) => new RegExp(`(?:^|[{,\\s])${key}\\s*[:,}]`).test(payload);
+
+// The message object with every inline `payload: { ... }` literal emptied, so
+// the message's own action / type is what gets judged, never a key of the data
+// it carries: message:{ type:"send-text", payload:{ type:"send-message" } } is
+// still a send-text the host ignores.
+function _withoutPayload(obj) {
+  const re = /payload\s*:\s*\{/g;
+  let out = "", last = 0, m;
+  while ((m = re.exec(obj))) {
+    const open = obj.indexOf("{", m.index);
+    const end = _closingBrace(obj, open);
+    if (end === -1) break;
+    out += obj.slice(last, open) + "{}";
+    last = re.lastIndex = end;
+  }
+  return out + obj.slice(last);
+}
 
 export function _widgetProtocolProblems(html) {
   if (typeof html !== "string" || !html.includes("postMessage")) return [];
@@ -1076,21 +1096,22 @@ export function _widgetProtocolProblems(html) {
       add('posts to the parent without source:"adas-plugin" — the host drops every message that lacks it, so nothing reaches the app and the call never settles (it is "source", not "type"). Send { source:"adas-plugin", message:{ action:"mcp-call", payload:{ requestId, connectorId, tool, args } } }.');
     }
 
-    const sendsKnown = _HOST_SEND_ACTIONS.some((a) => _keyIs("action", a).test(obj)) ||
-      _HOST_SEND_TYPES.some((t) => _keyIs("type", t).test(obj));
-    if (/type\s*:\s*["']tool\.call["']/.test(obj)) {
+    const head = _withoutPayload(obj);
+    const sendsKnown = _HOST_SEND_ACTIONS.some((a) => _keyIs("action", a).test(head)) ||
+      _HOST_SEND_TYPES.some((t) => _keyIs("type", t).test(head));
+    if (/type\s*:\s*["']tool\.call["']/.test(head)) {
       add('sends message.type:"tool.call" — the host has NEVER accepted it, at any version (silent timeout, no error). Send message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}}.');
     } else if (!sendsKnown) {
-      const actionIsAType = _HOST_SEND_TYPES.find((t) => _keyIs("action", t).test(obj));
-      if (/type\s*:\s*["']mcp-call["']/.test(obj)) {
+      const actionIsAType = _HOST_SEND_TYPES.find((t) => _keyIs("action", t).test(head));
+      if (/type\s*:\s*["']mcp-call["']/.test(head)) {
         add('sends message.TYPE:"mcp-call" — the host matches on message.ACTION for sends, so this is ignored. Use message:{action:"mcp-call",payload:{...}}.');
       } else if (actionIsAType) {
         add(`sends message.ACTION:"${actionIsAType}" — the host matches "${actionIsAType}" on message.TYPE (only mcp-call and select-actor are matched on message.ACTION), so this is ignored. Use message:{type:"${actionIsAType}",payload:{...}}.`);
       } else {
-        const act = /\baction\s*:\s*["']([^"']+)["']/.exec(obj);
-        const typ = /\btype\s*:\s*["']([^"']+)["']/.exec(obj);
+        const act = /\baction\s*:\s*["']([^"']+)["']/.exec(head);
+        const typ = /\btype\s*:\s*["']([^"']+)["']/.exec(head);
         const what = act ? `action:"${act[1]}"` : typ ? `type:"${typ[1]}"` : "no message.action and no message.type";
-        add(`sends ${what} — not a message the host acts on, so it is ignored (silent timeout, no error). The host acts on message.action "mcp-call" | "select-actor" | "close" (phone only), and message.type "plugin.command.result" | "plugin.event" | "open-job". A tool call is message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}} — action "mcp-call" with a hyphen.`);
+        add(`sends ${what} — not a message the host acts on, so it is ignored (silent timeout, no error). The host acts on message.action "mcp-call" | "select-actor" | "close" (phone only), and message.type "plugin.command.result" | "plugin.event" | "open-job" | "send-message". A tool call is message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}} — action "mcp-call" with a hyphen.`);
       }
     }
 
@@ -1101,7 +1122,7 @@ export function _widgetProtocolProblems(html) {
     // on is already reported as that — calling its id "the request id" would
     // send the author to a requestId the message never had (BL-42 / AM64-R1).
     // type:"mcp-call" is the near-miss of action:"mcp-call", still a tool call.
-    const isToolCall = _keyIs("action", "mcp-call").test(obj) || _keyIs("type", "mcp-call").test(obj);
+    const isToolCall = _keyIs("action", "mcp-call").test(head) || _keyIs("type", "mcp-call").test(head);
     if (isToolCall && (/payload\s*:\s*\{[^}]*correlationId/.test(obj) || /correlationId\s*:\s*correlationId/.test(obj))) {
       add('sends the request id as correlationId — the host echoes payload.requestId, so responses never match the pending request and every call times out even when the host answered.');
     }
@@ -1110,7 +1131,7 @@ export function _widgetProtocolProblems(html) {
     // and connectorId + tool (else it answers "Missing connectorId or tool").
     // Judged only when the payload is an inline literal without a spread: a
     // payload built elsewhere is not one we can see into.
-    if (_keyIs("action", "mcp-call").test(obj)) {
+    if (_keyIs("action", "mcp-call").test(head)) {
       const payload = _inlinePayload(obj);
       const missing = payload ? ["requestId", "connectorId", "tool"].filter((k) => !_hasKey(payload, k)) : [];
       if (missing.length) {
@@ -1122,7 +1143,7 @@ export function _widgetProtocolProblems(html) {
     // payload.correlationId and ignores the message without it (Core
     // attachHostBridge.js:50), so the command waits out its 15 s and the
     // CALLING skill gets "Plugin command timeout" — nothing fails in the widget.
-    if (_keyIs("type", "plugin.command.result").test(obj)) {
+    if (_keyIs("type", "plugin.command.result").test(head)) {
       const payload = _inlinePayload(obj);
       if (payload && !_hasKey(payload, "correlationId")) {
         add('sends plugin.command.result whose payload has no correlationId — the host ignores a reply without it (it reads payload.correlationId; a reply to a command keys on correlationId, not requestId), so the command times out after 15 s in the calling skill. Echo the correlationId the plugin.command carried.');
