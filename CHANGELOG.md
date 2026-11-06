@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.122 — 2026-11-06
+
+### One connector for prod and dev (#87)
+
+The production connector also reaches the person's DEV workspaces: ask to switch with `environment: "dev"`,
+approve once on the DEV app (a sign-in code), and every call in a DEV workspace is passed on to the DEV connector.
+DEV keys never leave DEV. Nothing runs in a PROD workspace unless the person switches there and confirms. Off until
+SysAdmin → Agent sign-in → One Connector for Prod and Dev is turned on in production.
+
 ## 0.4.121 — 2026-11-05
 
 ### Personal sign-in (#84, #85)
