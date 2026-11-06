@@ -1035,11 +1035,14 @@ function _postMessageObjects(html) {
 
 // What the hosts act on when a plugin sends it. Core
 // packages/widget-surface/src/attachHostBridge.js KNOWN_ACTIONS / KNOWN_TYPES
-// (select-actor, mcp-call | plugin.command.result, plugin.event, open-job); the
-// phone's usePluginBridge.ts also honours action "close" (the web host has no
-// such action: it is accepted here, since sending it harms nothing).
+// (select-actor, mcp-call | plugin.command.result, plugin.event, open-job,
+// send-message); the phone's usePluginBridge.ts also honours action "close"
+// (the web host has no such action: it is accepted here, since sending it harms
+// nothing). send-message puts the payload's text in the chat box, on the web
+// (attachHostBridge MSG_SEND_MESSAGE -> suggestToComposer) and on the phone
+// (adas-mobile-sdk packages/ui/src/plugin/widgetSendMessage.ts).
 const _HOST_SEND_ACTIONS = ["mcp-call", "select-actor", "close"];
-const _HOST_SEND_TYPES = ["plugin.command.result", "plugin.event", "open-job"];
+const _HOST_SEND_TYPES = ["plugin.command.result", "plugin.event", "open-job", "send-message"];
 const _keyIs = (key, value) => new RegExp(`\\b${key}\\s*:\\s*["']${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`);
 
 // The inline `payload: { ... }` literal of a message object, or null when there
@@ -1090,7 +1093,7 @@ export function _widgetProtocolProblems(html) {
         const act = /\baction\s*:\s*["']([^"']+)["']/.exec(obj);
         const typ = /\btype\s*:\s*["']([^"']+)["']/.exec(obj);
         const what = act ? `action:"${act[1]}"` : typ ? `type:"${typ[1]}"` : "no message.action and no message.type";
-        add(`sends ${what} — not a message the host acts on, so it is ignored (silent timeout, no error). The host acts on message.action "mcp-call" | "select-actor" | "close" (phone only), and message.type "plugin.command.result" | "plugin.event" | "open-job". A tool call is message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}} — action "mcp-call" with a hyphen.`);
+        add(`sends ${what} — not a message the host acts on, so it is ignored (silent timeout, no error). The host acts on message.action "mcp-call" | "select-actor" | "close" (phone only), and message.type "plugin.command.result" | "plugin.event" | "open-job" | "send-message". A tool call is message:{action:"mcp-call",payload:{requestId,connectorId,tool,args}} — action "mcp-call" with a hyphen.`);
       }
     }
 
