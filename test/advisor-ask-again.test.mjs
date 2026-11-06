@@ -68,3 +68,12 @@ test("the call answers inside its budget: hosted under HOSTED_CALL_BUDGET_MS, st
   await run({ goal: "a team app" }, "http");
   assert.ok(sent[1].body.wait_ms <= HOSTED_CALL_BUDGET_MS - 10_000, `hosted wait_ms ${sent[1].body.wait_ms}`);
 });
+
+test("hosted: asking again is sent once too, so the call stays inside HOSTED_CALL_BUDGET_MS", async (t) => {
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => { sent.push(JSON.parse(opts.body)); return new Response("bad gateway", { status: 502 }); };
+  t.after(() => { globalThis.fetch = realFetch; });
+  await run({ goal: "a team app", request_id: "adv_0123456789abcdef" }, "http").catch(() => null);
+  assert.equal(sent.length, 1);
+});

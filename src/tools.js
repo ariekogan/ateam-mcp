@@ -6405,8 +6405,9 @@ export const handlers = {
     const timeoutMs = stdio ? 85_000 : HOSTED_CALL_BUDGET_MS;
     if (request_id !== undefined && request_id !== null && request_id !== "") {
       if (typeof request_id !== "string") throw new Error("request_id must be the string a status:\"running\" answer gave");
-      // Asking again starts nothing, so a transport failure may be re-sent (api.js mayAutoRetry).
-      return post("/spec/advisor", { request_id, wait_ms: waitMs }, sid, { timeoutMs, retries: 1, idempotent: true });
+      // Asking again starts nothing, so on stdio a transport failure may be re-sent (api.js mayAutoRetry).
+      // Hosted: no re-send, which would take a second timeoutMs past HOSTED_CALL_BUDGET_MS; the agent asks again.
+      return post("/spec/advisor", { request_id, wait_ms: waitMs }, sid, stdio ? { timeoutMs, retries: 1, idempotent: true } : { timeoutMs, retries: 0 });
     }
     if (!goal || typeof goal !== "string") throw new Error("goal required (a string describing what you're building)");
     // Direct call to the Builder's /spec/advisor. The session's X-ADAS-TENANT
