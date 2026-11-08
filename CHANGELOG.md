@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.124 — 2026-11-08
+
+### Test persona tools (#90) and advisor v2 (#91)
+
+Test persona tools, `as_persona` on conversation and skill tests; `ateam_design_advisor` can ask again for a running advisor answer; lesson kind `platform_gap`.
+
 ## 0.4.123 — 2026-11-07
 
 ### Widget lint: send-message (#89)
