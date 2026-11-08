@@ -11,7 +11,7 @@
 import {
   get, post, patch, del,
   setSessionCredentials, isExplicitlyAuthenticated,
-  getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext, dropSessionWorkspace,
+  getCredentials, parseApiKey, whoami, baseUrlForKeyEnv, envForBaseUrl, touchSession, getSessionContext, dropSessionWorkspace, clearSessionActor,
   setAuthOverride, switchTenant, runAsTenant, isMasterMode, listTenants, getWhere, getBaseUrl, resetPlatformSession,
   servedBy, KEY_ENVIRONMENTS, signInContext, sessionEnvironment, beginSignIn, shownBase, envApiKeyPresent,
 } from "./api.js";
@@ -40,6 +40,7 @@ const STAMP_WHERE_TOOLS = new Set([
   "ateam_test_skill", "ateam_test_pipeline", "ateam_test_connector", "ateam_test_notification",
   "ateam_verify_surface",
   "ateam_workspace_save", "ateam_workspace_close",
+  "ateam_create_test_persona", "ateam_update_test_persona", "ateam_delete_test_persona",
 ]);
 
 // ─── Signing in, switching workspace, and which environment ────────────────
@@ -331,6 +332,16 @@ function bundleNotRead(pull, branch = BRANCH_WORKFLOW.deploy_branch) {
 // (7d44113); before that, "the same actor_id maintains conversation context"
 // (ff1cbd2). Whether an answer must always reach the question it answers is
 // CORE's decision; this only says what happens today.
+// as_persona: run the test AS a test persona (a simulated person holding some of
+// the solution's roles), instead of as the key's own person. The Builder checks it
+// is a test persona of this workspace (routes/testPersonas.js resolveTestPersona).
+const AS_PERSONA_INPUT_SCHEMA = {
+  type: "string",
+  description:
+    "Optional: a TEST PERSONA's id or exact name (ateam_create_test_persona / ateam_list_test_personas). The job runs AS that simulated person, with its roles: " +
+    "ran_as is the persona's id, and the reply's as_persona says who it is. Omit to run as the key's own person.",
+};
+
 const CONVERSATION_CONTINUES =
   "Each call is a new chain, and your key, not actor_id, continues the conversation: Core keys it by the actor the job runs as (passing the reply's actor_id back is harmless).";
 const REPLY_WINDOW =
@@ -1460,6 +1471,22 @@ function forceDeleteNext(code, status, id, sid) {
 }
 
 /**
+ * A test-persona call (ateam_*_test_persona). The Builder answers a refusal with
+ * its own words and a code (TEST_PERSONAS_OFF, TEST_PERSONA_NOT_FOUND,
+ * TEST_PERSONA_EXISTS, KEY_HAS_NO_PERSON, ...): hand that over as the result, so
+ * the agent reads what to do instead of a bare HTTP error.
+ */
+async function personaCall(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    const parsed = jsonBodyOf(err?.body);
+    if (parsed && parsed.ok === false && parsed.error) return { ...parsed, http_status: err.status ?? null };
+    throw err;
+  }
+}
+
+/**
  * What a forced delete that did not succeed hands back. It is sent ONCE
  * (retries:0), so this is the only answer the caller gets.
  *   - Nothing was sent (a refused connection): thrown as is.
@@ -1907,6 +1934,7 @@ export const tools = [
           description:
             "Optional: the conversation thread. Pass the actor_id from a previous test response to continue that thread. " + TEST_RUNS_AS_AT,
         },
+        as_persona: AS_PERSONA_INPUT_SCHEMA,
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
       required: ["solution_id", "skill_id", "message"],
@@ -1994,9 +2022,80 @@ export const tools = [
             "ateam-mcp keeps the actor_id you pass, and the one the reply returns (a test_ id excepted), as this session's actor for later job reads such as ateam_chain_status, so pass only a real one: an id Core does not know makes those reads fail (401). " +
             TEST_RUNS_AS_AT,
         },
+        as_persona: AS_PERSONA_INPUT_SCHEMA,
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
       required: ["solution_id", "message"],
+    },
+  },
+  // ── TEST PERSONAS — simulated people a test acts as ──
+  // Arie, 2026-11-06: "the AI agent needs to be able to easily CREATE and DELETE
+  // them", so that it can develop a solution from A to Z. Kept in Core (an actor
+  // marked TEST, holding some of the solution's declared roles); the Builder's
+  // /test-personas routes reach it with this key and its person. The served rule
+  // is the Builder's TEST_PERSONAS_RULE (/spec/skill, test_personas).
+  {
+    name: "ateam_create_test_persona",
+    core: true,
+    description:
+      "Create a TEST PERSONA: a simulated person, marked TEST, holding some of the solution's declared roles (identity.consumer_roles), " +
+      "so you can test the solution as that person (as_persona on ateam_conversation / ateam_test_skill). It can never sign in and gets no email or message. " +
+      "Create one per role you need to prove, and DELETE them when the tests are done (ateam_delete_test_persona). " +
+      "Refused while the workspace's switch is off (Tenant Admin → Test personas; on by default on dev, off on production). Needs an owner's or admin's key. " +
+      "Rules: ateam_get_spec(topic: \"skill\", search: \"test_personas\").",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        name: { type: "string", description: "A name for the persona, unique among the workspace's personas (shown with [TEST]), e.g. \"Dana Supervisor\"" },
+        roles: {
+          type: "array",
+          items: { type: "string" },
+          description: "Role keys the solution declares in identity.consumer_roles (or \"<role>@<record id>\" for a role declared with per_record). Omit for a persona with no role.",
+        },
+      },
+      required: ["solution_id", "name"],
+    },
+  },
+  {
+    name: "ateam_list_test_personas",
+    core: true,
+    description:
+      "List the workspace's TEST PERSONAS (simulated people a test acts as), with the roles the solution declares and the switch " +
+      "(settings.enabled; settings.source \"default\" = the environment's default, \"set\" = an admin chose it).",
+    inputSchema: {
+      type: "object",
+      properties: { solution_id: { type: "string", description: "The solution ID" } },
+      required: ["solution_id"],
+    },
+  },
+  {
+    name: "ateam_update_test_persona",
+    core: true,
+    description: "Set a TEST PERSONA's roles to exactly the list given (role keys the solution declares). Only a test persona is ever changed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        persona_id: { type: "string", description: "The persona's id (persona.personaId)" },
+        roles: { type: "array", items: { type: "string" }, description: "The roles it holds from now on ([] for none)" },
+      },
+      required: ["solution_id", "persona_id", "roles"],
+    },
+  },
+  {
+    name: "ateam_delete_test_persona",
+    core: true,
+    description:
+      "Delete a TEST PERSONA for good (only a test persona is ever deleted; a real person never). Do this for every persona you created once the tests are done. " +
+      "Works while the switch is off. What its tests wrote stays: remove that test data too.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: { type: "string", description: "The solution ID" },
+        persona_id: { type: "string", description: "The persona's id (persona.personaId)" },
+      },
+      required: ["solution_id", "persona_id"],
     },
   },
   {
@@ -3911,6 +4010,7 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_get_execution_logs", "ateam_test_status", "ateam_get_chain", "ateam_chain_status",
     "ateam_get_metrics", "ateam_connector_logs", "ateam_inspect_data", "ateam_status_all",
     "ateam_get_widget_catalog",
+    "ateam_list_test_personas",
     "ateam_get_connector_source", "ateam_get_deployed_connector_source",
     "ateam_diff", "ateam_verify_consistency",
     "ateam_github_status", "ateam_get_repository_binding", "ateam_github_read", "ateam_github_log", "ateam_github_diff", "ateam_github_list_versions",
@@ -3925,6 +4025,8 @@ export const TOOL_SAFETY = Object.freeze({
     // A new [TEST] notification to an existing actor's channels.
     "ateam_test_notification",
     "ateam_log_progress", "ateam_log_lesson",
+    // A new simulated person, marked TEST, to run tests as.
+    "ateam_create_test_persona",
   ],
   destructive: [
     "ateam_build_and_run", "ateam_patch", "ateam_update", "ateam_redeploy",
@@ -3938,6 +4040,8 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_github_push", "ateam_github_pull", "ateam_github_patch", "ateam_github_write",
     "ateam_github_promote", "ateam_github_sync_from_main", "ateam_github_rollback",
     "ateam_sync_all", "ateam_test_abort",
+    // A test persona's roles replaced, or the persona removed.
+    "ateam_update_test_persona", "ateam_delete_test_persona",
     // exec runs any command in the workspace; save makes the work live; close may save.
     "ateam_workspace_exec", "ateam_workspace_save", "ateam_workspace_close",
     // RUNS CODE THIS SERVER CANNOT SEE.
@@ -4019,6 +4123,8 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector",
     "ateam_test_skill", "ateam_test_notification", "ateam_conversation", "ateam_test_pipeline",
     "ateam_test_voice", "ateam_test_connector", "ateam_test_abort", "ateam_solution_chat",
+    // Test personas: simulated people a test runs as. No source changes.
+    "ateam_create_test_persona", "ateam_list_test_personas", "ateam_update_test_persona", "ateam_delete_test_persona",
     // Scaffolding and deletes: the Builder has no dev.* equivalent for them yet.
     "ateam_create_connector", "ateam_create_plugin", "ateam_write_agent_doc",
     "ateam_delete_solution", "ateam_delete_skill", "ateam_delete_connector",
@@ -7353,7 +7459,7 @@ export const handlers = {
     return get(apiPath`/deploy/solutions/${solution_id}/logs${rawQuery(qsStr)}`, sid);
   },
 
-  ateam_conversation: async ({ solution_id, message, actor_id, attachments, wait, timeout_ms }, sid) => {
+  ateam_conversation: async ({ solution_id, message, actor_id, as_persona, attachments, wait, timeout_ms }, sid) => {
     // ALWAYS async on the wire. A conversation can run for minutes (auto-route
     // → worker → sub-skills), and a synchronous hold would blow past the 100s
     // Cloudflare edge limit → 524. So we kick off, return the chain id (job_id)
@@ -7361,7 +7467,7 @@ export const handlers = {
     // accepted for back-compat but no longer hold the HTTP request open.
     // Files go as dev-app sends them (src/testAttachments.js), checked before any request.
     const files = await prepareTestAttachments(attachments);
-    const body = { message, async: true, ...(actor_id ? { actor_id } : {}), ...(files ? { attachments: files } : {}) };
+    const body = { message, async: true, ...(actor_id ? { actor_id } : {}), ...(as_persona ? { as_persona } : {}), ...(files ? { attachments: files } : {}) };
     const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs: 15_000 });
     // The CHAIN id — not a single job id — is the conversation's identity and
     // what you poll. The Builder returns it as chain_id (falls back to the
@@ -7385,6 +7491,36 @@ export const handlers = {
           }
         : undefined,
     };
+  },
+
+  // Test personas (the definitions above say what they are). A refusal from the
+  // Builder (switched off, a role the solution does not declare, a key no person
+  // generated) comes back as the result with its code, not as a thrown transport error.
+  ateam_create_test_persona: async ({ solution_id, name, roles }, sid) => {
+    if (!solution_id) return { ok: false, error: "solution_id required" };
+    if (!name) return { ok: false, error: "name required" };
+    return personaCall(() => post(apiPath`/deploy/solutions/${solution_id}/test-personas`, { name, ...(roles !== undefined ? { roles } : {}) }, sid, { retries: 0 }));
+  },
+
+  ateam_list_test_personas: async ({ solution_id }, sid) => {
+    if (!solution_id) return { ok: false, error: "solution_id required" };
+    return personaCall(() => get(apiPath`/deploy/solutions/${solution_id}/test-personas`, sid));
+  },
+
+  ateam_update_test_persona: async ({ solution_id, persona_id, roles }, sid) => {
+    if (!solution_id) return { ok: false, error: "solution_id required" };
+    if (!persona_id) return { ok: false, error: "persona_id required" };
+    if (!Array.isArray(roles)) return { ok: false, error: "roles required: the list of role keys it holds from now on ([] for none)" };
+    return personaCall(() => patch(apiPath`/deploy/solutions/${solution_id}/test-personas/${persona_id}`, { roles }, sid, { retries: 0 }));
+  },
+
+  ateam_delete_test_persona: async ({ solution_id, persona_id }, sid) => {
+    if (!solution_id) return { ok: false, error: "solution_id required" };
+    if (!persona_id) return { ok: false, error: "persona_id required" };
+    const out = await personaCall(() => del(apiPath`/deploy/solutions/${solution_id}/test-personas/${persona_id}`, sid, { retries: 0 }));
+    // A session that last tested as this persona must not keep naming it to Core: the actor is gone, and Core 401s an actor it cannot find.
+    if (out?.deleted === true && getSessionContext(sid)?.actorId === persona_id) clearSessionActor(sid, "its test persona was deleted");
+    return out;
   },
 
   ateam_connector_logs: async ({ solution_id, connector_id, since, limit, errors_only }, sid) => {
@@ -7461,7 +7597,7 @@ export const handlers = {
     }
   },
 
-  ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id, attachments }, sid) => {
+  ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id, as_persona, attachments }, sid) => {
     // Resolve wait mode. Priority: wait_for (new explicit form) > wait (legacy).
     // wait:false  → "never"   (return job_id, no polling)
     // wait:true   → "root"    (poll root job to completion — current default)
@@ -7479,7 +7615,7 @@ export const handlers = {
     const isWireAsync = resolvedWait !== "root";
     // Files go as dev-app sends them (src/testAttachments.js), checked before any request.
     const files = await prepareTestAttachments(attachments);
-    const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}), ...(files ? { attachments: files } : {}) };
+    const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}), ...(as_persona ? { as_persona } : {}), ...(files ? { attachments: files } : {}) };
     const kickoffTimeoutMs = isWireAsync ? 15_000 : 90_000;
     const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs: kickoffTimeoutMs });
 
