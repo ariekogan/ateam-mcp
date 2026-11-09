@@ -164,6 +164,7 @@ import {
 // A step that waits for a person: the Builder's human_step_testing words, verbatim.
 import { WAITING_ON_THE_USER, PLAY_THE_PERSON, TEST_CONNECTOR_NEVER } from "./humanStep.js";
 import { apiPath, pathSeg, rawQuery } from "./pathParam.js";
+import { lineWindow, findLines } from "./textWindow.js";
 import { createHash, randomUUID } from "node:crypto";
 
 // Where a connector's data goes and who is calling — the Builder's ONE
@@ -937,6 +938,25 @@ function toolsSectionOf(r, solution_id, skill_id) {
       ? "No deploy is recorded for this skill, so these are only the tools you wrote (skill.json). Tools imported from its connectors appear here once it is deployed."
       : "This Builder sent no deployed state, so these are only the tools written in skill.json; tools imported from the skill's connectors are not listed.",
   };
+}
+
+// Reading a file in parts and finding lines in it (textWindow.js): the same three arguments on
+// ateam_github_read and ateam_get_connector_source, so an agent learns them once.
+const READ_IN_PARTS_PROPS = Object.freeze({
+  offset: { type: "number", description: "First line to return (1-based). A file too big for one answer (over ~40 KB) comes back in parts: the answer's next_offset is where to read on." },
+  limit: { type: "number", description: "How many lines to return from offset. Omit for as many as fit in one answer." },
+  search: { type: "string", description: "Find the lines that contain this text (letter case ignored): returns { path, line, text } for each, not the file. Then read around one with offset." },
+});
+
+/** A file answer read in parts or searched: content replaced by the part asked for, or by the matching lines. */
+function _readInParts(answer, { path, content, offset, limit, search }) {
+  if (typeof content !== "string") return answer;
+  if (typeof search === "string" && search.length) {
+    const { content: _drop, ...rest } = answer;
+    return { ...rest, ...findLines([{ path, content }], search) };
+  }
+  const part = lineWindow(content, { offset, limit });
+  return part ? { ...answer, content: part.content, lines: part.lines, next_offset: part.next_offset, _part: part.note } : answer;
 }
 
 // OPEN-8: byte offset/limit paging for reads that can exceed the ~50KB output
@@ -3194,8 +3214,10 @@ export const tools = [
         },
         path: {
           type: "string",
-          description: "Optional. Read ONE file (e.g. 'server.js', 'ui-dist/panel/index.html'). Omit to get a file manifest (paths + sizes, no content) — a whole connector's source exceeds the ~50KB output limit and truncates, so read files one at a time.",
+          description: "Optional. Read ONE file (e.g. 'server.js', 'ui-dist/panel/index.html'). Omit to get a file manifest (paths + sizes, no content) — a whole connector's source exceeds the ~50KB output limit and truncates, so read files one at a time. A big file is read by line range (offset, limit) or in parts (next_offset).",
         },
+        ...READ_IN_PARTS_PROPS,
+        search: { type: "string", description: "Find the lines that contain this text (letter case ignored) in ALL the connector's files, or only in `path` when given: returns { path, line, text } for each. Then read around one with path and offset." },
       },
       required: ["solution_id", "connector_id"],
     },
@@ -3411,7 +3433,8 @@ export const tools = [
       "⚠️ NOT RUNTIME STATE. For `solution.json` and `skills/<id>/skill.json` this returns a git MIRROR, not what is deployed. " +
       "Connector-imported tools are regenerated at deploy time, so a repo copy's `tools[]` can differ from production (on one solution `dev` showed 29 tools while production ran 66). " +
       "Reads of those paths carry an `_ateam_representation` field saying what you are holding. " +
-      "To answer \"what can this skill actually do?\", call ateam_get_solution(solution_id, skill_id, section:'tools') — never this tool.",
+      "To answer \"what can this skill actually do?\", call ateam_get_solution(solution_id, skill_id, section:'tools') — never this tool.\n\n" +
+      "BIG FILES: offset (first line) and limit (line count) read a range; a file over ~40 KB comes back in parts (`next_offset` says where to read on). `search` returns the matching lines with line numbers instead of the file.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3433,6 +3456,7 @@ export const tools = [
           // client read production while the text told it otherwise.
           description: "Branch, tag, or commit SHA to read from. Omit it to read `dev` (the working branch — the Builder resolves it). Use 'main' for the promoted/production state.",
         },
+        ...READ_IN_PARTS_PROPS,
       },
       required: ["solution_id", "path"],
     },
@@ -3646,13 +3670,16 @@ export const tools = [
       "  • See if dev is ahead of main at all (returns ahead_by: 0 if nothing to promote)\n" +
       "  • **Diagnose a failed promote** — check `behind_by` and `status`. `status: 'diverged'` (behind_by > 0) means main holds commits dev never received, which is what makes ateam_github_promote return 409 Merge conflict. ALWAYS call this after a promote failure, before reporting anything to the user.\n" +
       "  • Inspect arbitrary branch/tag/commit comparisons (override base/head)\n\n" +
-      "Note: `files[]` lists what DIFFERS, not what conflicts. For solution.json and skills/*/skill.json the difference is often deploy-generated data (regenerated connector tools, timestamps) rather than authored change — see ateam_github_read's `_ateam_representation`.",
+      "Note: `files[]` lists what DIFFERS, not what conflicts. For solution.json and skills/*/skill.json the difference is often deploy-generated data (regenerated connector tools, timestamps) rather than authored change — see ateam_github_read's `_ateam_representation`.\n\n" +
+      "CHANGED LINES: by default each file has only its name and counts. Pass lines:true to get each file's changed lines too (files[].patch), and path to look at one file.",
     inputSchema: {
       type: "object",
       properties: {
         solution_id: { type: "string", description: "The solution ID" },
         base: { type: "string", description: "Base branch/tag/sha (the target — what you're comparing TO). Default: 'main'.", default: "main" },
         head: { type: "string", description: "Head branch/tag/sha (the source — what you're comparing FROM). Default: 'dev'.", default: "dev" },
+        lines: { type: "boolean", description: "Also return the CHANGED LINES of each file (files[].patch, a unified diff: lines starting with + were added, - removed). Use it to review exactly what a promote would ship. A big change is cut to fit one answer; ask again with path for one file." },
+        path: { type: "string", description: "Only this file (e.g. 'connectors/crm-mcp/server.js'), with its changed lines." },
       },
       required: ["solution_id"],
     },
@@ -8077,7 +8104,7 @@ export const handlers = {
     return del(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
   },
 
-  ateam_get_connector_source: async ({ solution_id, connector_id, path }, sid) => {
+  ateam_get_connector_source: async ({ solution_id, connector_id, path, offset, limit, search }, sid) => {
     let data;
     try {
       data = await get(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
@@ -8129,6 +8156,11 @@ export const handlers = {
     // truncates (you couldn't read the file you needed). So: no `path` → return a
     // FILE MANIFEST (paths + sizes, no content — small); with `path` → return just
     // that ONE file's content. Targeted, never truncated.
+    const hasSearch = typeof search === "string" && search.length > 0;
+    if (!path && hasSearch) {
+      // Search across the connector's code: every text file, matching lines with their file and line number.
+      return { ok: true, connector_id, ...prov, ...findLines(files, search) };
+    }
     if (!path) {
       return {
         ok: true,
@@ -8136,7 +8168,7 @@ export const handlers = {
         ...prov,
         files: files.map((f) => ({ path: f.path, bytes: (f.content || "").length, encoding: f.encoding || "utf8" })),
         total_bytes: files.reduce((n, f) => n + (f.content || "").length, 0),
-        hint: "Large source is not returned inline. Call again with path:'<file>' to read one file (e.g. path:'server.js').",
+        hint: "Large source is not returned inline. Call again with path:'<file>' to read one file (e.g. path:'server.js'), with offset/limit for a line range, or with search:'<text>' to find lines in every file.",
       };
     }
     const norm = String(path).replace(/^\.?\//, "");
@@ -8144,7 +8176,9 @@ export const handlers = {
     if (!file) {
       return { ok: false, connector_id, ...prov, error: `file '${path}' not found`, available: files.map((f) => f.path) };
     }
-    return { ok: true, connector_id, ...prov, path: file.path, encoding: file.encoding || "utf8", content: file.content };
+    const answer = { ok: true, connector_id, ...prov, path: file.path, encoding: file.encoding || "utf8", content: file.content };
+    if ((file.encoding || "utf8") !== "utf8") return answer; // a binary file is not split into lines
+    return _readInParts(answer, { path: file.path, content: file.content, offset, limit, search });
   },
 
   ateam_get_deployed_connector_source: async ({ solution_id, connector_id, path }, sid) => {
@@ -8514,7 +8548,7 @@ export const handlers = {
     return { ...r, binding: { ...r.binding, production_branch: BRANCH_WORKFLOW.deploy_branch, development_branch: BRANCH_WORKFLOW.write_branch } };
   },
 
-  ateam_github_read: async ({ solution_id, path: filePath, ref, branch }, sid) => {
+  ateam_github_read: async ({ solution_id, path: filePath, ref, branch, offset, limit, search }, sid) => {
     // `branch` is an ALIAS for `ref`. The underlying API param is literally
     // called `branch`, so an agent passing branch:"dev" is being reasonable —
     // and because the schema did not declare it, MCP STRIPPED it and the read
@@ -8527,9 +8561,13 @@ export const handlers = {
     const result = await get(apiPath`/deploy/solutions/${solution_id}/github/read?${rawQuery(qs.toString())}`, sid);
     // Additive only — never reshape `result`, callers depend on the raw payload.
     const rep = _representationFor(filePath, result?.content, solution_id);
-    return rep && result && typeof result === "object"
+    const answer = rep && result && typeof result === "object"
       ? { ...result, _ateam_representation: rep }
       : result;
+    // A big file in parts, or the lines that match: textWindow.js. A file that fits, read whole, is returned as it came.
+    return answer && typeof answer === "object"
+      ? _readInParts(answer, { path: filePath, content: result?.content, offset, limit, search })
+      : answer;
   },
 
   ateam_github_patch: async ({ solution_id, path: filePath, content, search, replace, message, ref, branch, delete: del }, sid) =>
@@ -8580,12 +8618,21 @@ export const handlers = {
     return get(apiPath`/deploy/solutions/${solution_id}/github/log${rawQuery(q ? '?' + q : '')}`, sid);
   },
 
-  ateam_github_diff: async ({ solution_id, base, head }, sid) => {
+  ateam_github_diff: async ({ solution_id, base, head, lines, path: filePath }, sid) => {
     const qs = new URLSearchParams();
     if (base) qs.set('base', base);
     if (head) qs.set('head', head);
+    const withLines = lines === true || (typeof filePath === "string" && filePath.length > 0);
+    if (withLines) qs.set('lines', '1');
+    if (filePath) qs.set('path', filePath);
     const q = qs.toString();
-    return get(apiPath`/deploy/solutions/${solution_id}/github/diff${rawQuery(q ? '?' + q : '')}`, sid);
+    const result = await get(apiPath`/deploy/solutions/${solution_id}/github/diff${rawQuery(q ? '?' + q : '')}`, sid);
+    // A Builder from before changed lines ignores the ask: say so, rather than answer as if no line had changed.
+    const files = Array.isArray(result?.files) ? result.files : null;
+    if (withLines && files && files.length && files.every((f) => f && !("patch" in f))) {
+      return { ...result, _lines: "This Builder does not send changed lines yet (it is older than this tool). Read the file on both branches with ateam_github_read(ref:'main') and ateam_github_read(ref:'dev') to compare." };
+    }
+    return result;
   },
 
   ateam_verify_consistency: async ({ solution_id }, sid) =>
