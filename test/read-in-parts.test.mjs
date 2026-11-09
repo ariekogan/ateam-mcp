@@ -8,7 +8,7 @@
 // Run: node --test test/read-in-parts.test.mjs
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { tools, handlers } from "../src/tools.js";
+import { tools, handlers, formatResultForTest } from "../src/tools.js";
 import { lineWindow, findLines, WINDOW_CHARS, MAX_MATCHES } from "../src/textWindow.js";
 
 const byName = (n) => tools.find((t) => t.name === n);
@@ -50,6 +50,34 @@ describe("lineWindow", () => {
     assert.equal(offset, null);
     assert.equal(parts.join("\n"), BIG);
   });
+  test("one line too long for an answer (a minified file) is read in pieces that join up to the line", () => {
+    const longLine = "y".repeat(WINDOW_CHARS * 2 + 123);
+    const text = `first\nsecond\n${longLine}\nlast`;
+    const out = [];
+    let at = { offset: 1 };
+    for (let guard = 0; at && guard < 20; guard++) {
+      const w = lineWindow(text, at);
+      assert.ok(w.content.length <= WINDOW_CHARS);
+      out.push({ line: w.lines.from, piece: !!w.chars, text: w.content });
+      at = w.next_offset ? { offset: w.next_offset, ...(w.next_char_offset != null && { char_offset: w.next_char_offset }) } : null;
+    }
+    assert.deepEqual(out.map((o) => [o.line, o.piece]), [[1, false], [3, true], [3, true], [3, true], [4, false]]);
+    assert.equal(out.filter((o) => o.line === 3).map((o) => o.text).join(""), longLine);
+    assert.equal(out[0].text, "first\nsecond"); assert.equal(out[4].text, "last");
+    const mid = lineWindow(text, { offset: 3, char_offset: WINDOW_CHARS });
+    assert.deepEqual(mid.chars, { from: WINDOW_CHARS, to: WINDOW_CHARS * 2, of: longLine.length });
+    assert.match(mid.note, new RegExp(`char_offset:${WINDOW_CHARS * 2}`));
+  });
+  test("a file that is one huge line, read through a tool, fits one answer and says where to read on", async () => {
+    stub(() => ({ ok: true, branch: "dev", content: "z".repeat(120_000) }));
+    try {
+      const r = await handlers.ateam_github_read({ solution_id: "s", path: "dist/app.min.js" }, "sid");
+      assert.equal(r.content.length, WINDOW_CHARS); assert.equal(r.next_offset, 1); assert.equal(r.next_char_offset, WINDOW_CHARS);
+      assert.doesNotThrow(() => JSON.parse(formatResultForTest(r, "ateam_github_read")));
+      const r2 = await handlers.ateam_github_read({ solution_id: "s", path: "dist/app.min.js", offset: 1, char_offset: 80_000 }, "sid");
+      assert.equal(r2.content.length, 40_000); assert.equal(r2.next_offset, null); assert.equal(r2.next_char_offset, null);
+    } finally { unstub(); }
+  });
   test("past the end says so", () => {
     const w = lineWindow("a\nb", { offset: 9 });
     assert.equal(w.content, ""); assert.equal(w.next_offset, null); assert.match(w.note, /past the end/);
@@ -66,6 +94,14 @@ describe("findLines", () => {
     assert.deepEqual(r.matches, [{ path: "server.js", line: 2, text: "function Invite() {}" }, { path: "lib/x.js", line: 1, text: "// invite here" }]);
     assert.equal(r.files_searched, 2); assert.equal(r.truncated, false);
   });
+  test("many long matching lines: only as many as fit one answer, and the answer stays whole", () => {
+    const content = Array.from({ length: 300 }, (_, i) => `hit ${i} ${"w".repeat(400)}`).join("\n");
+    const r = findLines([{ path: "connectors/some-connector/dist/bundle.js", content }], "hit");
+    assert.ok(r.matches.length < MAX_MATCHES); assert.equal(r.total_matches, 300); assert.equal(r.truncated, true);
+    const out = formatResultForTest({ ok: true, ...r }, "ateam_get_connector_source");
+    assert.equal(JSON.parse(out).total_matches, 300, "the count and the note are not cut off");
+    assert.match(JSON.parse(out).note, /search for something narrower/);
+  });
   test("too many matches are capped and say so", () => {
     const r = findLines([{ path: "a", content: Array(MAX_MATCHES + 5).fill("hit").join("\n") }], "hit");
     assert.equal(r.matches.length, MAX_MATCHES); assert.equal(r.total_matches, MAX_MATCHES + 5); assert.equal(r.truncated, true);
@@ -75,7 +111,7 @@ describe("findLines", () => {
 describe("ateam_github_read", () => {
   test("declares offset, limit and search (an undeclared argument is stripped by MCP)", () => {
     const p = byName("ateam_github_read").inputSchema.properties;
-    for (const k of ["offset", "limit", "search"]) assert.ok(p[k], k);
+    for (const k of ["offset", "limit", "char_offset", "search"]) assert.ok(p[k], k);
     assert.match(byName("ateam_github_read").description, /offset/);
   });
   test("a big file read without a range comes back in parts, the first part first", async () => {
