@@ -945,18 +945,21 @@ function toolsSectionOf(r, solution_id, skill_id) {
 const READ_IN_PARTS_PROPS = Object.freeze({
   offset: { type: "number", description: "First line to return (1-based). A file too big for one answer (over ~40 KB) comes back in parts: the answer's next_offset is where to read on." },
   limit: { type: "number", description: "How many lines to return from offset. Omit for as many as fit in one answer." },
+  char_offset: { type: "number", description: "Only for one line too long for an answer (a minified file): where in line `offset` to start. The answer's next_char_offset is where to read on." },
   search: { type: "string", description: "Find the lines that contain this text (letter case ignored): returns { path, line, text } for each, not the file. Then read around one with offset." },
 });
 
 /** A file answer read in parts or searched: content replaced by the part asked for, or by the matching lines. */
-function _readInParts(answer, { path, content, offset, limit, search }) {
+function _readInParts(answer, { path, content, offset, limit, char_offset, search }) {
   if (typeof content !== "string") return answer;
   if (typeof search === "string" && search.length) {
     const { content: _drop, ...rest } = answer;
     return { ...rest, ...findLines([{ path, content }], search) };
   }
-  const part = lineWindow(content, { offset, limit });
-  return part ? { ...answer, content: part.content, lines: part.lines, next_offset: part.next_offset, _part: part.note } : answer;
+  const part = lineWindow(content, { offset, limit, char_offset });
+  if (!part) return answer;
+  const { content: text, lines, chars, next_offset, next_char_offset, note } = part;
+  return { ...answer, content: text, lines, ...(chars && { chars, next_char_offset }), next_offset, _part: note };
 }
 
 // OPEN-8: byte offset/limit paging for reads that can exceed the ~50KB output
@@ -8104,7 +8107,7 @@ export const handlers = {
     return del(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test/${job_id}`, sid);
   },
 
-  ateam_get_connector_source: async ({ solution_id, connector_id, path, offset, limit, search }, sid) => {
+  ateam_get_connector_source: async ({ solution_id, connector_id, path, offset, limit, char_offset, search }, sid) => {
     let data;
     try {
       data = await get(apiPath`/deploy/solutions/${solution_id}/connectors/${connector_id}/source`, sid);
@@ -8178,7 +8181,7 @@ export const handlers = {
     }
     const answer = { ok: true, connector_id, ...prov, path: file.path, encoding: file.encoding || "utf8", content: file.content };
     if ((file.encoding || "utf8") !== "utf8") return answer; // a binary file is not split into lines
-    return _readInParts(answer, { path: file.path, content: file.content, offset, limit, search });
+    return _readInParts(answer, { path: file.path, content: file.content, offset, limit, char_offset, search });
   },
 
   ateam_get_deployed_connector_source: async ({ solution_id, connector_id, path }, sid) => {
@@ -8548,7 +8551,7 @@ export const handlers = {
     return { ...r, binding: { ...r.binding, production_branch: BRANCH_WORKFLOW.deploy_branch, development_branch: BRANCH_WORKFLOW.write_branch } };
   },
 
-  ateam_github_read: async ({ solution_id, path: filePath, ref, branch, offset, limit, search }, sid) => {
+  ateam_github_read: async ({ solution_id, path: filePath, ref, branch, offset, limit, char_offset, search }, sid) => {
     // `branch` is an ALIAS for `ref`. The underlying API param is literally
     // called `branch`, so an agent passing branch:"dev" is being reasonable —
     // and because the schema did not declare it, MCP STRIPPED it and the read
@@ -8566,7 +8569,7 @@ export const handlers = {
       : result;
     // A big file in parts, or the lines that match: textWindow.js. A file that fits, read whole, is returned as it came.
     return answer && typeof answer === "object"
-      ? _readInParts(answer, { path: filePath, content: result?.content, offset, limit, search })
+      ? _readInParts(answer, { path: filePath, content: result?.content, offset, limit, char_offset, search })
       : answer;
   },
 
