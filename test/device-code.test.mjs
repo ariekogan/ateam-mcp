@@ -53,6 +53,14 @@ test("an app gets a link and a code; the requester is named by what it is, never
   assert.equal(calls.at(-1).params.requester.name, "An app using a sign-in code");
 });
 
+test("a DEV link's app hint goes to Core as a label; the page still names the sign-in code", async () => {
+  core = { deviceOpen: () => OPENED };
+  const r = await post("/device_authorization", { client_id: "c-term", app: "claude" });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(calls.at(-1).params.app, "claude");
+  assert.equal(calls.at(-1).params.requester.name, "An app using a sign-in code");
+});
+
 test("the poll: pending is an OAuth error the app waits on; approved gives the tokens", async () => {
   core = { devicePoll: () => ({ ok: false, status: 400, body: { code: "authorization_pending", error: "waiting" } }) };
   const wait = await post("/token", { grant_type: DEVICE_GRANT, device_code: "atd_x", client_id: "c-term" });

@@ -49,7 +49,7 @@ let fetchImpl = (...a) => fetch(...a);
 export function _setPeerFetch(fn) {
   fetchImpl = fn || ((...a) => fetch(...a));
   for (const p of peers.values()) p.client.close().catch(() => {});
-  offers.clear(); remotes.clear(); links.clear(); pendings.clear(); peers.clear(); people.clear();
+  offers.clear(); remotes.clear(); links.clear(); pendings.clear(); peers.clear(); people.clear(); vias.clear();
 }
 
 const offers = new Map();   // gid → { env, mcp_url, linked } | null  (production Core's word, at most 60 s old)
@@ -58,6 +58,7 @@ const links = new Map();    // gid → { id, mcpUrl, clientId, refresh, saved, a
 const pendings = new Map(); // gid → { mcpUrl, clientId, deviceCode, userCode, url, until, interval }
 const peers = new Map();    // sessionId → { gid, client, linkId, prod: { token } (the newest production token) }
 const people = new Map();   // gid → the person's email on this side, for the same-person check
+const vias = new Map();     // gid → the app the person signed in through (Core resolve `via`), carried to the DEV link
 
 /**
  * What production Core said about the grant on this request (http.js → grantSession.js, every request): the DEV
@@ -66,6 +67,7 @@ const people = new Map();   // gid → the person's email on this side, for the 
 export function noteGrant(gid, extra = {}, { devMcpUrl = null } = {}) {
   offers.set(gid, extra.link && extra.env === "prod" && devMcpUrl ? { env: "dev", mcp_url: devMcpUrl, linked: !!extra.link.linked } : null);
   if (extra.email) people.set(gid, String(extra.email).toLowerCase());
+  if (typeof extra.via === "string") vias.set(gid, extra.via);
   if (!remotes.has(gid)) remotes.set(gid, extra.remote?.tenant ? { env: "dev", tenant: extra.remote.tenant, name: extra.remote.name || null } : null);
 }
 
@@ -207,7 +209,9 @@ export async function ensureLink(prodToken, gid) {
     if (body?.error === "access_denied") return { refused: "The DEV approval was denied. Nothing changed. Ask again to get a new link." };
   }
   const clientId = `ateam-link-${randomUUID()}`;
-  const { status, body } = await peerPost(offer.mcp_url, "/device_authorization", { client_id: clientId });
+  // The app the person came through on production, so DEV's spend says "Claude", not "a sign-in code".
+  const app = vias.get(gid);
+  const { status, body } = await peerPost(offer.mcp_url, "/device_authorization", { client_id: clientId, ...(app ? { app } : {}) });
   if (status !== 200 || !body.device_code || !body.user_code) {
     return { refused: `The DEV connector could not start an approval: ${body?.error_description || body?.error || status}.` };
   }

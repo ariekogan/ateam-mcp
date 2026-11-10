@@ -302,7 +302,12 @@ function mountDeviceFlow(router, provider, serverUrl) {
   const clientAuth = authenticateClient({ clientsStore: provider.clientsStore });
 
   router.post("/device_authorization", ...form, clientAuth, async (req, res) => {
-    const out = await core(res, "deviceOpen", { client_id: req.client.client_id, requester: DEVICE_REQUESTER, ua: req.headers["user-agent"] || null });
+    // `app`: the app the person signed in through, sent by a production connector making its DEV link (envLink.js).
+    // Core keeps it only as the "via" label, from its fixed list; the approval page still names DEVICE_REQUESTER.
+    // Self-asserted label, never use for authz: any caller can send it, and it only names the app on the
+    // person's own grant and own spend. Bind it (e.g. a signed link request) if it is ever used for billing or policy.
+    const app = typeof req.body?.app === "string" ? req.body.app.slice(0, 40) : null;
+    const out = await core(res, "deviceOpen", { client_id: req.client.client_id, requester: DEVICE_REQUESTER, ua: req.headers["user-agent"] || null, app });
     if (!out) return;
     if (!out.ok) return oauthError(res, 400, refusalCode(out) || "invalid_request", refusalText(out));
     if (out.env !== provider.environment) return oauthError(res, 400, "unsupported_grant_type", "Sign-in codes are not offered on this connector");
@@ -393,7 +398,7 @@ const accessTokens = {
         clientId: "ateam-public",
         scopes: ["mcp"],
         expiresAt: who.exp,
-        extra: { grant: who.gid, userId: who.userId, email: who.email, env: who.env, lastTenant: who.lastTenant, link: who.link || null, remote: who.remote || null },
+        extra: { grant: who.gid, userId: who.userId, email: who.email, env: who.env, lastTenant: who.lastTenant, link: who.link || null, remote: who.remote || null, via: who.via || null },
       };
     }
     const parsed = parseApiKey(token);
