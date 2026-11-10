@@ -17,7 +17,7 @@ import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import express from "express";
-import { deriveServiceSecret, _setCoreFetch } from "../src/grantAuth.js";
+import { deriveServiceSecret, _setCoreFetch, ticketFor, freshTicket, peekGrantWorkspace, actsAs } from "../src/grantAuth.js";
 import { seedGrantSession } from "../src/grantSession.js";
 import {
   grantOwner, getSessionOwner, sessionOwnershipOk, getCredentials, isExplicitlyAuthenticated, getAuthOverride,
@@ -35,7 +35,7 @@ const KEY = { home: `adas_prod_home_${HEX}`, other: `adas_prod_other_${HEX}` };
 const NAMES = { home: "Home", other: "Other Co" };
 
 /** A stand-in Core: answers cp.agent_auth_api calls, records them, and checks the door. */
-function fakeCore({ env = "prod", lastTenant = null, workspaces = ["home", "other"], gid = "g1", down = false, refuseToken = false } = {}) {
+function fakeCore({ env = "prod", lastTenant = null, workspaces = ["home", "other"], gid = "g1", down = false, refuseToken = false, ticket = null } = {}) {
   const calls = [];
   _setCoreFetch(async (url, init) => {
     if (down) throw new Error("connect ECONNREFUSED");
@@ -53,8 +53,14 @@ function fakeCore({ env = "prod", lastTenant = null, workspaces = ["home", "othe
       out = { ok: true, env, current: lastTenant, workspaces: workspaces.map((t) => ({ tenant: t, name: NAMES[t], role: "owner" })) };
     } else if (method === "workspaceKey") {
       out = workspaces.includes(params.tenant)
-        ? { ok: true, tenant: params.tenant, name: NAMES[params.tenant], env, api_key: KEY[params.tenant], key_minted_by: "act_1", person: { email: "p@x.com" } }
+        ? { ok: true, tenant: params.tenant, name: NAMES[params.tenant], env, api_key: KEY[params.tenant], key_minted_by: "act_1", person: { email: "p@x.com" },
+            ...(ticket && { person_ticket: `apt_${ticket.n}`, person_ticket_expires_in: 900 }) }
         : { ok: false, status: 403, body: { code: "NOT_YOUR_WORKSPACE", error: "not yours" } };
+    } else if (method === "personTicket") {
+      if (ticket?.slow) await new Promise((r) => setTimeout(r, 20));
+      out = ticket && !ticket.refuse
+        ? { ok: true, tenant: params.tenant, person_ticket: `apt_${++ticket.n}`, person_ticket_expires_in: 900 }
+        : { ok: false, status: 403, body: { code: "NOT_YOUR_WORKSPACE", error: "not owner or admin there" } };
     } else out = { ok: true };
     return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { structuredContent: out } }), { status: 200, headers: { "Content-Type": "application/json" } });
   });
@@ -217,4 +223,42 @@ test("the workspace label names the workspace THIS call ran on, not one another 
   assert.equal(ctx.tenant, "home");
   assert.notEqual(ctx.workspaceName, "Other Co");
   clearSession(a); clearSession(b);
+});
+
+// D7 (ai-dev-assistant plans/personal-signin/D7-v2.md §11): the person ticket rides beside the key, only with
+// that key in that workspace; it is renewed before it ends, one renewal at a time; a refused one is said honestly.
+test("D7: the person ticket goes only with its own key and workspace, is renewed once at a time, and a refusal is said", async () => {
+  const ticket = { n: 1, slow: true };
+  const calls = fakeCore({ lastTenant: "home", gid: "g-tk", ticket });
+  const s = sid();
+  const r = { auth: { token: "atg_tk", extra: { grant: "g-tk", env: "prod", lastTenant: "home" } } };
+  await seedGrantSession(r, s);
+  assert.equal(ticketFor("g-tk", "home", KEY.home), "apt_1");
+  assert.equal(ticketFor("g-tk", "other", KEY.home), null, "a ticket went with another workspace");
+  assert.equal(ticketFor("g-tk", "home", KEY.other), null, "a ticket went with another key");
+  assert.match(actsAs(peekGrantWorkspace("g-tk")), /acting as you/);
+  const realNow = Date.now;
+  Date.now = () => realNow() + 850_000; // under a minute left
+  try {
+    const w = peekGrantWorkspace("g-tk");
+    await Promise.all([freshTicket("atg_tk", "g-tk", w), freshTicket("atg_tk", "g-tk", w), freshTicket("atg_tk", "g-tk", w)]);
+    assert.equal(calls.filter((c) => c.method === "personTicket").length, 1, "renewals ran side by side");
+    assert.equal(ticketFor("g-tk", "home", KEY.home), "apt_2");
+    Date.now = () => realNow() + 1_700_000; // the renewed one nears its end too, and Core now refuses
+    ticket.refuse = true;
+    await freshTicket("atg_tk", "g-tk", w);
+    assert.equal(ticketFor("g-tk", "home", KEY.home), null, "a refused or ended ticket was still sent");
+    assert.match(actsAs(w), /not as you \(not owner or admin there\)/);
+  } finally { Date.now = realNow; }
+  clearSession(s);
+});
+
+test("D7: an ended ticket is never sent, even before a renewal ran", async () => {
+  fakeCore({ lastTenant: "home", gid: "g-end", ticket: { n: 7 } });
+  const s = sid();
+  await seedGrantSession({ auth: { token: "atg_end", extra: { grant: "g-end", env: "prod", lastTenant: "home" } } }, s);
+  const realNow = Date.now;
+  Date.now = () => realNow() + 901_000;
+  try { assert.equal(ticketFor("g-end", "home", KEY.home), null); } finally { Date.now = realNow; }
+  clearSession(s);
 });

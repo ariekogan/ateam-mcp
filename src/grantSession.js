@@ -3,7 +3,7 @@
  * grantAuth.js talks to Core; this file puts the grant's workspace into the session (api.js).
  */
 import { bindSessionGrant, dropSessionWorkspace, getCredentials, setSessionCredentials, baseUrlForKeyEnv, mcpUrlForEnv, KEY_ENVIRONMENTS } from "./api.js";
-import { activeWorkspace, chooseWorkspace, listGrantWorkspaces } from "./grantAuth.js";
+import { activeWorkspace, chooseWorkspace, listGrantWorkspaces, freshTicket } from "./grantAuth.js";
 import { noteGrant, remoteOf } from "./envLink.js";
 /**
  * A PERSONAL SIGN-IN SESSION (grantAuth.js): bind the grant, then put the grant's active workspace in.
@@ -37,6 +37,8 @@ export async function seedGrantSession(req, sessionId) {
     w = null;
   }
   if (!w) w = await startingWorkspace(token, gid, extra.lastTenant);
+  // D7: the person ticket that makes this workspace's calls act as the person (renewed before it ends).
+  if (w) await freshTicket(token, gid, w);
   if (!w) {
     dropSessionWorkspace(sessionId);
     return;

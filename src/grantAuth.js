@@ -134,8 +134,57 @@ export async function chooseWorkspace(token, gid, tenant, { leaveRemote = false 
   const out = await coreCall("workspaceKey", { access_token: token, tenant, ...(leaveRemote && { leave_remote: true }) });
   if (!out.ok) return out;
   const w = { tenant: out.tenant, name: out.name || out.tenant, env: out.env, apiKey: out.api_key, keyMintedBy: out.key_minted_by || null, person: out.person || null, checkedAt: Date.now() };
+  takeTicket(w, out);
   grantWorkspaces.set(gid, w);
   return { ok: true, workspace: w };
+}
+
+// ── D7: the person ticket (ai-dev-assistant plans/personal-signin/D7-v2.md §11) ─────────────────────
+// Core hands out a short "this is the person" ticket (apt_) with the key. api.js headers() sends it beside the
+// key, so every call acts as the signed-in owner/admin instead of the key's minter. The ticket is useless
+// alone (it needs the key, and no door of this server takes it as a sign-in). It is renewed here, one
+// renewal at a time per grant, 60 s before it ends. No ticket (Core said why: no profile there yet, not
+// active): the calls act as the key does, and actsAs() says so.
+const TICKET_RENEW_BEFORE_MS = 60_000;
+const ticketRenewals = new Map(); // gid → promise of the renewal in flight
+
+function takeTicket(w, out) {
+  if (typeof out.person_ticket === "string" && out.person_ticket.startsWith("apt_")) {
+    w.ticket = out.person_ticket;
+    w.ticketExp = Date.now() + (Number(out.person_ticket_expires_in) || 900) * 1000;
+    w.ticketRefused = null;
+  } else {
+    w.ticket = null;
+    w.ticketExp = 0;
+    w.ticketRefused = out.person_ticket_refused || out.body || null;
+  }
+}
+
+/** Make sure the grant's workspace holds a ticket with at least a minute left. Throws CoreUnavailable on an outage. */
+export async function freshTicket(token, gid, w) {
+  if (!w || w.dropped) return;
+  if (w.ticket && w.ticketExp - Date.now() > TICKET_RENEW_BEFORE_MS) return;
+  if (!w.ticket && w.ticketRefused && Date.now() - (w.ticketTriedAt || 0) < RESOLVE_CACHE_MS) return;
+  if (!ticketRenewals.has(gid)) {
+    ticketRenewals.set(gid, (async () => {
+      try {
+        const out = await coreCall("personTicket", { access_token: token, tenant: w.tenant });
+        w.ticketTriedAt = Date.now();
+        if (out.ok) takeTicket(w, out);
+        else takeTicket(w, { person_ticket_refused: out.body || { code: refusalCode(out), error: refusalText(out) } });
+      } finally {
+        ticketRenewals.delete(gid);
+      }
+    })());
+  }
+  await ticketRenewals.get(gid);
+}
+
+/** The ticket to send with a call made with `apiKey` in `tenant`, or null. */
+export function ticketFor(gid, tenant, apiKey) {
+  const w = grantWorkspaces.get(gid);
+  if (!w || !w.ticket || w.tenant !== tenant || w.apiKey !== apiKey || w.ticketExp <= Date.now()) return null;
+  return w.ticket;
 }
 
 /** Forget the cached answer for this token, so the next request reads the grant as a switch just left it. */
@@ -152,5 +201,7 @@ export async function listGrantWorkspaces(token) {
 /** Who acts in a workspace: the person signed in, as themself (D7; 9Q Q4: say it honestly). */
 export function actsAs(w) {
   const who = w?.person?.email || w?.person?.name || "you";
-  return `Signed in as ${who}; acting as you in ${w?.name || w?.tenant}.`;
+  if (w?.ticket) return `Signed in as ${who}; acting as you in ${w?.name || w?.tenant}.`;
+  const why = w?.ticketRefused?.error ? ` (${w.ticketRefused.error})` : "";
+  return `Signed in as ${who}; acting with ${w?.name || w?.tenant}'s workspace key${w?.keyMintedBy ? ` (minted by ${w.keyMintedBy})` : " (minted by no person)"}, not as you${why}.`;
 }
