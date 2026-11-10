@@ -304,6 +304,8 @@ function mountDeviceFlow(router, provider, serverUrl) {
   router.post("/device_authorization", ...form, clientAuth, async (req, res) => {
     // `app`: the app the person signed in through, sent by a production connector making its DEV link (envLink.js).
     // Core keeps it only as the "via" label, from its fixed list; the approval page still names DEVICE_REQUESTER.
+    // Self-asserted label, never use for authz: any caller can send it, and it only names the app on the
+    // person's own grant and own spend. Bind it (e.g. a signed link request) if it is ever used for billing or policy.
     const app = typeof req.body?.app === "string" ? req.body.app.slice(0, 40) : null;
     const out = await core(res, "deviceOpen", { client_id: req.client.client_id, requester: DEVICE_REQUESTER, ua: req.headers["user-agent"] || null, app });
     if (!out) return;
