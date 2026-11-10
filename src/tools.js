@@ -340,7 +340,13 @@ const AS_PERSONA_INPUT_SCHEMA = {
   type: "string",
   description:
     "Optional: a TEST PERSONA's id or exact name (ateam_create_test_persona / ateam_list_test_personas). The job runs AS that simulated person, with its roles: " +
-    "ran_as is the persona's id, and the reply's as_persona says who it is. Omit to run as the key's own person.",
+    "ran_as is the persona's id, and the reply's as_persona says who it is. Omitted: " + TEST_RUNS_AS_AT,
+};
+// as_me (D7): in a personal sign-in, run the test as the signed-in person themself. Only when the
+// person asked for it. Who a test runs as without it is the Builder's rule (TEST_RUNS_AS_AT).
+const AS_ME_INPUT_SCHEMA = {
+  type: "boolean",
+  description: "Optional, personal sign-in only: true runs the test as the signed-in person themself. Pass it only when the person asked to run the test as themself. " + TEST_RUNS_AS_AT,
 };
 
 const CONVERSATION_CONTINUES =
@@ -1962,6 +1968,7 @@ export const tools = [
             "Optional: the conversation thread. Pass the actor_id from a previous test response to continue that thread. " + TEST_RUNS_AS_AT,
         },
         as_persona: AS_PERSONA_INPUT_SCHEMA,
+        as_me: AS_ME_INPUT_SCHEMA,
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
       required: ["solution_id", "skill_id", "message"],
@@ -2050,6 +2057,7 @@ export const tools = [
             TEST_RUNS_AS_AT,
         },
         as_persona: AS_PERSONA_INPUT_SCHEMA,
+        as_me: AS_ME_INPUT_SCHEMA,
         attachments: ATTACHMENTS_INPUT_SCHEMA,
       },
       required: ["solution_id", "message"],
@@ -7510,7 +7518,7 @@ export const handlers = {
     return get(apiPath`/deploy/solutions/${solution_id}/logs${rawQuery(qsStr)}`, sid);
   },
 
-  ateam_conversation: async ({ solution_id, message, actor_id, as_persona, attachments, wait, timeout_ms }, sid) => {
+  ateam_conversation: async ({ solution_id, message, actor_id, as_persona, as_me, attachments, wait, timeout_ms }, sid) => {
     // ALWAYS async on the wire. A conversation can run for minutes (auto-route
     // → worker → sub-skills), and a synchronous hold would blow past the 100s
     // Cloudflare edge limit → 524. So we kick off, return the chain id (job_id)
@@ -7518,7 +7526,7 @@ export const handlers = {
     // accepted for back-compat but no longer hold the HTTP request open.
     // Files go as dev-app sends them (src/testAttachments.js), checked before any request.
     const files = await prepareTestAttachments(attachments);
-    const body = { message, async: true, ...(actor_id ? { actor_id } : {}), ...(as_persona ? { as_persona } : {}), ...(files ? { attachments: files } : {}) };
+    const body = { message, async: true, ...(actor_id ? { actor_id } : {}), ...(as_persona ? { as_persona } : {}), ...(as_me === true ? { as_me: true } : {}), ...(files ? { attachments: files } : {}) };
     const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/test`, body, sid, { timeoutMs: 15_000 });
     // The CHAIN id — not a single job id — is the conversation's identity and
     // what you poll. The Builder returns it as chain_id (falls back to the
@@ -7648,7 +7656,7 @@ export const handlers = {
     }
   },
 
-  ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id, as_persona, attachments }, sid) => {
+  ateam_test_skill: async ({ solution_id, skill_id, message, wait, wait_for, chain_timeout_ms, actor_id, as_persona, as_me, attachments }, sid) => {
     // Resolve wait mode. Priority: wait_for (new explicit form) > wait (legacy).
     // wait:false  → "never"   (return job_id, no polling)
     // wait:true   → "root"    (poll root job to completion — current default)
@@ -7666,7 +7674,7 @@ export const handlers = {
     const isWireAsync = resolvedWait !== "root";
     // Files go as dev-app sends them (src/testAttachments.js), checked before any request.
     const files = await prepareTestAttachments(attachments);
-    const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}), ...(as_persona ? { as_persona } : {}), ...(files ? { attachments: files } : {}) };
+    const body = { message, ...(isWireAsync ? { async: true } : {}), ...(actor_id ? { actor_id } : {}), ...(as_persona ? { as_persona } : {}), ...(as_me === true ? { as_me: true } : {}), ...(files ? { attachments: files } : {}) };
     const kickoffTimeoutMs = isWireAsync ? 15_000 : 90_000;
     const kickoff = await post(apiPath`/deploy/solutions/${solution_id}/skills/${skill_id}/test`, body, sid, { timeoutMs: kickoffTimeoutMs });
 
