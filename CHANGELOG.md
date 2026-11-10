@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.127 — 2026-11-10
+
+### Spend by app: the DEV link carries the app the person signed in through (#97)
+
+The device sign-in link carries the app the person signed in through, so spend can be shown by app. The app hint is a self-asserted label, never used for authorization.
+
 ## 0.4.126 — 2026-11-10
 
 ### A personal sign-in acts as the signed-in person (D7, #96)
