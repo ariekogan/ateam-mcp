@@ -1243,6 +1243,12 @@ function headers(sessionId) {
   const h = { "Content-Type": "application/json" };
   if (tenant) h["X-ADAS-TENANT"] = tenant;
   if (apiKey) h["X-API-KEY"] = apiKey;
+  // D7 (ai-dev-assistant plans/personal-signin/D7-v2.md): a personal sign-in session sends the
+  // person's NEWEST access token beside the key, so Core, the validator and the Builder act as the
+  // signed-in owner/admin, not as whoever minted the key. The key is still the credential; a token
+  // Core does not accept is refused there, never downgraded to the key.
+  const grant = apiKey ? sessionGrants.get(sessionId) : null;
+  if (grant?.token && grant.token.startsWith("atg_")) h["X-ADAS-PERSON-TOKEN"] = grant.token;
   // The acting actor rides with the tenant on EVERY call — see touchSession.
   // The tenant says WHICH account; the actor says WHO, and per-job reads need
   // both. Adds no authority: Core resolves the actor INSIDE the authenticated

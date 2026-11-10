@@ -149,8 +149,8 @@ export async function listGrantWorkspaces(token) {
   return coreCall("listWorkspaces", { access_token: token });
 }
 
-/** Who acts in a workspace: the person signed in, with that workspace's key (9Q Q4: say it honestly). */
+/** Who acts in a workspace: the person signed in, as themself (D7; 9Q Q4: say it honestly). */
 export function actsAs(w) {
   const who = w?.person?.email || w?.person?.name || "you";
-  return `Signed in as ${who}; acting with ${w?.name || w?.tenant}'s workspace key${w?.keyMintedBy ? ` (minted by ${w.keyMintedBy})` : " (minted by no person)"}.`;
+  return `Signed in as ${who}; acting as you in ${w?.name || w?.tenant}.`;
 }
