@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.125 — 2026-11-10
+
+### Read big repo files in parts, search a connector's code, show changed lines before promote (#94, #95)
+
+`ateam_github_read` reads a big repo file in parts and a line too long for one answer in pieces; a connector's code can be searched; the changed lines are shown before a promote. Search answers stay whole.
+
 ## 0.4.124 — 2026-11-08
 
 ### Test persona tools (#90) and advisor v2 (#91)
