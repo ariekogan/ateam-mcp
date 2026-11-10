@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.126 — 2026-11-10
+
+### A personal sign-in acts as the signed-in person (D7, #96)
+
+A personal sign-in now acts as the person who signed in, using a separate person ticket (`apt_`) instead of the sign-in token; tests can say `as_me`.
+
 ## 0.4.125 — 2026-11-10
 
 ### Read big repo files in parts, search a connector's code, show changed lines before promote (#94, #95)
