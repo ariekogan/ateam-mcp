@@ -73,6 +73,7 @@ function devConnector({ approvedAs = "arie@x.com", workspaces = [{ tenant: "vc-a
     assert.equal(u.origin, DEV_URL, "a DEV token went somewhere other than A-Team's DEV connector");
     if (u.pathname === "/device_authorization") {
       st.deviceStarts++;
+      st.deviceApp = new URLSearchParams(init.body).get("app");
       return json(200, { device_code: "atd_secret_device_code", user_code: "ABCD-EFGH", verification_uri: "https://dev-app.example/device", verification_uri_complete: "https://dev-app.example/device?code=ABCD-EFGH", expires_in: 600, interval: 5 });
     }
     if (u.pathname === "/token") {
@@ -125,8 +126,8 @@ function devConnector({ approvedAs = "arie@x.com", workspaces = [{ tenant: "vc-a
 
 const req = (token, extra = {}) => ({ auth: { token, extra: { grant: "g1", env: "prod", email: "arie@x.com", ...extra } } });
 /** One request of the connection: production Core's resolve gives extra (link, remote) as the bearer gate would. */
-async function request(token, core, s) {
-  const extra = { lastTenant: core.g.lastTenant, remote: core.g.remote, link: { env: "dev", linked: !!core.g.devRefresh } };
+async function request(token, core, s, more = {}) {
+  const extra = { lastTenant: core.g.lastTenant, remote: core.g.remote, link: { env: "dev", linked: !!core.g.devRefresh }, ...more };
   await seedGrantSession(req(token, extra), s);
 }
 const switchTo = async (s, args) => parse(await handleToolCall("ateam_switch_workspace", args, s));
@@ -344,5 +345,16 @@ test("only a production grant gets the link, and only to the address this server
   assert.equal(offerOf("g1"), null, "a dev grant was offered a link onwards");
   await seedGrantSession(req("atg_d1", { link: { env: "dev", linked: false, mcp_url: "https://evil.example" } }), s);
   assert.equal(offerOf("g1").mcp_url, DEV_URL, "an address from outside was used");
+  clearSession(s);
+});
+
+test("the DEV link carries the app the person signed in through, so DEV's spend names it", async () => {
+  const core = prodCore();
+  const dev = devConnector();
+  const s = sid();
+  await request("atg_p1", core, s, { via: "claude" });
+  const asked = await switchTo(s, { tenant: "vc-ai", environment: "dev" });
+  assert.equal(asked.code, "APPROVE_DEV", JSON.stringify(asked));
+  assert.equal(dev.deviceApp, "claude");
   clearSession(s);
 });
