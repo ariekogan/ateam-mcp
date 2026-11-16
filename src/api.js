@@ -710,6 +710,8 @@ export function signInContext(sessionId, { transport = callTransport() } = {}) {
     tenant: record?.tenant || null,
     environment: signedIn ? sessionEnvironment(sessionId) : null,
     masterMode: !!record?.masterKey,
+    // The A-Team app of this session's environment (shownAppUrl: production or self-hosted only, else null).
+    appUrl: signedIn ? shownAppUrl(getBaseUrl(sessionId)) : null,
     // The grant's workspace may have moved since this call started (another chat switched): name it only
     // when it is still the workspace this call's record is on.
     workspaceName: audience === "grant" && signedIn ? grantWorkspaceName(sessionGrants.get(sessionId).gid, record?.tenant) : null,
