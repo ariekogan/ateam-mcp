@@ -340,3 +340,9 @@ test("(control) a dev key still reaches the dev API — routing unchanged", asyn
   assert.equal(boot.served_by, "dev");
   assert.equal(boot.runtime.base_url, api.shownBase?.(KEY_ENVIRONMENTS.dev), "the routing moved, or the host is served");
 });
+
+test("envForBaseUrl: case and default port do not hide a non-production environment", async () => {
+  const { envForBaseUrl } = await import("../src/api.js");
+  assert.equal(envForBaseUrl("https://DEV-API.ATEAM-AI.COM"), "dev");
+  assert.equal(envForBaseUrl("https://dev-api.ateam-ai.com:443/"), "dev");
+});

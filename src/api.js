@@ -336,7 +336,9 @@ export function baseUrlForKeyEnv(key) {
  */
 export function envForBaseUrl(url, environments = KEY_ENVIRONMENTS) {
   if (!url) return null;
-  const norm = String(url).replace(/\/+$/, "");
+  let norm = String(url).replace(/\/+$/, "");
+  // Same address, other spelling (case, default port): still the same environment.
+  try { const u = new URL(norm); if (!u.search && !u.hash) norm = `${u.protocol}//${u.host}${u.pathname === "/" ? "" : u.pathname.replace(/\/+$/, "")}`; } catch { /* not a URL: compared as given */ }
   for (const [env, base] of Object.entries(environments)) {
     if (norm === base) return env;
   }
