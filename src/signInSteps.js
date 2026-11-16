@@ -193,6 +193,12 @@ export function notInThisWorkspace(ctx = {}) {
  * @param {{ audience?: string, signedIn: boolean, tenant?: string|null, environment?: string|null, masterMode?: boolean }} ctx
  */
 export function sessionOpening(ctx) {
+  const text = openingText(ctx);
+  // Where the user sees and manages this workspace; absent for an environment whose app is never named.
+  return ctx.signedIn && ctx.appUrl ? `${text}\n\nThe A-Team app, where the user manages this workspace: ${ctx.appUrl}` : text;
+}
+
+function openingText(ctx) {
   const { signedIn, tenant = null, environment = null, masterMode = false } = ctx;
   if (ctx.audience === "grant") {
     return [

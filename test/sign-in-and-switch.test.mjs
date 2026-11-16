@@ -89,7 +89,8 @@ test("bootstrap, hosted, signed in: it opens with the workspace and the environm
   const boot = await bootstrap("sess-sw-in");
   assert.equal(Object.keys(boot)[0], "session", `bootstrap opens with ${Object.keys(boot)[0]}, not where the session is`);
   assert.ok(boot.session?.startsWith('You are signed in to workspace "acme" (prod).'), `opening: ${boot.session}`);
-  assert.equal(boot.session, render("sessionOpening", HOSTED_PROD));
+  assert.equal(boot.session, render("sessionOpening", { ...HOSTED_PROD, appUrl: "https://app.ateam-ai.com" }));
+  assert.ok(boot.session.endsWith("The A-Team app, where the user manages this workspace: https://app.ateam-ai.com"), "no app link");
   assert.ok(boot.session.includes(render("switchSteps", HOSTED_PROD)), "the opening does not carry the switch steps verbatim");
   assert.ok(boot.session.includes(shared("NO_KEY_IN_CHAT")));
   assert.doesNotMatch(boot.session, /signed in as /, "it names a person, which the session is not told");
@@ -338,4 +339,10 @@ test("(control) a dev key still reaches the dev API — routing unchanged", asyn
   const boot = await bootstrap("sess-sw-dev");
   assert.equal(boot.served_by, "dev");
   assert.equal(boot.runtime.base_url, api.shownBase?.(KEY_ENVIRONMENTS.dev), "the routing moved, or the host is served");
+});
+
+test("envForBaseUrl: case and default port do not hide a non-production environment", async () => {
+  const { envForBaseUrl } = await import("../src/api.js");
+  assert.equal(envForBaseUrl("https://DEV-API.ATEAM-AI.COM"), "dev");
+  assert.equal(envForBaseUrl("https://dev-api.ateam-ai.com:443/"), "dev");
 });
