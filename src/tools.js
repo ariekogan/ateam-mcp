@@ -3731,7 +3731,8 @@ export const tools = [
       "SHIP DEV TO PROD. Moves `main` forward to the exact version tried on `dev` (no merge commit) and auto-tags the new main HEAD as prod-YYYY-MM-DD-NNN. " +
       "Use after testing your dev work, when you're ready to deploy changes to production.\n\n" +
       "Workflow: 1) ateam_github_patch (writes to dev) → 2) ateam_github_promote (moves main to the tested dev version) → 3) ateam_build_and_run (deploys main).\n\n" +
-      "Pass dry_run:true to see what's about to ship without merging.\n\nmain only ever moves to a commit dev already has, so a promote does not conflict. An older repo where main holds a commit dev never received is brought level by the platform on the next build, not by you: do not open a PR.",
+      "Pass dry_run:true to see what's about to ship without merging.\n\n" +
+      "The solution's version moves by itself: promoting the running work makes it X.(P+1).0, and each later deploy of work not yet promoted adds one (X.P.D). Never edit the version in solution.json.\n\nmain only ever moves to a commit dev already has, so a promote does not conflict. An older repo where main holds a commit dev never received is brought level by the platform on the next build, not by you: do not open a PR.",
     inputSchema: {
       type: "object",
       properties: {
