@@ -31,12 +31,19 @@ const ACTOR_MINTING_TOOLS = new Set([
   "ateam_test_voice",
 ]);
 
+// The tools whose answer carries the solution's deployed version (each moved it, or shows what runs after it). Their
+// answer gets the soft hints of versionHint.js: recommend a promote, offer the next major. Nothing is blocked.
+const VERSION_HINT_TOOLS = new Set([
+  "ateam_build_and_run", "ateam_redeploy", "ateam_patch", "ateam_upload_connector", "ateam_github_pull",
+  "ateam_delete_skill", "ateam_delete_connector", "ateam_github_promote",
+]);
+
 const STAMP_WHERE_TOOLS = new Set([
   "ateam_build_and_run", "ateam_patch", "ateam_upload_connector", "ateam_redeploy",
   "ateam_create_skill", "ateam_create_connector", "ateam_create_plugin",
   "ateam_delete_skill", "ateam_delete_connector", "ateam_delete_solution",
   "ateam_github_patch", "ateam_github_write", "ateam_github_push",
-  "ateam_github_promote", "ateam_github_rollback",
+  "ateam_github_promote", "ateam_github_rollback", "ateam_switch_major_version",
   "ateam_test_skill", "ateam_test_pipeline", "ateam_test_connector", "ateam_test_notification",
   "ateam_verify_surface",
   "ateam_workspace_save", "ateam_workspace_close",
@@ -140,6 +147,7 @@ import { renderAgentDocHeader, mergeAgentDoc, AGENT_DOC_SENTINEL } from "./agent
 import { BRANCH_WORKFLOW } from './branchWorkflow.js';
 import { EXAMPLE_PATHS, EXAMPLE_TYPES } from './exampleTypes.js';
 import { deriveErrorCode, isLogicalFailure } from "./mcpFailure.js";
+import { deployedVersionOf, versionHint } from "./versionHint.js";
 import { ATTACHMENTS_INPUT_SCHEMA, prepareTestAttachments } from "./testAttachments.js";
 // Who a test job runs as: ONE pointer to the Builder's /spec, never a copy of its words.
 import { TEST_RUNS_AS_AT } from "./testRunsAs.js";
@@ -3818,6 +3826,32 @@ export const tools = [
       required: ["solution_id"],
     },
   },
+  {
+    name: "ateam_switch_major_version",
+    core: true,
+    description:
+      "SWITCH THE SOLUTION TO ITS NEXT MAJOR VERSION (X+1.0.0) — only when the user said yes.\n\n" +
+      "The solution's version is X.Y.Z of what runs: every deploy adds one to Z, every promote makes it X.(Y+1).0, and X moves ONLY here. " +
+      "Never call it on your own. Ask first, in these words: \"Current solution version is 1.9.57. Do you want to switch it to 2.0.0?\" " +
+      "A deploy's `version_hint.major` tells you when to ask (ten promotes since the last major); the user may also ask for it any time.\n\n" +
+      "Pass `to` = the number you showed them: a repeat then changes nothing, and a number the switch would not give is refused. " +
+      "Afterwards what runs is 2.0.0, the next deploy 2.0.1 and the next promote 2.1.0; cluster members follow. " +
+      "Nothing is redeployed. The same switch is a button in Tenant Admin › Promoted Versions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        solution_id: {
+          type: "string",
+          description: "The solution ID",
+        },
+        to: {
+          type: "string",
+          description: "The next major you offered the user, like \"2.0.0\" (the current X plus one, .0.0).",
+        },
+      },
+      required: ["solution_id", "to"],
+    },
+  },
 
   // ═══════════════════════════════════════════════════════════════════
   // INFRASTRUCTURE — redeploy, master key bulk operations
@@ -4082,6 +4116,8 @@ export const TOOL_SAFETY = Object.freeze({
     "ateam_recover_connector_source", "ateam_write_agent_doc",
     "ateam_github_push", "ateam_github_pull", "ateam_github_patch", "ateam_github_write",
     "ateam_github_promote", "ateam_github_sync_from_main", "ateam_github_rollback",
+    // Renumbers what runs to the next major; it cannot be taken back.
+    "ateam_switch_major_version",
     "ateam_sync_all", "ateam_test_abort",
     // A test persona's roles replaced, or the persona removed.
     "ateam_update_test_persona", "ateam_delete_test_persona",
@@ -4163,6 +4199,8 @@ export const AGENT_EXPOSURE = Object.freeze({
     "ateam_diff", "ateam_verify_consistency", "ateam_verify", "ateam_verify_surface",
     // Deploy (an exact commit or the Builder's current files) and tests.
     "ateam_build_and_run", "ateam_redeploy", "ateam_update",
+    // The next major version, on the user's yes: no source changes.
+    "ateam_switch_major_version",
     "ateam_deploy_solution", "ateam_deploy_skill", "ateam_deploy_connector",
     "ateam_test_skill", "ateam_test_notification", "ateam_conversation", "ateam_test_pipeline",
     "ateam_test_voice", "ateam_test_connector", "ateam_test_abort", "ateam_solution_chat",
@@ -5727,6 +5765,8 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
     // The Builder's deploy record for THIS deploy: { recorded: true, commit, result, deployed_by, at } or
     // { recorded: false, reason }. Relayed as the door said it; a missing one is not made up.
     ...(deploy.running_record && { running_record: deploy.running_record }),
+    // The solution's version after this deploy (Core numbers it; X.Y.Z, each deploy adds one to Z).
+    ...(deploy.version && { version: deploy.version }),
     ...(branches.pushed_to_branch && { pushed_to_branch: branches.pushed_to_branch }),
     phases,
     deploy: {
@@ -8669,6 +8709,10 @@ export const handlers = {
   ateam_github_list_versions: async ({ solution_id }, sid) =>
     get(apiPath`/deploy/solutions/${solution_id}/versions/dev`, sid),
 
+  // X of X.Y.Z moves only on the user's yes (Core utils/solutionVersion.js, the "major" event).
+  ateam_switch_major_version: async ({ solution_id, to }, sid) =>
+    post(apiPath`/deploy/solutions/${solution_id}/version/major`, { to }, sid),
+
   // SHOW BEFORE YOU DESTROY.
   //
   // Without force:true this RETURNS THE INVENTORY — every skill and connector
@@ -9200,6 +9244,8 @@ export const handlers = {
       // push that failed). It is the way out an UNPUSHED_BUILDER_CHANGE
       // refusal names, so the caller must see when it did not work.
       ...(result.not_written_to_github?.length > 0 && { not_written_to_github: result.not_written_to_github }),
+      // The solution's version after this redeploy (Core numbers it; X.Y.Z, each deploy adds one to Z).
+      ...(result.version && { version: result.version }),
       // Surface the underlying error when the request failed — the most
       // common cause is a validator failure (e.g. broken connector source
       // in the GitHub repo), and hiding it makes diagnosis impossible.
@@ -9987,6 +10033,13 @@ export async function handleToolCall(name, args, sessionId) {
     // is knowledge only the tools that START a job possess.
     if (result && typeof result === "object" && result.actor_id && ACTOR_MINTING_TOOLS.has(name)) {
       touchSession(sessionId, { actorId: result.actor_id });
+    }
+
+    // The solution version's soft hints (versionHint.js, Arie 2026-11-22): a promote after ten deploys, the next major
+    // after ten promotes. Only words for the agent to pass on; never part of the verdict.
+    if (VERSION_HINT_TOOLS.has(name) && result && typeof result === "object" && !Array.isArray(result)) {
+      const hint = versionHint(deployedVersionOf(result), args?.solution_id);
+      if (hint) result.version_hint = hint;
     }
 
     // Stamp WHERE this landed (tenant + app URL) on mutating-tool results, so

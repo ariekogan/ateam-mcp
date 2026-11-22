@@ -296,3 +296,9 @@ test("a deploy that names no run sends none (an older Builder)", async () => {
   assert.ok(uploads.length > 0, "no connector upload ran");
   assert.ok(uploads.every((u) => !("deploy_run" in u.body)));
 });
+
+test("the deploy's version comes back on build_and_run's answer (the version hints read it there)", async () => {
+  const version = { moved: true, version: "1.7.10", previous: "1.7.9", changed: true };
+  const { result } = await run({}, { door: (b) => ({ ok: true, deployed_commit: b.ref, version, import: { skills: [], connectors: 1 } }) });
+  assert.deepEqual(result.version, version);
+});
