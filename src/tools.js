@@ -5560,9 +5560,15 @@ async function runBuildAndRun({ solution_id: solIdArg, solution: solutionArg, sk
         // a file already running in Core that the commit lacks is not removed by
         // this upload. No branch is written for a SHA (a rebuilt bundle stays in
         // Core only).
+        // deploy_run: the deploy above, which this upload completes. The solution's deployed version counts that run
+        // once (Core utils/solutionVersion.js), so this upload does not add a second step to it.
         const uploadResult = await post(
           apiPath`/deploy/solutions/${solutionId}/connectors/${connId}/upload`,
-          { files, ...(pulledMcpStore && { ref: deployedRef ? deployedRef.commit : BRANCH_WORKFLOW.deploy_branch }) },
+          {
+            files,
+            ...(pulledMcpStore && { ref: deployedRef ? deployedRef.commit : BRANCH_WORKFLOW.deploy_branch }),
+            ...(typeof deploy?.deploy_run === "string" && { deploy_run: deploy.deploy_run }),
+          },
           sid,
           { timeoutMs: 120_000 },
         );
