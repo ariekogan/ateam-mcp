@@ -271,3 +271,28 @@ test("WITHOUT ref the doc is written, as it always was", async () => {
   });
   assert.equal(writes.length, 1);
 });
+
+// Arie 11-22: every deploy moves the solution's Z (X.P.D), and a connector upload counts as one too. build_and_run's
+// uploads complete ITS deploy, so they carry the deploy's run name: Core counts that run once, deploy and uploads alike.
+test("the connector uploads carry the deploy's run, so the deploy and its uploads count as one step", async () => {
+  const RUN = "b6c1f0e2-0d3a-4c55-9e0f-1a2b3c4d5e6f";
+  const { seen } = await run({}, { door: (b) => ({ ok: true, deployed_commit: b.ref, deploy_run: RUN, import: { skills: [], connectors: 1 } }) });
+  const uploads = seen.filter((r) => r.url.includes("/upload"));
+  assert.ok(uploads.length > 0, "no connector upload ran");
+  assert.ok(uploads.every((u) => u.body.deploy_run === RUN), JSON.stringify(uploads.map((u) => u.body.deploy_run)));
+});
+
+test("an async deploy's run reaches the uploads too", async () => {
+  const RUN = "c7d2e1f3-0d3a-4c55-9e0f-1a2b3c4d5e6f";
+  const { seen } = await run({}, { syncDeploy: "gateway-timeout", door: (b) => ({ ok: true, deployed_commit: b.ref, deploy_run: RUN, import: { skills: [], connectors: 1 } }) });
+  const uploads = seen.filter((r) => r.url.includes("/upload"));
+  assert.ok(uploads.length > 0, "no connector upload ran");
+  assert.ok(uploads.every((u) => u.body.deploy_run === RUN), JSON.stringify(uploads.map((u) => u.body.deploy_run)));
+});
+
+test("a deploy that names no run sends none (an older Builder)", async () => {
+  const { seen } = await run({});
+  const uploads = seen.filter((r) => r.url.includes("/upload"));
+  assert.ok(uploads.length > 0, "no connector upload ran");
+  assert.ok(uploads.every((u) => !("deploy_run" in u.body)));
+});
