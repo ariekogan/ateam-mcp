@@ -25,15 +25,16 @@ export function deployedVersionOf(result) {
 }
 
 /**
- * What to tell or ask the developer for this version, or null when there is nothing to say.
+ * What to tell or ask the developer for this version, or null when there is nothing to say. `promoting`: the answer of a
+ * promote, which never recommends the promote it just made (a promote whose commit is not yet what runs moves nothing).
  * → { version, promote?: string, major?: { ask: string, to: string, how: string } }
  */
-export function versionHint(version, solutionId) {
+export function versionHint(version, solutionId, { promoting = false } = {}) {
   const m = typeof version === "string" ? /^(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
   if (!m) return null;
   const [x, y, z] = [Number(m[1]), Number(m[2]), Number(m[3])];
   const hint = { version };
-  if (z >= PROMOTE_HINT_AT_DEPLOYS) {
+  if (z >= PROMOTE_HINT_AT_DEPLOYS && !promoting) {
     hint.promote = `Tell the user: "Current version is ${version}, I recommend promoting dev to prod." (ateam_github_promote). Only a recommendation: nothing is blocked, and once in this conversation is enough.`;
   }
   if (y >= MAJOR_HINT_AT_PROMOTES) {

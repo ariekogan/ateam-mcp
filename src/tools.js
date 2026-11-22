@@ -10038,7 +10038,7 @@ export async function handleToolCall(name, args, sessionId) {
     // The solution version's soft hints (versionHint.js, Arie 2026-11-22): a promote after ten deploys, the next major
     // after ten promotes. Only words for the agent to pass on; never part of the verdict.
     if (VERSION_HINT_TOOLS.has(name) && result && typeof result === "object" && !Array.isArray(result)) {
-      const hint = versionHint(deployedVersionOf(result), args?.solution_id);
+      const hint = versionHint(deployedVersionOf(result), args?.solution_id, { promoting: name === "ateam_github_promote" });
       if (hint) result.version_hint = hint;
     }
 
