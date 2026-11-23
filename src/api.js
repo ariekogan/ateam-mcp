@@ -317,10 +317,25 @@ export async function whoami(apiKey, baseUrl, { timeoutMs = 10_000 } = {}) {
   return { tenant: json.tenant, env: json.env ?? null };
 }
 
-/** The API base a key's environment names, or null when it names none. */
-export function baseUrlForKeyEnv(key) {
+/**
+ * The API base a key's environment names, or null when it names none.
+ *
+ * ON A SELF-HOSTED BOX EVERY KEY IS THAT BOX'S OWN. A box is named by DOMAIN
+ * (hostEnvironments), and its Core mints `adas_prod_…` keys like any other
+ * Core. Read as the hosted environment "prod", such a key was sent to
+ * api.ateam-ai.com: the box's own agents could not sign in at the box's own
+ * MCP address, and the box's keys left the box (self-host check, 2026-11-23).
+ * A box serves one deployment, itself, and never calls ours: there a key that
+ * names an environment goes to the box's own API (`ownApi`: ADAS_API_URL, the
+ * process default every unlabelled key already uses). A hosted key presented
+ * to a box is therefore refused BY THE BOX, never forwarded.
+ *
+ * `domain` and `ownApi` are parameters only so the rule is testable as itself.
+ */
+export function baseUrlForKeyEnv(key, domain = process.env.DOMAIN, ownApi = BASE_URL) {
   const { env } = parseApiKey(key);
-  return env ? KEY_ENVIRONMENTS[env] : null;
+  if (!env) return null;
+  return isSelfHostedBox(domain) ? ownApi : KEY_ENVIRONMENTS[env];
 }
 
 /**
@@ -385,6 +400,14 @@ export function hostEnvironments(domain = process.env.DOMAIN) {
   if (envForBaseUrl(api)) return KEY_ENVIRONMENTS;
   return Object.freeze({ ...KEY_ENVIRONMENTS, [SELF_HOSTED]: api });
 }
+
+/** Is this server a self-hosted box's own (DOMAIN names a deployment that is none of ours)? */
+export function isSelfHostedBox(domain = process.env.DOMAIN) {
+  // Asked on every request that carries a key: one answer (and one log line for a malformed DOMAIN) per value.
+  if (!selfHostedAnswers.has(domain)) selfHostedAnswers.set(domain, Object.hasOwn(hostEnvironments(domain), SELF_HOSTED));
+  return selfHostedAnswers.get(domain);
+}
+const selfHostedAnswers = new Map();
 
 /**
  * EACH ENVIRONMENT'S HOSTED MCP, AND WHICH ONE A REQUEST ADDRESSED.
