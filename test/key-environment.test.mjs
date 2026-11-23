@@ -290,3 +290,29 @@ describe("sealed keys: the tenant is asked for, never guessed", () => {
     assert.equal(parseApiKey(SEALED_KEY.replace("adas_dev_", "adas_prd_")).isValid, false);
   });
 });
+
+// A SELF-HOSTED BOX KEEPS ITS KEYS. Its Core mints adas_prod_… keys, and its
+// MCP (DOMAIN set) used to send them to the hosted production API: nothing an
+// outside agent did at the box's own MCP address reached the box, and the
+// box's keys left it (self-host check, 2026-11-23).
+describe("a self-hosted box routes every key to itself", () => {
+  const BOX = "http://skill-builder-backend:3200";
+
+  test("a key that names an environment goes to the box's own API", () => {
+    assert.equal(baseUrlForKeyEnv(PROD_KEY, "box.example.com", BOX), BOX);
+    assert.equal(baseUrlForKeyEnv(DEV_KEY, "box.example.com", BOX), BOX);
+    assert.equal(baseUrlForKeyEnv(SEALED_KEY, "box.example.com", BOX), BOX);
+  });
+
+  test("a key that names no environment still names none", () => {
+    assert.equal(baseUrlForKeyEnv(OLD_KEY, "box.example.com", BOX), null);
+    assert.equal(baseUrlForKeyEnv("not-a-key", "box.example.com", BOX), null);
+  });
+
+  test("no DOMAIN, an empty one, a malformed one, or ours: hosted routing is unchanged", () => {
+    for (const domain of [undefined, "", "not a hostname", "ateam-ai.com"]) {
+      assert.equal(baseUrlForKeyEnv(PROD_KEY, domain, BOX), PROD);
+      assert.equal(baseUrlForKeyEnv(DEV_KEY, domain, BOX), DEV);
+    }
+  });
+});
