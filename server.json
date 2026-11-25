@@ -5,10 +5,10 @@
   "websiteUrl": "https://ateam-ai.com",
   "icons": [
     {
-      "src": "https://raw.githubusercontent.com/ariekogan/ateam-mcp/main/assets/icon.svg",
-      "mimeType": "image/svg+xml",
+      "src": "https://raw.githubusercontent.com/ariekogan/ateam-mcp/main/assets/icon.png",
+      "mimeType": "image/png",
       "sizes": [
-        "any"
+        "256x256"
       ]
     }
   ],
@@ -17,12 +17,12 @@
     "url": "https://github.com/ariekogan/ateam-mcp",
     "source": "github"
   },
-  "version": "0.4.131",
+  "version": "0.4.132",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@ateam-ai/mcp",
-      "version": "0.4.131",
+      "version": "0.4.132",
       "transport": {
         "type": "stdio"
       }
