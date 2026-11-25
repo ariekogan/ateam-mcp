@@ -6,6 +6,10 @@ on:
     workflows: ["Publish to npm"]
     types: [completed]
     branches: [main]
+  # A server.json change (icon, title, new version) re-publishes the listing.
+  push:
+    branches: [main]
+    paths: ['server.json']
   workflow_dispatch:
 
 # GitHub OIDC login: no token stored anywhere.
@@ -15,7 +19,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,4 +29,10 @@ jobs:
       - name: Login (GitHub OIDC)
         run: ./mcp-publisher login github-oidc
       - name: Publish
-        run: ./mcp-publisher publish
+        # npm can take minutes to show a new release: retry for ~10 min.
+        run: |
+          for i in $(seq 1 20); do
+            ./mcp-publisher publish && exit 0
+            echo "attempt $i failed, retrying in 30s"; sleep 30
+          done
+          exit 1
